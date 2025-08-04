@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch Go MH Installer",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}", // Указываеv на корень проекта
+            "console": "integratedTerminal", // Вывод будет в терминале VSCode
+            "args": [
+                // Сюда можно передать аргументы. Например:
+                // "-config=http://example.com/config.json"
+            ]
+        }
+    ]
+}

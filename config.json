@@ -1,0 +1,86 @@
+{
+  "root_path": "C:\\MH",
+  "assets_cache_path": "C:\\MH\\_assets",
+  "ftp_config": {
+    "host": "ftp.serty.top:21",
+    "user": "ftpuser",
+    "pass": "11"
+  },
+  "modules": [
+    { "id": "iiko" },
+    { "id": "RemoteAccess" },
+    { "id": "VComCaster" },
+    { "id": "FRPC" },
+    { "id": "Regime" }
+  ],
+  "frpc_config": {
+      "install_path": "C:\\MH\\FRPC",
+      "service_name": "FRPC",
+      "port_range": "50500-50600",
+      "frpc_download_url": "https://github.com/fatedier/frp/releases/download/v0.63.0/frp_0.63.0_windows_amd64.zip",
+      "nssm_download_url": "https://f.serty.top/distr/installer/assets/nssm-2.24.zip",
+      "server_config": {
+        "host": "frps.serty.top",
+        "api_port": 443,
+        "tunnel_port": 50005,
+        "user": "admin",
+        "pass": "strongpass"
+      }
+    },
+  "iiko_config": {
+    "base_ftp_path": "/distr/iiko",
+    "patch_route_file": "/front_patches/patcher_route.txt",
+    "components_to_find": [
+      {
+        "id": "Front",
+        "menu_text": "Front",
+        "file_name": "Setup.Front.exe",
+        "install_args": "/install /passive",
+        "run_after": "C:\\Program Files\\iiko\\iikoRMS\\Front.Net\\iikoFront.Net.exe"
+      },
+      {
+        "id": "ChainBack",
+        "menu_text": "Chain BackOffice",
+        "file_name": "Setup.Chain.BackOffice.exe",
+        "install_args": "/install /passive",
+        "run_after": "C:\\Program Files\\iiko\\iikoChain\\Office\\BackOffice.exe"
+      },
+      {
+        "id": "RMSBack",
+        "menu_text": "RMS BackOffice",
+        "file_name": "Setup.RMS.BackOffice.exe",
+        "install_args": "/install /passive",
+        "run_after": "C:\\Program Files\\iiko\\iikoRMS\\Office\\BackOffice.exe"
+      }
+    ],
+    "card_pos": {
+      "id": "iikoCard",
+      "menu_text": "iikoCard 5 POS",
+      "file_name": "Setup.iikoCard5.POS.exe",
+      "install_args": "/install /passive",
+      "run_after": "",
+      "target_subdir": "iikoCardPOS"
+    }
+  },
+  "TeamViewerConfig": {
+    "ShortURL": "http://get.teamviewer.com/myhoreca",
+    "ApiURL": "https://get.teamviewer.com/api/CustomDesign"
+  },
+  "asset_catalog": {
+    "LiteManager_Installer": { 
+      "url": "https://f.serty.top/distr/REMOTES/LM_server_MH1.msi",
+      "type": "file",
+      "destination": "installers/litemanager",
+      "download_method": "HTTP"
+    },
+    "Getad_Agent": {
+      "url": "https://f.serty.top/temp/Getad2.zip",
+      "type": "zip",
+      "destination": "getad",
+      "download_method": "HTTP"
+    },
+    "VComCaster_Package": { "url": "https://f.serty.top/distr/installer/assets/vcomcaster_1.1.zip", "type": "zip", "destination": "vcomcaster" },
+    "Com0Com_Installer": { "url": "https://f.serty.top/distr/installer/assets/com0com_Setup_v3_x64.exe", "type": "file", "destination": "vcomcaster" },
+    "Regime_Installer": { "url": "https://f.serty.top/regime-1.4.1-445.msi", "type": "file", "destination": "installers/regime", "download_method": "HTTP" } 
+  }
+}
