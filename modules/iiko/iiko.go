@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bufio"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"goMH/tui"
 	"io"
 	"os"
 	"os/exec"
@@ -20,6 +22,8 @@ import (
 
 // DiscoveredVersions хранит найденные на FTP версии и их компоненты
 type DiscoveredVersions map[string][]config.IikoComponent
+
+var errUserChoseExit = errors.New("пользователь выбрал выход в главное меню")
 
 type IikoPatch struct {
 	Path        string
@@ -53,7 +57,12 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// 2. Показываем меню выбора дистрибутива
 	selectedComponent, err := m.showDistroMenu(discovered)
 	if err != nil {
-		return err // Пользователь вышел
+		if errors.Is(err, errUserChoseExit) {
+			// Если пользователь выбрал "00", это не ошибка, просто выходим в главное меню
+			tui.Info("Возврат в главное меню.")
+			return nil
+		}
+		return err // Другая ошибка
 	}
 
 	distroName := "iiko " + selectedComponent.Version + " " + selectedComponent.MenuText
@@ -180,31 +189,42 @@ func (m *Module) showDistroMenu(versions DiscoveredVersions) (config.IikoCompone
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(versionsSorted))) // Сначала новые версии
 
-	fmt.Println("\nВыберите дистрибутив для установки:")
-	// Добавляем iikoCard как опцию 0
-	cardPosOption := m.Cfg.CardPOS
-	cardPosOption.ID = "iikoCard"
-	cardPosOption.Version = "Card"
-	cardPosOption.FTPPath = m.Cfg.BaseFTPPath + "/" + cardPosOption.FileName
-	menuOptions = append(menuOptions, cardPosOption)
-	fmt.Printf(" 0) %s\n", cardPosOption.MenuText)
-
-	// Добавляем найденные версии
-	for _, version := range versionsSorted {
-		fmt.Printf("--- Версия iiko %s ---\n", version)
-		for _, comp := range versions[version] {
-			menuOptions = append(menuOptions, comp)
-			fmt.Printf(" %d) %s %s\n", len(menuOptions)-1, version, comp.MenuText)
-		}
-	}
-
 	for {
+		tui.Title("\n--- Выберите дистрибутив iiko для установки ---")
+		menuOptions = nil
+
+		// Опция 0 - iikoCard
+		cardPosOption := m.Cfg.CardPOS
+		cardPosOption.ID = "iikoCard"
+		cardPosOption.Version = "Card"
+		cardPosOption.FTPPath = m.Cfg.BaseFTPPath + "/" + cardPosOption.FileName
+		menuOptions = append(menuOptions, cardPosOption)
+		fmt.Printf(" %d. %s\n", 0, cardPosOption.MenuText)
+
+		// Остальные опции
+		for _, version := range versionsSorted {
+			fmt.Printf("--- Версия iiko %s ---\n", version)
+			for _, comp := range versions[version] {
+				menuOptions = append(menuOptions, comp)
+				fmt.Printf(" %d. %s %s\n", len(menuOptions)-1, version, comp.MenuText)
+			}
+		}
+
+		fmt.Println("\n 00. Назад в главное меню")
 		fmt.Print("Введите номер пункта: ")
+
 		choiceStr, _ := reader.ReadString('\n')
-		choice, err := strconv.Atoi(strings.TrimSpace(choiceStr))
+		choiceStr = strings.TrimSpace(choiceStr)
+
+		if choiceStr == "00" {
+			return config.IikoComponent{}, errUserChoseExit
+		}
+
+		choice, err := strconv.Atoi(choiceStr)
 		if err != nil || choice < 0 || choice >= len(menuOptions) {
-			fmt.Println("Некорректный выбор. Попробуйте снова.")
-			continue
+			tui.Error("Некорректный выбор. Попробуйте снова. 2 секунды...")
+			time.Sleep(2 * time.Second)
+			continue // Показываем меню заново
 		}
 		return menuOptions[choice], nil
 	}
