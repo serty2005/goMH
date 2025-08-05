@@ -5,8 +5,8 @@ import (
 	"bufio"
 	"encoding/csv"
 	"fmt"
-	"goMH/assetmgr"
 	"goMH/config"
+	"goMH/core"
 	"io"
 	"os"
 	"os/exec"
@@ -16,8 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/jlaffaye/ftp"
 )
 
 // DiscoveredVersions хранит найденные на FTP версии и их компоненты
@@ -34,19 +32,17 @@ type IikoPatch struct {
 
 type Module struct {
 	Cfg *config.IikoConfig
-	Am  *assetmgr.Manager
 }
 
 func (m *Module) ID() string       { return "iiko" }
 func (m *Module) MenuText() string { return "iiko (Front, Back, Card)" }
 
-func (m *Module) Run(am *assetmgr.Manager) error {
-	m.Am = am
+func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	m.Cfg = &am.Cfg().IikoConfig
 
 	// 1. Сканируем FTP на предмет доступных версий
 	fmt.Println("Сканирование FTP на наличие дистрибутивов iiko...")
-	discovered, err := m.discoverVersions()
+	discovered, err := m.discoverVersions(am)
 	if err != nil {
 		return fmt.Errorf("не удалось просканировать FTP: %w", err)
 	}
@@ -66,16 +62,16 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 	}
 	fmt.Printf("\n--- Начало установки %s ---\n", distroName)
 
-	targetDir := filepath.Join(m.Am.Cfg().RootPath, selectedComponent.Version)
+	targetDir := filepath.Join(am.Cfg().RootPath, selectedComponent.Version)
 	if selectedComponent.ID == "iikoCard" {
-		targetDir = filepath.Join(m.Am.Cfg().RootPath, "iikoCardPOS")
+		targetDir = filepath.Join(am.Cfg().RootPath, "iikoCardPOS")
 	}
 	_ = os.MkdirAll(targetDir, 0755)
 
 	installerPath := filepath.Join(targetDir, selectedComponent.FileName)
 
 	// 3. Скачиваем основной установщик
-	_, err = m.Am.DownloadFTPWithProgress(selectedComponent.FTPPath, installerPath)
+	_, err = am.DownloadFTPWithProgress(selectedComponent.FTPPath, installerPath)
 	if err != nil {
 		return fmt.Errorf("не удалось скачать установщик %s: %w", distroName, err)
 	}
@@ -83,14 +79,14 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 	// 4. Обрабатываем патчи (только для Front)
 	var patchesToInstall []IikoPatch
 	if selectedComponent.ID == "Front" {
-		patchesToInstall, err = m.handlePatches(selectedComponent.Version, targetDir)
+		patchesToInstall, err = m.handlePatches(am, selectedComponent.Version, targetDir)
 		if err != nil {
 			fmt.Printf("Предупреждение: не удалось обработать патчи: %v. Установка продолжится без них.\n", err)
 		}
 	}
 
 	// 5. Запускаем установщик
-	exitCode, err := m.runInstaller(installerPath, selectedComponent.InstallArgs)
+	exitCode, err := m.runInstaller(wu, installerPath, selectedComponent.InstallArgs, am.Cfg().RootPath)
 	if err != nil {
 		return err
 	}
@@ -102,14 +98,18 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 
 	// 6. Применяем патчи
 	if len(patchesToInstall) > 0 {
-		installDir := filepath.Dir(selectedComponent.RunAfter)
-		for _, patch := range patchesToInstall {
-			if patch.Downloaded {
-				fmt.Printf("\n--- Применение патча: %s ---\n", patch.Name)
-				if err := m.applyIikoPatch(installDir, patch.LocalPath, patch.Name); err != nil {
-					fmt.Printf("ОШИБКА при применении патча %s: %v\n", patch.Name, err)
+		if selectedComponent.RunAfter != "" {
+			installDir := filepath.Dir(selectedComponent.RunAfter)
+			for _, patch := range patchesToInstall {
+				if patch.Downloaded {
+					fmt.Printf("\n--- Применение патча: %s ---\n", patch.Name)
+					if err := m.applyIikoPatch(installDir, patch.LocalPath, patch.Name); err != nil {
+						fmt.Printf("ОШИБКА при применении патча %s: %v\n", patch.Name, err)
+					}
 				}
 			}
+		} else {
+			fmt.Printf("Предупреждение: не удалось применить патчи, так как не указана команда запуска после установки.\n")
 		}
 	}
 
@@ -126,17 +126,8 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 
 // --- Функции-помощники ---
 
-func (m *Module) discoverVersions() (DiscoveredVersions, error) {
-	c, err := ftp.Dial(m.Am.Cfg().FTP.Host, ftp.DialWithTimeout(10*time.Second))
-	if err != nil {
-		return nil, err
-	}
-	defer c.Quit()
-	if err := c.Login(m.Am.Cfg().FTP.User, m.Am.Cfg().FTP.Pass); err != nil {
-		return nil, err
-	}
-
-	entries, err := c.List(m.Cfg.BaseFTPPath)
+func (m *Module) discoverVersions(am core.AssetManager) (DiscoveredVersions, error) {
+	entries, err := am.ListFTP(m.Cfg.BaseFTPPath)
 	if err != nil {
 		return nil, err
 	}
@@ -145,14 +136,15 @@ func (m *Module) discoverVersions() (DiscoveredVersions, error) {
 	versionRegex := regexp.MustCompile(`^\d{3}$`)
 
 	for _, entry := range entries {
-		if entry.Type != ftp.EntryTypeFolder || !versionRegex.MatchString(entry.Name) {
+		// Проверяем, что это директория
+		if entry.Type != 1 || !versionRegex.MatchString(entry.Name) {
 			continue
 		}
 		version := entry.Name
 		versionPath := filepath.Join(m.Cfg.BaseFTPPath, version)
 		versionPath = strings.ReplaceAll(versionPath, "\\", "/") // FTP пути используют /
 
-		filesInVersion, err := c.List(versionPath)
+		filesInVersion, err := am.ListFTP(versionPath)
 		if err != nil {
 			continue
 		}
@@ -218,11 +210,11 @@ func (m *Module) showDistroMenu(versions DiscoveredVersions) (config.IikoCompone
 	}
 }
 
-func (m *Module) handlePatches(version, targetDir string) ([]IikoPatch, error) {
+func (m *Module) handlePatches(am core.AssetManager, version, targetDir string) ([]IikoPatch, error) {
 	routeFTPPath := m.Cfg.BaseFTPPath + m.Cfg.PatchRouteFile
 	tempRouteFile := filepath.Join(os.TempDir(), "patcher_route.txt")
 
-	_, err := m.Am.DownloadFTPWithProgress(routeFTPPath, tempRouteFile)
+	_, err := am.DownloadFTPWithProgress(routeFTPPath, tempRouteFile)
 	if err != nil {
 		return nil, fmt.Errorf("не удалось скачать файл с патчами: %w", err)
 	}
@@ -286,7 +278,7 @@ func (m *Module) handlePatches(version, targetDir string) ([]IikoPatch, error) {
 	for i := range selectedPatches {
 		patch := &selectedPatches[i] // Берем указатель, чтобы изменять поле Downloaded
 		ftpURL := m.Cfg.BaseFTPPath + patch.Path
-		_, err := m.Am.DownloadFTPWithProgress(ftpURL, patch.LocalPath)
+		_, err := am.DownloadFTPWithProgress(ftpURL, patch.LocalPath)
 		if err != nil {
 			fmt.Printf("ОШИБКА скачивания патча %s: %v\n", patch.Name, err)
 		} else {
@@ -297,7 +289,7 @@ func (m *Module) handlePatches(version, targetDir string) ([]IikoPatch, error) {
 	return selectedPatches, nil
 }
 
-func (m *Module) runInstaller(installerPath, args string) (int, error) {
+func (m *Module) runInstaller(wu core.WinUtils, installerPath, args, rootPath string) (int, error) {
 	// Создаем путь для временного лог-файла
 	logFileName := fmt.Sprintf("installer_log_%d.txt", time.Now().Unix())
 	tempLogPath := filepath.Join(os.TempDir(), logFileName)
@@ -309,11 +301,7 @@ func (m *Module) runInstaller(installerPath, args string) (int, error) {
 	fmt.Printf("\nЗапуск установщика: %s с аргументами %v\n", installerPath, finalArgs)
 	fmt.Println("... ИДЕТ УСТАНОВКА, ПОЖАЛУЙСТА, ОЖИДАЙТЕ ...")
 
-	cmd := exec.Command(installerPath, finalArgs...)
-	err := cmd.Run()
-
-	// --- НОВАЯ ЛОГИКА ОБРАБОТКИ ЛОГ-ФАЙЛА ---
-
+	_, err := wu.RunCommand(installerPath, finalArgs...)
 	var exitCode int
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -324,7 +312,6 @@ func (m *Module) runInstaller(installerPath, args string) (int, error) {
 			return -1, fmt.Errorf("не удалось запустить установщик: %w", err)
 		}
 	} else {
-		// Если cmd.Run() не вернул ошибку, значит exit code равен 0.
 		exitCode = 0
 	}
 
@@ -332,7 +319,7 @@ func (m *Module) runInstaller(installerPath, args string) (int, error) {
 	if _, statErr := os.Stat(tempLogPath); statErr == nil {
 		if exitCode != 0 {
 			// Установка завершилась с ошибкой, ПЕРЕМЕЩАЕМ лог
-			finalLogPath := filepath.Join(m.Am.Cfg().RootPath, logFileName)
+			finalLogPath := filepath.Join(rootPath, logFileName)
 			fmt.Printf("Установщик завершился с ошибкой. Сохраняем лог в: %s\n", finalLogPath)
 			if renameErr := os.Rename(tempLogPath, finalLogPath); renameErr != nil {
 				fmt.Printf("Предупреждение: не удалось переместить лог-файл: %v\n", renameErr)

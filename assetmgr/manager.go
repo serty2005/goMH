@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"fmt"
 	"goMH/config"
+	"goMH/core"
 	"io"
 	"net/http"
 	"net/url"
@@ -35,29 +36,24 @@ func (m *Manager) Cfg() *config.Config {
 	return m.cfg
 }
 
-// Get — это универсальный метод для получения любого ресурса из asset_catalog.
-// Он теперь тоже использует новый загрузчик с прогресс-баром.
-func (m *Manager) Get(assetName string) (string, error) {
+func (m *Manager) DownloadToCache(assetName string) (string, error) {
 	assetInfo, ok := m.cfg.AssetCatalog[assetName]
 	if !ok {
 		return "", fmt.Errorf("ресурс '%s' не найден в каталоге", assetName)
 	}
 
-	finalDestPath := filepath.Join(m.cfg.RootPath, assetInfo.Destination)
 	fileName := filepath.Base(assetInfo.URL)
 	localCachePath := filepath.Join(m.cfg.AssetsCachePath, fileName)
 
-	// Определяем метод загрузки
 	downloadMethod := strings.ToUpper(assetInfo.DownloadMethod)
 	if downloadMethod == "" {
-		downloadMethod = "HTTP" // HTTP по умолчанию
+		downloadMethod = "HTTP"
 	}
 
 	var err error
 	if downloadMethod == "HTTP" {
 		_, err = m.DownloadHTTPWithProgress(assetInfo.URL, localCachePath)
 	} else if downloadMethod == "FTP" {
-		// Для FTP нам нужен только путь, а не полный URL
 		parsedURL, _ := url.Parse(assetInfo.URL)
 		_, err = m.DownloadFTPWithProgress(parsedURL.Path, localCachePath)
 	} else {
@@ -65,30 +61,56 @@ func (m *Manager) Get(assetName string) (string, error) {
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("ошибка при загрузке ресурса '%s': %w", assetName, err)
+		return "", fmt.Errorf("ошибка при загрузке ресурса '%s' в кэш: %w", assetName, err)
 	}
 
-	// Обработка скачанного файла (распаковка или копирование)
-	fmt.Printf("Обработка ресурса '%s'...\n", assetName)
+	return localCachePath, nil
+}
+
+// ProcessFromCache обрабатывает файл из кэша (копирует/распаковывает) в его конечную директорию.
+func (m *Manager) ProcessFromCache(assetName, cachePath string) error {
+	assetInfo, ok := m.cfg.AssetCatalog[assetName]
+	if !ok {
+		return fmt.Errorf("ресурс '%s' не найден в каталоге", assetName)
+	}
+
+	finalDestPath := filepath.Join(m.cfg.RootPath, assetInfo.Destination)
+	fileName := filepath.Base(assetInfo.URL)
+
 	if err := os.MkdirAll(finalDestPath, 0755); err != nil {
-		return "", err
+		return fmt.Errorf("не удалось создать конечную директорию %s: %w", finalDestPath, err)
 	}
 
 	switch assetInfo.Type {
 	case "zip":
-		if err := unzip(localCachePath, finalDestPath); err != nil {
-			return "", fmt.Errorf("ошибка распаковки '%s': %w", fileName, err)
+		if err := unzip(cachePath, finalDestPath); err != nil {
+			return fmt.Errorf("ошибка распаковки '%s': %w", fileName, err)
 		}
 	case "file":
-		if err := copyFile(localCachePath, filepath.Join(finalDestPath, fileName)); err != nil {
-			return "", fmt.Errorf("ошибка копирования '%s': %w", fileName, err)
+		if err := copyFile(cachePath, filepath.Join(finalDestPath, fileName)); err != nil {
+			return fmt.Errorf("ошибка копирования '%s': %w", fileName, err)
 		}
 	default:
-		return "", fmt.Errorf("неизвестный тип ресурса: %s", assetInfo.Type)
+		return fmt.Errorf("неизвестный тип ресурса: %s", assetInfo.Type)
 	}
 
-	fmt.Printf("Ресурс '%s' успешно подготовлен в '%s'.\n", assetName, finalDestPath)
-	return finalDestPath, nil
+	fmt.Printf("Ресурс '%s' успешно обработан из кэша в '%s'.\n", assetName, finalDestPath)
+	return nil
+}
+
+// Метод Get теперь можно упростить, используя новые функции
+func (m *Manager) Get(assetName string) (string, error) {
+	cachePath, err := m.DownloadToCache(assetName)
+	if err != nil {
+		return "", err
+	}
+
+	if err := m.ProcessFromCache(assetName, cachePath); err != nil {
+		return "", err
+	}
+
+	assetInfo := m.cfg.AssetCatalog[assetName]
+	return filepath.Join(m.cfg.RootPath, assetInfo.Destination), nil
 }
 
 // DownloadFTPWithProgress скачивает файл по FTP с проверкой размера и прогресс-баром.
@@ -195,6 +217,33 @@ func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, err
 	return false, nil
 }
 
+func (m *Manager) ListFTP(path string) ([]core.FTPEntry, error) {
+	c, err := ftp.Dial(m.cfg.FTP.Host, ftp.DialWithTimeout(10*time.Second))
+	if err != nil {
+		return nil, err
+	}
+	defer c.Quit()
+
+	if err := c.Login(m.cfg.FTP.User, m.cfg.FTP.Pass); err != nil {
+		return nil, err
+	}
+
+	entries, err := c.List(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Конвертируем []*ftp.Entry в []core.FTPEntry
+	result := make([]core.FTPEntry, len(entries))
+	for i, e := range entries {
+		result[i] = core.FTPEntry{
+			Name: e.Name,
+			Type: uint(e.Type),
+		}
+	}
+	return result, nil
+}
+
 // --- Вспомогательные функции ---
 
 // createProgressBar создает и настраивает общий прогресс-бар для скачиваний.
@@ -278,7 +327,7 @@ func unzip(src, dest string) error {
 }
 
 // ExtractFile извлекает файл из zip-архива.
-func ExtractFile(zipPath, pathInZip, destPath string) error {
+func (m *Manager) ExtractFile(zipPath, pathInZip, destPath string) error {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err

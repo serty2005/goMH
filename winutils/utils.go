@@ -30,7 +30,22 @@ func RunCommand(name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// --- НОВАЯ ВЕРСИЯ ФУНКЦИИ, ИСПОЛЬЗУЮЩАЯ XML ---
+func RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+
+	// Собираем переменные окружения
+	newEnv := os.Environ() // Начинаем с существующих
+	for key, value := range env {
+		newEnv = append(newEnv, fmt.Sprintf("%s=%s", key, value))
+	}
+	cmd.Env = newEnv // Устанавливаем их для команды
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ошибка выполнения '%s %v' с кастомным env: %v, вывод: %s", name, args, err, string(output))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
 
 // CreateScheduledTask создает или обновляет задачу в Планировщике Windows через импорт XML.
 func CreateScheduledTask(taskName, executablePath, workingDir string) error {

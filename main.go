@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"goMH/assetmgr"
 	"goMH/config"
+	"goMH/core"
 	"goMH/modules/frpc"
 	"goMH/modules/iiko"
 	"goMH/modules/regime"
@@ -19,11 +20,34 @@ import (
 	"os"
 )
 
-// Общий интерфейс для всех модулей
-type Installer interface {
-	ID() string
-	MenuText() string
-	Run(am *assetmgr.Manager) error
+type RealWinUtils struct{}
+
+func (rw *RealWinUtils) RunCommand(name string, args ...string) (string, error) {
+	return winutils.RunCommand(name, args...)
+}
+func (rw *RealWinUtils) ServiceExists(serviceName string) (bool, error) {
+	return winutils.ServiceExists(serviceName)
+}
+func (rw *RealWinUtils) AddDefenderExclusion(path string) error {
+	return winutils.AddDefenderExclusion(path)
+}
+func (rw *RealWinUtils) SetServiceTriggers(serviceName string, triggers []string) error {
+	return winutils.SetServiceTriggers(serviceName, triggers)
+}
+func (rw *RealWinUtils) Is64BitOS() bool {
+	return winutils.Is64BitOS()
+}
+func (rw *RealWinUtils) GetComPorts() ([]string, error) {
+	return winutils.GetComPorts()
+}
+func (rw *RealWinUtils) IsProcessRunning(processName string) (bool, error) {
+	return winutils.IsProcessRunning(processName)
+}
+func (rw *RealWinUtils) CreateScheduledTask(taskName, executablePath, workingDir string) error {
+	return winutils.CreateScheduledTask(taskName, executablePath, workingDir)
+}
+func (rw *RealWinUtils) RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error) {
+	return winutils.RunCommandWithEnv(env, name, args...)
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
@@ -114,8 +138,12 @@ func main() {
 		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
 	}
 
+	// Создаём реальный объект утилит
+	RealWinUtils := &RealWinUtils{}
+
 	// 5. Регистрация всех доступных модулей
-	registeredModules := map[string]Installer{
+	// map хранит core.Installer
+	registeredModules := map[string]core.Installer{
 		"VComCaster":   &vcomcaster.Module{},
 		"iiko":         &iiko.Module{},
 		"FRPC":         &frpc.Module{},
@@ -142,9 +170,9 @@ func main() {
 			os.Exit(0)
 		}
 
-		selectedModule := selected.(Installer)
+		selectedModule := selected.(core.Installer)
 
-		err = selectedModule.Run(assetManager)
+		err = selectedModule.Run(assetManager, RealWinUtils)
 		if err != nil {
 			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", err))
 		} else {

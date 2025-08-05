@@ -2,9 +2,8 @@ package regime
 
 import (
 	"fmt"
-	"goMH/assetmgr"
+	"goMH/core"
 	"goMH/tui"
-	"goMH/winutils"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,7 +19,7 @@ func (m *Module) MenuText() string {
 	return "Regime (Локальный модуль ЧестныйЗнак)"
 }
 
-func (m *Module) Run(am *assetmgr.Manager) error {
+func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	tui.Title("\n--- Запуск установки/обновления Regime ---")
 
 	// 1. Получаем ресурс (MSI-установщик) через assetmgr
@@ -36,7 +35,7 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 	// 2. Проверяем, установлена ли служба "regime"
 	tui.Info("-> Этап 2: Проверка существующей установки...")
 	const serviceName = "regime"
-	isReinstall, err := winutils.ServiceExists(serviceName)
+	isReinstall, err := wu.ServiceExists(serviceName)
 	if err != nil {
 		// Если сама проверка не удалась, это критическая ошибка.
 		return fmt.Errorf("не удалось проверить наличие службы '%s': %w", serviceName, err)
@@ -70,7 +69,7 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 	tui.Info("Установка будет выполнена в тихом режиме. Это может занять несколько минут...")
 
 	// Передаем слайс аргументов в RunCommand
-	output, err := winutils.RunCommand("msiexec.exe", args...)
+	output, err := wu.RunCommand("msiexec.exe", args...)
 	if err != nil {
 		return fmt.Errorf("установщик msiexec завершился с ошибкой. Лог: %s. Вывод: %s. Ошибка: %w", logPath, output, err)
 	}

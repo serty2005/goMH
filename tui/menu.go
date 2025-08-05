@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"fmt"
+	"goMH/core"
 	"os"
 	"os/exec"
 	"runtime"
@@ -11,9 +12,7 @@ import (
 )
 
 // Installer - локальный интерфейс, чтобы не импортировать main
-type Installer interface {
-	MenuText() string
-}
+type Installer core.Installer
 
 func clearScreen() {
 	if runtime.GOOS == "windows" {

@@ -5,9 +5,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"goMH/assetmgr"
+	"goMH/core"
 	"goMH/tui"
-	"goMH/winutils"
 	"io"
 	"net/http"
 	"os"
@@ -30,11 +29,11 @@ type remoteComponent struct {
 	Name        string
 	ServiceName string
 	IsInstalled bool
-	InstallFunc func(*assetmgr.Manager) error
+	InstallFunc func(am core.AssetManager, wu core.WinUtils) error
 }
 
 // Главная функция Run теперь управляет подменю
-func (m *Module) Run(am *assetmgr.Manager) error {
+func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// Инициализируем компоненты
 	components := []*remoteComponent{
 		{ID: "1", Name: "TeamViewer", ServiceName: "TeamViewer", InstallFunc: m.installTeamViewer},
@@ -48,7 +47,7 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 	for {
 		tui.Title("\n--- Меню установки средств удаленного доступа ---")
 		// Перед показом меню обновляем статусы
-		m.checkStatuses(components)
+		m.checkStatuses(wu, components)
 
 		// Отображаем меню
 		for _, c := range components {
@@ -83,12 +82,12 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 			if chosenComponent.IsInstalled {
 				tui.Warn(fmt.Sprintf("\n%s уже установлен. Для переустановки сначала удалите его стандартными средствами Windows.", chosenComponent.Name))
 				fmt.Println("Нажмите Enter для продолжения...")
-				reader.ReadString('\n')
+				_, _ = reader.ReadString('\n')
 				continue
 			}
 
 			// Запускаем функцию установки
-			err := chosenComponent.InstallFunc(am)
+			err := chosenComponent.InstallFunc(am, wu)
 			if err != nil {
 				tui.Error(fmt.Sprintf("\n--- ОШИБКА при установке %s ---\n%v\n---------------------------------------\n", chosenComponent.Name, err))
 			} else {
@@ -105,9 +104,9 @@ func (m *Module) Run(am *assetmgr.Manager) error {
 }
 
 // checkStatuses обновляет поле IsInstalled для каждого компонента
-func (m *Module) checkStatuses(components []*remoteComponent) {
+func (m *Module) checkStatuses(wu core.WinUtils, components []*remoteComponent) {
 	for _, c := range components {
-		installed, err := winutils.ServiceExists(c.ServiceName)
+		installed, err := wu.ServiceExists(c.ServiceName)
 		if err != nil {
 			// Если проверка не удалась, считаем что не установлено, но выводим ошибку
 			tui.Warn(fmt.Sprintf("Не удалось проверить статус службы %s: %v", c.ServiceName, err))
@@ -121,7 +120,7 @@ func (m *Module) checkStatuses(components []*remoteComponent) {
 // --- Функции установки остаются такими же, как и были ---
 
 // --- Установка TeamViewer ---
-func (m *Module) installTeamViewer(am *assetmgr.Manager) error {
+func (m *Module) installTeamViewer(am core.AssetManager, wu core.WinUtils) error {
 	tui.Info("\n-> Начало установки TeamViewer...")
 	cfg := am.Cfg().TeamViewerConfig
 
@@ -206,14 +205,13 @@ func (m *Module) installTeamViewer(am *assetmgr.Manager) error {
 
 	// --- Шаг 4: Запуск установщика ---
 	tui.Info("Запуск установщика TeamViewer в тихом режиме...")
-	_, err = winutils.RunCommand(installerPath, "/S")
+	_, err = wu.RunCommand(installerPath, "/S")
 	return err
 }
 
 // --- Установка LiteManager ---
-func (m *Module) installLiteManager(am *assetmgr.Manager) error {
+func (m *Module) installLiteManager(am core.AssetManager, wu core.WinUtils) error {
 	tui.Info("\n-> Начало установки LiteManager...")
-	// ... (код installLiteManager без изменений)
 	installerDir, err := am.Get("LiteManager_Installer")
 	if err != nil {
 		return err
@@ -222,47 +220,73 @@ func (m *Module) installLiteManager(am *assetmgr.Manager) error {
 	msiPath := filepath.Join(installerDir, filepath.Base(assetInfo.URL))
 
 	tui.Info("Запуск установки LiteManager в тихом режиме...")
-	_, err = winutils.RunCommand("msiexec.exe", "/i", msiPath, "/quiet", "/norestart")
+	_, err = wu.RunCommand("msiexec.exe", "/i", msiPath, "/quiet", "/norestart")
 	return err
 }
 
 // --- Установка Getad ---
-func (m *Module) installGetad(am *assetmgr.Manager) error {
+func (m *Module) installGetad(am core.AssetManager, wu core.WinUtils) error {
+	const assetName = "Getad_Agent"
 	tui.Info("\n-> Начало установки Getad Agent...")
-	// ... (код installGetad без изменений)
-	installDir, err := am.Get("Getad_Agent")
-	if err != nil {
-		return err
+
+	// Определяем путь установки ЗАРАНЕЕ из конфигурации
+	assetInfo := am.Cfg().AssetCatalog[assetName]
+	installDir := filepath.Join(am.Cfg().RootPath, assetInfo.Destination)
+
+	// --- ШАГ 1: Добавляем исключение в антивирус ---
+	tui.InfoF("Добавление пути '%s' в исключения Защитника Windows...", installDir)
+	if err := wu.AddDefenderExclusion(installDir); err != nil {
+		// Это не критичная ошибка, просто выводим предупреждение
+		tui.Warn(fmt.Sprintf("Не удалось добавить исключение: %v", err))
+	} else {
+		tui.Success("Путь успешно добавлен в исключения.")
 	}
 
+	// Создаем директорию, если ее нет
+	_ = os.MkdirAll(installDir, 0755)
+
+	// --- ШАГ 2: Получаем архив в кэш ---
+	tui.Info("Скачивание архива агента...")
+	cachePath, err := am.DownloadToCache(assetName)
+	if err != nil {
+		return fmt.Errorf("не удалось скачать архив агента: %w", err)
+	}
+	tui.Success("Архив успешно скачан.")
+
+	// --- ШАГ 3: Разархивируем архив в путь установки ---
+	tui.InfoF("Распаковка архива в '%s'...", installDir)
+	if err := am.ProcessFromCache(assetName, cachePath); err != nil {
+		return fmt.Errorf("не удалось распаковать архив агента: %w", err)
+	}
+	tui.Success("Агент успешно распакован.")
+
+	// --- ШАГ 4: Запуск с аргументами ---
 	serviceExe := filepath.Join(installDir, "getad-service.exe")
 
 	if _, err := os.Stat(serviceExe); os.IsNotExist(err) {
 		return fmt.Errorf("не найден исполняемый файл службы: %s", serviceExe)
 	}
 
+	// Остановка существующей службы (на случай переустановки)
 	tui.Info("Остановка существующей службы (если есть)...")
-	_, _ = winutils.RunCommand(serviceExe, "stop")
+	_, _ = wu.RunCommand(serviceExe, "stop")
 	time.Sleep(1 * time.Second)
 
 	tui.Info("Установка службы...")
-	if _, err := winutils.RunCommand(serviceExe, "--startup", "auto", "install"); err != nil {
+	if _, err := wu.RunCommand(serviceExe, "--startup", "auto", "install"); err != nil {
 		return fmt.Errorf("не удалось установить службу: %w", err)
 	}
 
 	tui.Info("Запуск службы...")
-	if _, err := winutils.RunCommand(serviceExe, "start"); err != nil {
+	if _, err := wu.RunCommand(serviceExe, "start"); err != nil {
 		return fmt.Errorf("не удалось запустить службу: %w", err)
 	}
 
 	tui.Info("Настройка триггеров службы...")
 	triggers := []string{"start/machinepolicy", "start/userpolicy"}
-	if err := winutils.SetServiceTriggers("MH_Getad", triggers); err != nil {
+	if err := wu.SetServiceTriggers("MH_Getad", triggers); err != nil {
 		tui.Warn(fmt.Sprintf("Не удалось установить триггеры: %v", err))
 	}
-
-	tui.Info("Добавление исключения в Защитник Windows...")
-	_ = winutils.AddDefenderExclusion(installDir)
 
 	return nil
 }

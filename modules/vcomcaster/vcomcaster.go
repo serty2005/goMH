@@ -1,10 +1,12 @@
+// file: modules/vcomcaster/vcomcaster.go
+
 package vcomcaster
 
 import (
 	"bufio"
 	"fmt"
-	"goMH/assetmgr"
-	"goMH/winutils"
+	"goMH/core"
+	"goMH/tui"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,36 +19,34 @@ import (
 )
 
 const (
-	taskName = "VComCaster Autostart"
+	taskName        = "VComCaster Autostart"
+	iikoProcessName = "iikoFront"
 )
 
 type Module struct{}
 
-func (m *Module) ID() string { return "VComCaster" }
-func (m *Module) MenuText() string {
-	return "VComCaster (для сканера штрих-кодов)"
-}
+func (m *Module) ID() string       { return "VComCaster" }
+func (m *Module) MenuText() string { return "VComCaster (для сканера штрих-кодов)" }
 
-// Главная точка входа для модуля
-func (m *Module) Run(am *assetmgr.Manager) error {
+// Run - главная точка входа в модуль.
+func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	vcomcasterBaseDir := filepath.Join(am.Cfg().RootPath, "vcomcaster")
 
-	// Проверяем, существует ли директория установки
 	if _, err := os.Stat(vcomcasterBaseDir); err == nil {
 		// Если директория есть, запускаем режим диагностики/удаления
-		return runDiagnosticsWorkflow(vcomcasterBaseDir)
+		return m.runDiagnosticsWorkflow(wu, vcomcasterBaseDir)
 	}
 
 	// Если директории нет, запускаем режим установки
-	return runInstallWorkflow(am)
+	return m.runInstallWorkflow(am, wu)
 }
 
 // --- РЕЖИМ УСТАНОВКИ ---
-func runInstallWorkflow(am *assetmgr.Manager) error {
-	fmt.Println("\n--- Запуск установки VComCaster ---")
+func (m *Module) runInstallWorkflow(am core.AssetManager, wu core.WinUtils) error {
+	tui.Title("\n--- Запуск установки VComCaster ---")
 
 	// 1. Получаем ресурсы
-	fmt.Println("-> Этап 1: Загрузка необходимых ресурсов...")
+	tui.Info("-> Этап 1: Загрузка необходимых ресурсов...")
 	vcomcasterDestPath, err := am.Get("VComCaster_Package")
 	if err != nil {
 		return fmt.Errorf("не удалось получить VComCaster_Package: %w", err)
@@ -58,43 +58,49 @@ func runInstallWorkflow(am *assetmgr.Manager) error {
 	com0comInstallerExe := filepath.Join(com0comDestPath, "com0com_Setup_v3_x64.exe")
 
 	// 2. Установка com0com
-	fmt.Println("-> Этап 2: Установка com0com...")
-	portsBefore, _ := winutils.GetComPorts()
+	tui.Info("-> Этап 2: Установка com0com...")
+	portsBefore, _ := wu.GetComPorts()
 
 	com0comInstallDir := filepath.Join(vcomcasterDestPath, "com0com")
 	_ = os.MkdirAll(com0comInstallDir, 0755)
 
-	cmd := exec.Command(com0comInstallerExe, "/S", fmt.Sprintf("/D=%s", com0comInstallDir))
-	cmd.Env = append(os.Environ(),
-		"CNC_INSTALL_COMX_COMX_PORTS=YES",
-		"CNC_INSTALL_CNCA0_CNCB0_PORTS=NO",
-		"CNC_INSTALL_START_MENU_SHORTCUTS=NO",
+	com0comEnv := map[string]string{
+		"CNC_INSTALL_COMX_COMX_PORTS":      "YES",
+		"CNC_INSTALL_CNCA0_CNCB0_PORTS":    "NO",
+		"CNC_INSTALL_START_MENU_SHORTCUTS": "NO",
+	}
+
+	_, err = wu.RunCommandWithEnv(
+		com0comEnv,
+		com0comInstallerExe,
+		"/S",
+		fmt.Sprintf("/D=%s", com0comInstallDir),
 	)
-	if err := cmd.Run(); err != nil {
+	if err != nil {
 		return fmt.Errorf("ошибка при установке com0com: %w", err)
 	}
-	fmt.Println("Установка com0com завершена, ожидание инициализации портов (5 сек)...")
+	tui.Info("Установка com0com завершена, ожидание инициализации портов (5 сек)...")
 	time.Sleep(5 * time.Second)
 
-	portsAfter, _ := winutils.GetComPorts()
+	portsAfter, _ := wu.GetComPorts()
 	newPorts := findNewPorts(portsBefore, portsAfter)
 	if len(newPorts) < 2 {
-		fmt.Println("ПРЕДУПРЕЖДЕНИЕ: Не удалось определить созданные виртуальные COM-порты. Проверьте Диспетчер устройств.")
+		tui.Warn("ПРЕДУПРЕЖДЕНИЕ: Не удалось определить созданные виртуальные COM-порты. Проверьте Диспетчер устройств.")
 	} else {
 		sort.Strings(newPorts)
-		fmt.Printf("Созданы виртуальные порты: %s и %s\n", newPorts[0], newPorts[1])
+		tui.SuccessF("Созданы виртуальные порты: %s и %s", newPorts[0], newPorts[1])
 	}
 
 	// 3. Определение сканера
-	fmt.Println("-> Этап 3: Определение сканера...")
+	tui.Info("-> Этап 3: Определение сканера...")
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Print("Введите НОМЕР физического COM-порта сканера (только цифры): ")
 	comPortNum, _ := reader.ReadString('\n')
 	scannerComPort := "COM" + strings.TrimSpace(comPortNum)
-	fmt.Printf("Порт сканера установлен в %s.\n", scannerComPort)
+	tui.InfoF("Порт сканера установлен в %s.", scannerComPort)
 
 	// 4. Создание config.ini
-	fmt.Println("-> Этап 4: Создание config.ini...")
+	tui.Info("-> Этап 4: Создание config.ini...")
 	outputPort := ""
 	if len(newPorts) > 0 {
 		outputPort = newPorts[0]
@@ -107,150 +113,129 @@ func runInstallWorkflow(am *assetmgr.Manager) error {
 	if err := os.WriteFile(configPath, []byte(iniContent), 0644); err != nil {
 		return fmt.Errorf("не удалось создать config.ini: %w", err)
 	}
-	fmt.Println("Файл config.ini успешно создан.")
+	tui.Success("Файл config.ini успешно создан.")
 
 	// 5. Финальная настройка
-	fmt.Println("-> Этап 5: Финальная настройка (Планировщик, запуск)...")
+	tui.Info("-> Этап 5: Финальная настройка (Планировщик, запуск)...")
 	vcomcasterExePath := filepath.Join(vcomcasterDestPath, "vcomcaster.exe")
 
-	if err := winutils.CreateScheduledTask(taskName, vcomcasterExePath, vcomcasterDestPath); err != nil {
-		// Используем fmt.Printf для вывода в консоль, но не прерываем выполнение
-		fmt.Printf("ВНИМАНИЕ: Не удалось создать/обновить задачу в планировщике: %v\n", err)
+	if err := wu.CreateScheduledTask(taskName, vcomcasterExePath, vcomcasterDestPath); err != nil {
+		tui.Warn(fmt.Sprintf("ВНИМАНИЕ: Не удалось создать/обновить задачу в планировщике: %v", err))
 	} else {
-		// Сообщение из CreateScheduledTask будет выведено автоматически
+		tui.SuccessF("Задача '%s' в Планировщике Windows успешно создана/обновлена.", taskName)
 	}
 
 	if len(newPorts) > 1 {
 		iikoPort := newPorts[1]
-		if err := updateIikoConfig(iikoPort); err != nil {
-			// Это не критическая ошибка, просто выводим предупреждение
-			fmt.Printf("ВНИМАНИЕ: Не удалось автоматически обновить конфиг iiko: %v\n", err)
-			fmt.Printf("ВАЖНО: Пожалуйста, вручную укажите в настройках iiko порт сканера: %s\n", iikoPort)
+		if err := m.updateIikoConfig(wu, iikoPort); err != nil {
+			tui.Warn(fmt.Sprintf("Не удалось автоматически обновить конфиг iiko: %v", err))
+			tui.Warn(fmt.Sprintf("ВАЖНО: Пожалуйста, вручную укажите в настройках iiko порт сканера: %s", iikoPort))
 		}
 	} else {
-		fmt.Println("ПРЕДУПРЕЖДЕНИЕ: Не удалось определить порт для iiko. Пропустили обновление конфига.")
+		tui.Warn("Не удалось определить порт для iiko. Пропустили обновление конфига.")
 	}
 
-	fmt.Println("Запуск vcomcaster.exe...")
+	tui.Info("Запуск vcomcaster.exe...")
+	// Запуск GUI приложения без ожидания. Этот вызов остается прямым, т.к. не влияет на тестируемую логику.
 	startCmd := exec.Command(vcomcasterExePath)
 	startCmd.Dir = vcomcasterDestPath
 	if err := startCmd.Start(); err != nil {
 		return fmt.Errorf("не удалось запустить vcomcaster.exe: %w", err)
 	}
-	fmt.Println("Приложение vcomcaster успешно запущено в фоновом режиме.")
+	tui.Success("Приложение vcomcaster успешно запущено в фоновом режиме.")
 
 	return nil
 }
 
-func updateIikoConfig(iikoPort string) error {
-	const iikoProcessName = "iikoFront"
-	const maxRetries = 3                // Максимум попыток (например, 3 * 10 секунд)
-	const retryDelay = 10 * time.Second // Задержка между попытками
+func (m *Module) updateIikoConfig(wu core.WinUtils, iikoPort string) error {
+	const maxRetries = 3
+	const retryDelay = 10 * time.Second
 
-	// 1. Определяем путь к конфигу iiko
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return fmt.Errorf("не удалось найти директорию APPDATA: %w", err)
 	}
 	configPath := filepath.Join(configDir, "iiko", "CashServer", "config.xml")
 
-	// 2. Проверяем, существует ли файл.
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Printf("Файл конфигурации iiko не найден по пути: %s. Пропускаем.\n", configPath)
-		fmt.Printf("После первого запуска iiko, пожалуйста, укажите порт сканера вручную: %s\n", iikoPort)
+		tui.InfoF("Файл конфигурации iiko не найден по пути: %s. Пропускаем.", configPath)
+		tui.InfoF("После первого запуска iiko, пожалуйста, укажите порт сканера вручную: %s", iikoPort)
 		return nil
 	}
-	fmt.Printf("Найден файл конфигурации iiko: %s\n", configPath)
+	tui.InfoF("Найден файл конфигурации iiko: %s", configPath)
 
-	// Проверяем, запущен ли процесс iikoFront
 	for i := 0; i < maxRetries; i++ {
-		isRunning, err := winutils.IsProcessRunning(iikoProcessName)
+		isRunning, err := wu.IsProcessRunning(iikoProcessName)
 		if err != nil {
-			// Если сама проверка завершилась с ошибкой, сообщаем и выходим.
 			return fmt.Errorf("не удалось проверить статус процесса iiko: %w", err)
 		}
-
 		if !isRunning {
-			// Процесс не запущен, можно продолжать
 			break
 		}
-
-		// Если процесс запущен, выводим предупреждение и ждем
-		fmt.Printf("ПРЕДУПРЕЖДЕНИЕ: Обнаружен запущенный процесс '%s'. Это может помешать сохранению файла.\n", iikoProcessName)
-		fmt.Printf("Пожалуйста, закройте iiko Front. Ожидание %v... (попытка %d из %d)\n", retryDelay, i+1, maxRetries)
+		tui.Warn(fmt.Sprintf("Обнаружен запущенный процесс '%s'. Это может помешать сохранению файла.", iikoProcessName))
+		tui.Warn(fmt.Sprintf("Пожалуйста, закройте iiko Front. Ожидание %v... (попытка %d из %d)", retryDelay, i+1, maxRetries))
 		time.Sleep(retryDelay)
 
-		// Если это была последняя попытка, выходим с ошибкой
 		if i == maxRetries-1 {
 			return fmt.Errorf("процесс '%s' все еще запущен после %d попыток. Изменение отменено.", iikoProcessName, maxRetries)
 		}
 	}
 
-	// 3. Открываем и парсим XML
 	doc := etree.NewDocument()
 	if err := doc.ReadFromFile(configPath); err != nil {
 		return fmt.Errorf("ошибка чтения XML файла: %w", err)
 	}
 
-	// 4. Находим корневой элемент <config>. Он ОБЯЗАН существовать.
 	root := doc.SelectElement("config")
 	if root == nil {
 		return fmt.Errorf("корневой элемент <config> не найден в файле %s. Изменение отменено.", configPath)
 	}
 
-	// 5. Находим элемент <comBarcodeScanerPort>. Если его нет, создаем внутри <config>.
 	portElement := root.SelectElement("comBarcodeScanerPort")
 	if portElement == nil {
-		fmt.Println("Элемент <comBarcodeScanerPort> не найден. Создаем его.")
+		tui.Info("Элемент <comBarcodeScanerPort> не найден. Создаем его.")
 		portElement = root.CreateElement("comBarcodeScanerPort")
 	}
 
-	// 6. Устанавливаем нужное значение
-	fmt.Printf("Обновляем порт сканера в конфиге iiko на '%s'...\n", iikoPort)
+	tui.InfoF("Обновляем порт сканера в конфиге iiko на '%s'...", iikoPort)
 	portElement.SetText(iikoPort)
 
-	// 7. Сохраняем измененный XML обратно в файл
 	doc.Indent(2)
 	if err := doc.WriteToFile(configPath); err != nil {
 		return fmt.Errorf("ошибка сохранения XML файла: %w", err)
 	}
 
-	fmt.Println("Конфигурация iiko успешно обновлена.")
+	tui.Success("Конфигурация iiko успешно обновлена.")
 	return nil
 }
 
 // --- РЕЖИМ ДИАГНОСТИКИ И УДАЛЕНИЯ ---
-func runDiagnosticsWorkflow(baseDir string) error {
-	fmt.Println("\n--- Обнаружена существующая установка. Запуск диагностики... ---")
+func (m *Module) runDiagnosticsWorkflow(wu core.WinUtils, baseDir string) error {
+	tui.Title("\n--- Обнаружена существующая установка. Запуск диагностики... ---")
 
 	var problems []string
 	configPath := filepath.Join(baseDir, "config.ini")
 	com0comUninstallerPath := filepath.Join(baseDir, "com0com", "uninstall.exe")
 
-	// 1. Проверка файлов
 	if _, err := os.Stat(configPath); err != nil {
 		problems = append(problems, "x Файл конфигурации config.ini не найден.")
 	}
 	if _, err := os.Stat(com0comUninstallerPath); err != nil {
 		problems = append(problems, "x Деинсталлятор com0com не найден.")
 	}
-
-	// 2. Проверка задачи в планировщике
-	if _, err := winutils.RunCommand("schtasks", "/Query", "/TN", taskName); err != nil {
+	if _, err := wu.RunCommand("schtasks", "/Query", "/TN", taskName); err != nil {
 		problems = append(problems, fmt.Sprintf("x Задача '%s' в Планировщике не найдена.", taskName))
 	}
 
-	// 3. Вывод результатов
 	if len(problems) == 0 {
-		fmt.Println("\n[ДИАГНОСТИКА] Проблем не обнаружено. Система выглядит настроенной.")
+		tui.Success("\n[ДИАГНОСТИКА] Проблем не обнаружено. Система выглядит настроенной.")
 	} else {
-		fmt.Println("\n[ДИАГНОСТИКА] Обнаружены следующие проблемы:")
+		tui.Warn("\n[ДИАГНОСТИКА] Обнаружены следующие проблемы:")
 		for _, p := range problems {
-			fmt.Println(p)
+			tui.Warn(p)
 		}
 	}
 
-	// 4. Диалог с пользователем
 	fmt.Println("\nВыберите действие:")
 	fmt.Println(" 1. Полностью удалить VComCaster")
 	fmt.Println(" 2. Выполнить переустановку (сначала удалит, потом нужно запустить снова)")
@@ -263,65 +248,59 @@ func runDiagnosticsWorkflow(baseDir string) error {
 
 	switch choice {
 	case "1":
-		return runUninstallation(baseDir)
+		return m.runUninstallation(wu, baseDir)
 	case "2":
-		fmt.Println("\nНачинается процесс удаления перед переустановкой...")
-		err := runUninstallation(baseDir)
+		tui.Info("\nНачинается процесс удаления перед переустановкой...")
+		err := m.runUninstallation(wu, baseDir)
 		if err != nil {
 			return fmt.Errorf("ошибка во время удаления перед переустановкой: %w", err)
 		}
-		fmt.Println("\nУдаление завершено. Теперь запустите установку из главного меню еще раз.")
-		return nil // Возвращаемся в меню без ошибки
+		tui.Success("\nУдаление завершено. Теперь запустите установку из главного меню еще раз.")
+		return nil
 	case "3":
-		fmt.Println("Операция отменена. Возврат в главное меню.")
+		tui.Info("Операция отменена. Возврат в главное меню.")
 		return nil
 	default:
-		fmt.Println("Неверный выбор. Возврат в главное меню.")
+		tui.Warn("Неверный выбор. Возврат в главное меню.")
 		return nil
 	}
 }
 
 // Функция полного удаления
-func runUninstallation(baseDir string) error {
-	fmt.Println("\n--- Начало процесса удаления ---")
+func (m *Module) runUninstallation(wu core.WinUtils, baseDir string) error {
+	tui.Title("\n--- Начало процесса удаления ---")
 
-	// 1. Остановка процесса vcomcaster.exe
-	fmt.Println("-> Остановка процесса 'vcomcaster.exe'...")
-	// В Windows нет pkill, используем taskkill
-	_ = exec.Command("taskkill", "/F", "/IM", "vcomcaster.exe").Run()
+	tui.Info("-> Остановка процесса 'vcomcaster.exe'...")
+	_, _ = wu.RunCommand("taskkill", "/F", "/IM", "vcomcaster.exe")
 
-	// 2. Удаление задачи из планировщика
-	fmt.Printf("-> Удаление задачи '%s'...\n", taskName)
-	if _, err := winutils.RunCommand("schtasks", "/Delete", "/TN", taskName, "/F"); err != nil {
-		fmt.Println("   (Предупреждение: не удалось удалить задачу, возможно, ее и не было)")
+	tui.InfoF("-> Удаление задачи '%s'...", taskName)
+	if _, err := wu.RunCommand("schtasks", "/Delete", "/TN", taskName, "/F"); err != nil {
+		tui.Warn("   (Предупреждение: не удалось удалить задачу, возможно, ее и не было)")
 	}
 
-	// 3. Запуск деинсталлятора com0com
 	uninstallerPath := filepath.Join(baseDir, "com0com", "uninstall.exe")
 	installPath := filepath.Join(baseDir, "com0com")
 	if _, err := os.Stat(uninstallerPath); err == nil {
-		fmt.Println("-> Запуск деинсталлятора com0com...")
-		cmd := exec.Command(uninstallerPath, "/S", fmt.Sprintf("_?=%s", installPath))
-		if err := cmd.Run(); err != nil {
-			fmt.Printf("   (Предупреждение: деинсталлятор com0com завершился с ошибкой: %v)\n", err)
+		tui.Info("-> Запуск деинсталлятора com0com...")
+		if _, err := wu.RunCommand(uninstallerPath, "/S", fmt.Sprintf("_?=%s", installPath)); err != nil {
+			tui.Warn(fmt.Sprintf("   (Предупреждение: деинсталлятор com0com завершился с ошибкой: %v)", err))
 		} else {
-			fmt.Println("   com0com удален.")
+			tui.Success("   com0com удален.")
 		}
 	} else {
-		fmt.Println("-> Деинсталлятор com0com не найден, пропуск.")
+		tui.Info("-> Деинсталлятор com0com не найден, пропуск.")
 	}
 
-	// 4. Удаление всей директории
-	fmt.Printf("-> Удаление папки '%s'...\n", baseDir)
+	tui.InfoF("-> Удаление папки '%s'...", baseDir)
 	if err := os.RemoveAll(baseDir); err != nil {
 		return fmt.Errorf("не удалось полностью удалить директорию %s: %w", baseDir, err)
 	}
 
-	fmt.Println("\nУдаление успешно завершено.")
+	tui.Success("\nУдаление успешно завершено.")
 	return nil
 }
 
-// Вспомогательные функции findNewPorts и ini-парсер
+// Вспомогательные функции
 func findNewPorts(before, after []string) []string {
 	beforeMap := make(map[string]bool)
 	for _, port := range before {
@@ -336,7 +315,6 @@ func findNewPorts(before, after []string) []string {
 	return newPorts
 }
 
-// Для будущих проверок, если понадобится читать конфиг
 func readConfig(path string) (*ini.File, error) {
 	cfg, err := ini.Load(path)
 	if err != nil {
