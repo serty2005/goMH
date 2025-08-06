@@ -10,6 +10,7 @@ import (
 	"goMH/modules/iiko"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
+	"goMH/modules/serviceutils"
 	"goMH/modules/vcomcaster"
 	"goMH/tui"
 	"goMH/winutils"
@@ -149,6 +150,7 @@ func main() {
 		"FRPC":         &frpc.Module{},
 		"Regime":       &regime.Module{},
 		"RemoteAccess": &remoteaccess.Module{},
+		"ServiceUtils": &serviceutils.Module{},
 	}
 
 	// 6. Основной цикл меню

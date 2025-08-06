@@ -49,15 +49,21 @@ type TeamViewerConfig struct {
 	ApiURL   string `json:"ApiURL"`
 }
 
+type MaintenanceConfig struct {
+	TempPaths         []string `json:"TempPaths"`
+	LogCollectorPaths []string `json:"LogCollectorPaths"`
+}
+
 type Config struct {
-	RootPath         string               `json:"root_path"`
-	AssetsCachePath  string               `json:"assets_cache_path"`
-	FTP              FTPConfig            `json:"ftp_config"`
-	Modules          []ModuleDef          `json:"modules"`
-	FrpcConfig       FrpcConfig           `json:"frpc_config"`
-	IikoConfig       IikoConfig           `json:"iiko_config"`
-	AssetCatalog     map[string]AssetInfo `json:"asset_catalog"`
-	TeamViewerConfig TeamViewerConfig     `json:"TeamViewerConfig"`
+	RootPath          string               `json:"root_path"`
+	AssetsCachePath   string               `json:"assets_cache_path"`
+	FTP               FTPConfig            `json:"ftp_config"`
+	Modules           []ModuleDef          `json:"modules"`
+	FrpcConfig        FrpcConfig           `json:"frpc_config"`
+	IikoConfig        IikoConfig           `json:"iiko_config"`
+	AssetCatalog      map[string]AssetInfo `json:"asset_catalog"`
+	TeamViewerConfig  TeamViewerConfig     `json:"TeamViewerConfig"`
+	MaintenanceConfig MaintenanceConfig    `json:"MaintenanceConfig"`
 }
 
 type FTPConfig struct {
