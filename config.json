@@ -22,12 +22,15 @@
 		{
 			"id": "Regime"
 		},
-    {
-      "id": "UniversalInstaller"
-    },
-    {
-      "id": "ServiceUtils"
-    }
+		{
+			"id": "DTO"
+		},
+		{
+			"id": "UTM"
+		},
+		{
+			"id": "ServiceUtils"
+		}
 	],
 	"frpc_config": {
 		"install_path": "C:\\MH\\FRPC",
@@ -82,47 +85,34 @@
 		"ShortURL": "http://get.teamviewer.com/myhoreca",
 		"ApiURL": "https://get.teamviewer.com/api/CustomDesign"
 	},
-  "UniversalInstalls": [
-  {
-    "menu_text": "Атол ДТО 10.10.7.0 (32-bit)",
-    "type": "installer",
-    "url": "https://f.serty.top/KKT10-10.10.7.0-windows32-setup.exe",
-    "install_args": "/S /AcceptLicense /WithAssistant /WithEOU"
-  },
-    {
-    "menu_text": "УТМ (ЕГАИС)",
-    "type": "installer",
-    "url": "https://f.serty.top/silent-setup-4.2.0-b2644.exe",
-    "install_args": ""
-  },
-  {
-    "menu_text": "7-Zip 23.01 (64-bit)",
-    "type": "installer",
-    "url": "https://www.7-zip.org/a/7z2301-x64.msi",
-    "install_args": "/quiet /norestart"
-  }
-],
-"MaintenanceConfig": {
-  "TempPaths": [
-    "C:\\Windows\\Temp",
-    "C:\\Windows\\SoftwareDistribution\\Download",
-    "C:\\Users\\*\\AppData\\Local\\Temp",
-    "C:\\ProgramData\\Microsoft\\Windows\\WER\\*",
-    "C:\\Users\\*\\AppData\\Local\\CrashDumps"
-  ],
-  "LogCollectorPaths": [
-    "C:\\Users\\*\\AppData\\Roaming\\iiko\\CashServer\\Logs",
-    "C:\\Windows\\ServiceProfiles\\iikoCard5POS\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
-    "C:\\Users\\*\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
-    "C:\\sc552",
-    "C:\\Program Files(x86)\\INPAS\\DualConnector"
-  ]
-},
+	"MaintenanceConfig": {
+		"TempPaths": [
+			"C:\\Windows\\Temp",
+			"C:\\Windows\\SoftwareDistribution\\Download",
+			"C:\\Users\\*\\AppData\\Local\\Temp",
+			"C:\\ProgramData\\Microsoft\\Windows\\WER\\*",
+			"C:\\Users\\*\\AppData\\Local\\CrashDumps"
+		],
+		"LogCollectorPaths": [
+			"C:\\Users\\*\\AppData\\Roaming\\iiko\\CashServer\\Logs",
+			"C:\\Windows\\ServiceProfiles\\iikoCard5POS\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
+			"C:\\Users\\*\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
+			"C:\\sc552",
+			"C:\\Program Files(x86)\\INPAS\\DualConnector"
+		]
+	},
+	"dto_config": {
+		"asset_id": "DTO_Installer",
+		"install_args": "/S /AcceptLicense /WithAssistant /WithEOU"
+	},
+	"utm_config": {
+		"asset_id": "UTM_Installer",
+		"install_args": ""
+	},
 	"asset_catalog": {
 		"LiteManager_Installer": {
 			"url": "https://f.serty.top/distr/REMOTES/LM_server_MH1.msi",
 			"type": "file",
-			"destination": "installers/litemanager",
 			"download_method": "HTTP"
 		},
 		"Getad_Agent": {
@@ -138,13 +128,21 @@
 		},
 		"Com0Com_Installer": {
 			"url": "https://f.serty.top/distr/installer/assets/com0com_Setup_v3_x64.exe",
-			"type": "file",
-			"destination": "vcomcaster"
+			"type": "file"
 		},
 		"Regime_Installer": {
 			"url": "https://f.serty.top/regime-1.4.1-445.msi",
 			"type": "file",
-			"destination": "installers/regime",
+			"download_method": "HTTP"
+		},
+		"DTO_Installer": {
+			"url": "ftp://ftp.serty.top/KKT10-10.10.7.0-windows32-setup.exe",
+			"type": "file",
+			"download_method": "FTP"
+		},
+		"UTM_Installer": {
+			"url": "https://f.serty.top/silent-setup-4.2.0-b2644.exe",
+			"type": "file",
 			"download_method": "HTTP"
 		}
 	}

@@ -6,12 +6,13 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
+	"goMH/modules/dto"
 	"goMH/modules/frpc"
 	"goMH/modules/iiko"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
 	"goMH/modules/serviceutils"
-	"goMH/modules/universalinstaller"
+	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
 	"goMH/tui"
 	"goMH/winutils"
@@ -146,13 +147,14 @@ func main() {
 	// 5. Регистрация всех доступных модулей
 	// map хранит core.Installer
 	registeredModules := map[string]core.Installer{
-		"VComCaster":         &vcomcaster.Module{},
-		"iiko":               &iiko.Module{},
-		"FRPC":               &frpc.Module{},
-		"Regime":             &regime.Module{},
-		"RemoteAccess":       &remoteaccess.Module{},
-		"ServiceUtils":       &serviceutils.Module{},
-		"UniversalInstaller": &universalinstaller.Module{},
+		"VComCaster":   &vcomcaster.Module{},
+		"iiko":         &iiko.Module{},
+		"FRPC":         &frpc.Module{},
+		"Regime":       &regime.Module{},
+		"RemoteAccess": &remoteaccess.Module{},
+		"ServiceUtils": &serviceutils.Module{},
+		"DTO":          &dto.Module{},
+		"UTM":          &utm.Module{},
 	}
 
 	// 6. Основной цикл меню

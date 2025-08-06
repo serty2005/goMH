@@ -87,9 +87,7 @@ func (m *Manager) ProcessFromCache(assetName, cachePath string) error {
 			return fmt.Errorf("ошибка распаковки '%s': %w", fileName, err)
 		}
 	case "file":
-		if err := copyFile(cachePath, filepath.Join(finalDestPath, fileName)); err != nil {
-			return fmt.Errorf("ошибка копирования '%s': %w", fileName, err)
-		}
+		break
 	default:
 		return fmt.Errorf("неизвестный тип ресурса: %s", assetInfo.Type)
 	}
@@ -261,24 +259,6 @@ func CreateProgressBar(totalSize int64, description string) *progressbar.Progres
 		progressbar.OptionFullWidth(),
 		progressbar.OptionClearOnFinish(),
 	)
-}
-
-// copyFile копирует файл из src в dst.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
 }
 
 // unzip распаковывает zip-архив.
