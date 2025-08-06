@@ -7,6 +7,7 @@ require (
 	github.com/jlaffaye/ftp v0.2.0
 	github.com/mholt/archives v0.1.3
 	github.com/schollz/progressbar/v3 v3.18.0
+	go.bug.st/serial v1.6.4
 	gopkg.in/ini.v1 v1.67.0
 )
 
@@ -16,6 +17,7 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
+	github.com/creack/goselect v0.1.2 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect

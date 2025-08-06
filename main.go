@@ -43,6 +43,21 @@ func (rw *RealWinUtils) Is64BitOS() bool {
 func (rw *RealWinUtils) GetComPorts() ([]string, error) {
 	return winutils.GetComPorts()
 }
+func (rw *RealWinUtils) GetScanners() ([]core.ScannerInfo, error) {
+	internalScanners, err := winutils.GetScanners()
+	if err != nil {
+		return nil, err
+	}
+	publicScanners := make([]core.ScannerInfo, 0, len(internalScanners))
+	for _, scanner := range internalScanners {
+		publicScanners = append(publicScanners, core.ScannerInfo{
+			Port:        scanner.Port,
+			Caption:     scanner.Caption,
+			PNPDeviceID: scanner.PNPDeviceID,
+		})
+	}
+	return publicScanners, nil
+}
 func (rw *RealWinUtils) IsProcessRunning(processName string) (bool, error) {
 	return winutils.IsProcessRunning(processName)
 }

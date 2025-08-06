@@ -2,6 +2,13 @@ package core
 
 import "goMH/config"
 
+// ScannerInfo содержит информацию о найденном устройстве-сканере.
+type ScannerInfo struct {
+	Port        string // Например, "COM3"
+	Caption     string // Дружелюбное имя, например "USB-SERIAL CH340 (COM3)"
+	PNPDeviceID string // Аппаратный ID, например, "USB\VID_2912&PID_0005&MI_00\..."
+}
+
 // WinUtils определяет контракт для утилит, специфичных для Windows.
 // Модули будут зависеть от этого интерфейса, а не от конкретного пакета winutils.
 type WinUtils interface {
@@ -12,6 +19,7 @@ type WinUtils interface {
 	SetServiceTriggers(serviceName string, triggers []string) error
 	Is64BitOS() bool
 	GetComPorts() ([]string, error)
+	GetScanners() ([]ScannerInfo, error)
 	IsProcessRunning(processName string) (bool, error)
 	CreateScheduledTask(taskName, executablePath, workingDir string) error
 }
@@ -25,6 +33,7 @@ type AssetManager interface {
 	ListFTP(path string) ([]FTPEntry, error)
 	DownloadToCache(assetName string) (string, error)
 	ProcessFromCache(assetName, cachePath string) error
+	PurgeAsset(assetName string) error
 	Cfg() *config.Config
 }
 

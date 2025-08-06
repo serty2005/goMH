@@ -4,13 +4,16 @@ package vcomcaster
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"goMH/core"
 	"goMH/tui"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,11 +37,27 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 	if _, err := os.Stat(vcomcasterBaseDir); err == nil {
 		// Если директория есть, запускаем режим диагностики/удаления
-		return m.runDiagnosticsWorkflow(wu, vcomcasterBaseDir)
+		return m.runDiagnosticsWorkflow(wu, am, vcomcasterBaseDir)
 	}
 
 	// Если директории нет, запускаем режим установки
 	return m.runInstallWorkflow(am, wu)
+}
+
+// extractDeviceID извлекает часть VID_...&PID_... из полного PNPDeviceID.
+func extractDeviceID(pnpDeviceID string) string {
+	// Регулярное выражение для поиска "VID_...&PID_..." после "USB\"
+	// (?i) - регистронезависимый поиск
+	// \\ - экранированный обратный слеш
+	// ([^&\\]+) - захватывает все символы до следующего & или \
+	re := regexp.MustCompile(`(?i)USB\\(VID_[^&]+&PID_[^&\\]+)`)
+	matches := re.FindStringSubmatch(pnpDeviceID)
+
+	if len(matches) > 1 {
+		return matches[1] // Возвращаем первую захваченную группу
+	}
+	// Если не найдено, возвращаем пустую строку, конфиг будет без этого значения
+	return ""
 }
 
 // --- РЕЖИМ УСТАНОВКИ ---
@@ -51,11 +70,11 @@ func (m *Module) runInstallWorkflow(am core.AssetManager, wu core.WinUtils) erro
 	if err != nil {
 		return fmt.Errorf("не удалось получить VComCaster_Package: %w", err)
 	}
-	com0comDestPath, err := am.Get("Com0Com_Installer")
+	com0comInstallerExe, err := am.DownloadToCache("Com0Com_Installer")
 	if err != nil {
-		return fmt.Errorf("не удалось получить Com0Com_Installer: %w", err)
+		return fmt.Errorf("не удалось скачать Com0Com_Installer в кэш: %w", err)
 	}
-	com0comInstallerExe := filepath.Join(com0comDestPath, "com0com_Setup_v3_x64.exe")
+	tui.SuccessF("Установщик com0com находится в кэше: %s", com0comInstallerExe)
 
 	// 2. Установка com0com
 	tui.Info("-> Этап 2: Установка com0com...")
@@ -91,13 +110,47 @@ func (m *Module) runInstallWorkflow(am core.AssetManager, wu core.WinUtils) erro
 		tui.SuccessF("Созданы виртуальные порты: %s и %s", newPorts[0], newPorts[1])
 	}
 
-	// 3. Определение сканера
+	// 3. Определение сканера (НОВАЯ ЛОГИКА)
 	tui.Info("-> Этап 3: Определение сканера...")
+	scanners, err := wu.GetScanners()
+	if err != nil {
+		return fmt.Errorf("критическая ошибка при поиске сканеров: %w", err)
+	}
+	if len(scanners) == 0 {
+		return errors.New("не найдено ни одного USB-сканера, подключенного к COM-порту. Проверьте подключение и драйверы")
+	}
+
+	tui.Title("\n--- Найдены следующие устройства ---")
+	for i, scanner := range scanners {
+		// Проверяем, содержит ли Caption (название продукта) уже имя порта.
+		portInCaption := fmt.Sprintf("(%s)", scanner.Port)
+		if strings.Contains(scanner.Caption, portInCaption) {
+			// Если да, то просто выводим Caption как есть.
+			fmt.Printf(" %d. %s\n", i+1, scanner.Caption)
+		} else {
+			// Если нет, то добавляем порт в скобках для красоты.
+			fmt.Printf(" %d. %s (%s)\n", i+1, scanner.Caption, scanner.Port)
+		}
+	}
+	fmt.Print("Выберите номер вашего сканера: ")
+
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Введите НОМЕР физического COM-порта сканера (только цифры): ")
-	comPortNum, _ := reader.ReadString('\n')
-	scannerComPort := "COM" + strings.TrimSpace(comPortNum)
-	tui.InfoF("Порт сканера установлен в %s.", scannerComPort)
+	choiceStr, _ := reader.ReadString('\n')
+	choice, err := strconv.Atoi(strings.TrimSpace(choiceStr))
+	if err != nil || choice < 1 || choice > len(scanners) {
+		return errors.New("неверный выбор, установка прервана")
+	}
+
+	selectedScanner := scanners[choice-1]
+	scannerComPort := selectedScanner.Port
+	scannerDeviceID := extractDeviceID(selectedScanner.PNPDeviceID)
+
+	tui.SuccessF("Выбран сканер: %s на порту %s", selectedScanner.Caption, scannerComPort)
+	if scannerDeviceID != "" {
+		tui.SuccessF("Определен ID устройства: %s", scannerDeviceID)
+	} else {
+		tui.Warn("Не удалось определить VID/PID устройства. Поле device_id в конфиге будет пустым.")
+	}
 
 	// 4. Создание config.ini
 	tui.Info("-> Этап 4: Создание config.ini...")
@@ -106,8 +159,8 @@ func (m *Module) runInstallWorkflow(am core.AssetManager, wu core.WinUtils) erro
 		outputPort = newPorts[0]
 	}
 	iniContent := fmt.Sprintf(
-		"[app]\r\nautostart_listing = 1\r\nautoreconnect = 1\r\nlogs-autoclear-days = 2\r\n[device]\r\ndevice_id = \r\ninput_port = %s\r\noutput_port = %s\r\nport_baudrate = 115200\r\ncr = 0\r\nlf = 0\r\n[service]\r\namount_rm_char_id = 0\r\ntimeout_clearcash = 1.5\r\ntimeout_autoreconnect = 3\r\ntimeout_reconnect = 3",
-		scannerComPort, outputPort,
+		"[app]\r\nautostart_listing = 1\r\nautoreconnect = 1\r\nlogs-autoclear-days = 2\r\n[device]\r\ndevice_id = %s\r\ninput_port = %s\r\noutput_port = %s\r\nport_baudrate = 115200\r\ncr = 0\r\nlf = 0\r\n[service]\r\namount_rm_char_id = 0\r\ntimeout_clearcash = 1.5\r\ntimeout_autoreconnect = 3\r\ntimeout_reconnect = 3",
+		scannerDeviceID, scannerComPort, outputPort,
 	)
 	configPath := filepath.Join(vcomcasterDestPath, "config.ini")
 	if err := os.WriteFile(configPath, []byte(iniContent), 0644); err != nil {
@@ -177,7 +230,7 @@ func (m *Module) updateIikoConfig(wu core.WinUtils, iikoPort string) error {
 		time.Sleep(retryDelay)
 
 		if i == maxRetries-1 {
-			return fmt.Errorf("процесс '%s' все еще запущен после %d попыток. Изменение отменено.", iikoProcessName, maxRetries)
+			return fmt.Errorf("процесс '%s' все еще запущен после %d попыток. Изменение отменено", iikoProcessName, maxRetries)
 		}
 	}
 
@@ -188,7 +241,7 @@ func (m *Module) updateIikoConfig(wu core.WinUtils, iikoPort string) error {
 
 	root := doc.SelectElement("config")
 	if root == nil {
-		return fmt.Errorf("корневой элемент <config> не найден в файле %s. Изменение отменено.", configPath)
+		return fmt.Errorf("корневой элемент <config> не найден в файле %s. Изменение отменено", configPath)
 	}
 
 	portElement := root.SelectElement("comBarcodeScanerPort")
@@ -210,7 +263,7 @@ func (m *Module) updateIikoConfig(wu core.WinUtils, iikoPort string) error {
 }
 
 // --- РЕЖИМ ДИАГНОСТИКИ И УДАЛЕНИЯ ---
-func (m *Module) runDiagnosticsWorkflow(wu core.WinUtils, baseDir string) error {
+func (m *Module) runDiagnosticsWorkflow(wu core.WinUtils, am core.AssetManager, baseDir string) error {
 	tui.Title("\n--- Обнаружена существующая установка. Запуск диагностики... ---")
 
 	var problems []string
@@ -248,15 +301,9 @@ func (m *Module) runDiagnosticsWorkflow(wu core.WinUtils, baseDir string) error 
 
 	switch choice {
 	case "1":
-		return m.runUninstallation(wu, baseDir)
+		return m.runUninstallation(wu, am) // <-- Передаем am
 	case "2":
-		tui.Info("\nНачинается процесс удаления перед переустановкой...")
-		err := m.runUninstallation(wu, baseDir)
-		if err != nil {
-			return fmt.Errorf("ошибка во время удаления перед переустановкой: %w", err)
-		}
-		tui.Success("\nУдаление завершено. Теперь запустите установку из главного меню еще раз.")
-		return nil
+		return m.runReinstallation(wu, am) // <-- Вызываем новую функцию
 	case "3":
 		tui.Info("Операция отменена. Возврат в главное меню.")
 		return nil
@@ -266,9 +313,36 @@ func (m *Module) runDiagnosticsWorkflow(wu core.WinUtils, baseDir string) error 
 	}
 }
 
+// Новая функция переустановки
+func (m *Module) runReinstallation(wu core.WinUtils, am core.AssetManager) error {
+	tui.Title("\n--- Начало процесса переустановки VComCaster ---")
+
+	tui.Info("-> Остановка процесса 'vcomcaster.exe'...")
+	_, _ = wu.RunCommand("taskkill", "/F", "/IM", "vcomcaster.exe")
+
+	tui.InfoF("-> Удаление задачи '%s' из Планировщика...", taskName)
+	if _, err := wu.RunCommand("schtasks", "/Delete", "/TN", taskName, "/F"); err != nil {
+		tui.Warn("   (Предупреждение: не удалось удалить задачу, возможно, ее и не было)")
+	}
+
+	tui.Info("-> Очистка старых ассетов VComCaster...")
+	if err := am.PurgeAsset("VComCaster_Package"); err != nil {
+		tui.Warn(fmt.Sprintf("Произошла ошибка при очистке ассета VComCaster_Package: %v", err))
+	}
+	if err := am.PurgeAsset("Com0Com_Installer"); err != nil {
+		tui.Warn(fmt.Sprintf("Произошла ошибка при очистке ассета Com0Com_Installer: %v", err))
+	}
+	tui.Success("Старые ассеты очищены.")
+
+	tui.Info("\n--- Запуск новой установки ---")
+	// Просто вызываем основной воркфлоу установки
+	return m.runInstallWorkflow(am, wu)
+}
+
 // Функция полного удаления
-func (m *Module) runUninstallation(wu core.WinUtils, baseDir string) error {
-	tui.Title("\n--- Начало процесса удаления ---")
+func (m *Module) runUninstallation(wu core.WinUtils, am core.AssetManager) error { // <-- Добавляем am в аргументы
+	tui.Title("\n--- Начало процесса полного удаления ---")
+	baseDir := filepath.Join(am.Cfg().RootPath, "vcomcaster")
 
 	tui.Info("-> Остановка процесса 'vcomcaster.exe'...")
 	_, _ = wu.RunCommand("taskkill", "/F", "/IM", "vcomcaster.exe")
@@ -291,12 +365,15 @@ func (m *Module) runUninstallation(wu core.WinUtils, baseDir string) error {
 		tui.Info("-> Деинсталлятор com0com не найден, пропуск.")
 	}
 
-	tui.InfoF("-> Удаление папки '%s'...", baseDir)
-	if err := os.RemoveAll(baseDir); err != nil {
-		return fmt.Errorf("не удалось полностью удалить директорию %s: %w", baseDir, err)
+	tui.Info("-> Очистка ассетов и директорий VComCaster...")
+	if err := am.PurgeAsset("VComCaster_Package"); err != nil {
+		tui.Warn(fmt.Sprintf("Произошла ошибка при очистке ассета VComCaster_Package: %v", err))
+	}
+	if err := am.PurgeAsset("Com0Com_Installer"); err != nil {
+		tui.Warn(fmt.Sprintf("Произошла ошибка при очистке ассета Com0Com_Installer: %v", err))
 	}
 
-	tui.Success("\nУдаление успешно завершено.")
+	tui.Success("\nПолное удаление успешно завершено.")
 	return nil
 }
 

@@ -341,3 +341,37 @@ func (m *Manager) ExtractFile(zipPath, pathInZip, destPath string) error {
 	}
 	return fmt.Errorf("файл '%s' не найден в архиве '%s'", pathInZip, zipPath)
 }
+
+// PurgeAsset удаляет файл ассета из кэша и его конечную директорию.
+func (m *Manager) PurgeAsset(assetName string) error {
+	assetInfo, ok := m.cfg.AssetCatalog[assetName]
+	if !ok {
+		// Не ошибка, если ассета нет в каталоге, просто ничего не делаем.
+		return nil
+	}
+
+	// 1. Удаляем файл из кэша
+	fileName := filepath.Base(assetInfo.URL)
+	localCachePath := filepath.Join(m.cfg.AssetsCachePath, fileName)
+	if _, err := os.Stat(localCachePath); err == nil {
+		fmt.Printf("Удаление файла из кэша: %s\n", localCachePath)
+		if err := os.Remove(localCachePath); err != nil {
+			// Не критичная ошибка, просто предупреждаем
+			fmt.Printf("Предупреждение: не удалось удалить файл из кэша %s: %v\n", localCachePath, err)
+		}
+	}
+
+	// 2. Удаляем конечную директорию, если она указана
+	if assetInfo.Destination != "" {
+		finalDestPath := filepath.Join(m.cfg.RootPath, assetInfo.Destination)
+		if _, err := os.Stat(finalDestPath); err == nil {
+			fmt.Printf("Удаление директории назначения: %s\n", finalDestPath)
+			if err := os.RemoveAll(finalDestPath); err != nil {
+				// Тоже не критично, но нужно предупредить
+				fmt.Printf("Предупреждение: не удалось удалить директорию назначения %s: %v\n", finalDestPath, err)
+			}
+		}
+	}
+
+	return nil
+}

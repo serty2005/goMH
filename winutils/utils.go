@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"go.bug.st/serial/enumerator"
 )
 
 // IsAdmin остается без изменений
@@ -278,4 +280,43 @@ func SetServiceTriggers(serviceName string, triggers []string) error {
 	}
 	fmt.Printf("Триггеры для службы '%s' успешно установлены.\n", serviceName)
 	return nil
+}
+
+// scannerInfo - это локальная, неэкспортируемая структура для внутреннего использования.
+type scannerInfo struct {
+	Port        string
+	Caption     string
+	PNPDeviceID string
+}
+
+// GetScanners теперь возвращает срез локальных структур и не зависит от пакета core.// Использует нативную библиотеку для перечисления ВСЕХ COM-портов, включая виртуальные.
+func GetScanners() ([]scannerInfo, error) {
+	ports, err := enumerator.GetDetailedPortsList()
+	if err != nil {
+		return nil, fmt.Errorf("не удалось получить список портов через нативную библиотеку: %w", err)
+	}
+
+	if len(ports) == 0 {
+		return []scannerInfo{}, nil
+	}
+
+	var scanners []scannerInfo
+	for _, port := range ports {
+		// Нас интересуют только USB-устройства
+		if port.IsUSB {
+			// Формируем Caption, похожий на тот, что в Диспетчере устройств
+			caption := port.Product
+
+			// Формируем PNPDeviceID из доступной информации
+			pnpDeviceID := fmt.Sprintf("USB\\VID_%s&PID_%s", port.VID, port.PID)
+
+			scanners = append(scanners, scannerInfo{
+				Port:        port.Name,   // e.g., "COM5"
+				Caption:     caption,     // e.g., "ATOL USB (COM5)"
+				PNPDeviceID: pnpDeviceID, // e.g., "USB\VID_2912&PID_0005"
+			})
+		}
+	}
+
+	return scanners, nil
 }

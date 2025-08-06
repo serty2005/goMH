@@ -128,7 +128,8 @@
 		},
 		"Com0Com_Installer": {
 			"url": "https://f.serty.top/distr/installer/assets/com0com_Setup_v3_x64.exe",
-			"type": "file"
+			"type": "file",
+			"destination": "vcomcaster"
 		},
 		"Regime_Installer": {
 			"url": "https://f.serty.top/regime-1.4.1-445.msi",
