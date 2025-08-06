@@ -116,13 +116,13 @@
 			"download_method": "HTTP"
 		},
 		"Getad_Agent": {
-			"url": "https://f.serty.top/temp/Getad2.zip",
+			"url": "https://f.serty.top/distr/installer/assets/getad.zip",
 			"type": "zip",
 			"destination": "getad",
 			"download_method": "HTTP"
 		},
 		"VComCaster_Package": {
-			"url": "https://f.serty.top/distr/installer/assets/vcomcaster_1.1.zip",
+			"url": "https://f.serty.top/distr/installer/assets/vcomcaster.zip",
 			"type": "zip",
 			"destination": "vcomcaster"
 		},

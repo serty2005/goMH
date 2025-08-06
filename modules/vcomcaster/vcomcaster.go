@@ -106,7 +106,7 @@ func (m *Module) runInstallWorkflow(am core.AssetManager, wu core.WinUtils) erro
 		outputPort = newPorts[0]
 	}
 	iniContent := fmt.Sprintf(
-		"[app]\r\nautostart_listing = 1\r\nautoreconnect = 1\r\nlogs-autoclear-days = 2\r\n[device]\r\ndevice_id = \r\ninput_port = %s\r\noutput_port = %s\r\nport_baudrate = 115200\r\ncr = 0\r\nlf = 0\r\n[service]\r\namount_rm_char_id = 6\r\ntimeout_clearcash = 1.5\r\ntimeout_autoreconnect = 5\r\ntimeout_reconnect = 5",
+		"[app]\r\nautostart_listing = 1\r\nautoreconnect = 1\r\nlogs-autoclear-days = 2\r\n[device]\r\ndevice_id = \r\ninput_port = %s\r\noutput_port = %s\r\nport_baudrate = 115200\r\ncr = 0\r\nlf = 0\r\n[service]\r\namount_rm_char_id = 0\r\ntimeout_clearcash = 1.5\r\ntimeout_autoreconnect = 3\r\ntimeout_reconnect = 3",
 		scannerComPort, outputPort,
 	)
 	configPath := filepath.Join(vcomcasterDestPath, "config.ini")
