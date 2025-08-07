@@ -212,12 +212,10 @@ func (m *Module) installTeamViewer(am core.AssetManager, wu core.WinUtils) error
 // --- Установка LiteManager ---
 func (m *Module) installLiteManager(am core.AssetManager, wu core.WinUtils) error {
 	tui.Info("\n-> Начало установки LiteManager...")
-	installerDir, err := am.Get("LiteManager_Installer")
+	msiPath, err := am.DownloadToCache("LiteManager_Installer")
 	if err != nil {
-		return err
+		return fmt.Errorf("не удалось скачать установщик LiteManager: %w", err)
 	}
-	assetInfo := am.Cfg().AssetCatalog["LiteManager_Installer"]
-	msiPath := filepath.Join(installerDir, filepath.Base(assetInfo.URL))
 
 	tui.Info("Запуск установки LiteManager в тихом режиме...")
 	_, err = wu.RunCommand("msiexec.exe", "/i", msiPath, "/quiet", "/norestart")
@@ -233,6 +231,11 @@ func (m *Module) installGetad(am core.AssetManager, wu core.WinUtils) error {
 	assetInfo := am.Cfg().AssetCatalog[assetName]
 	installDir := filepath.Join(am.Cfg().RootPath, assetInfo.Destination)
 
+	tui.InfoF("Подготовка директории: %s", installDir)
+	if err := os.MkdirAll(installDir, 0755); err != nil {
+		return fmt.Errorf("не удалось создать директорию установки %s: %w", installDir, err)
+	}
+
 	// --- ШАГ 1: Добавляем исключение в антивирус ---
 	tui.InfoF("Добавление пути '%s' в исключения Защитника Windows...", installDir)
 	if err := wu.AddDefenderExclusion(installDir); err != nil {
@@ -241,9 +244,6 @@ func (m *Module) installGetad(am core.AssetManager, wu core.WinUtils) error {
 	} else {
 		tui.Success("Путь успешно добавлен в исключения.")
 	}
-
-	// Создаем директорию, если ее нет
-	_ = os.MkdirAll(installDir, 0755)
 
 	// --- ШАГ 2: Получаем архив в кэш ---
 	tui.Info("Скачивание архива агента...")
