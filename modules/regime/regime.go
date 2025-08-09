@@ -24,13 +24,10 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 	// 1. Получаем ресурс (MSI-установщик) через assetmgr
 	tui.Info("-> Этап 1: Получение установщика...")
-	installerDir, err := am.Get("Regime_Installer")
+	msiPath, err := am.DownloadToCache("Regime_Installer")
 	if err != nil {
 		return fmt.Errorf("не удалось получить ресурс 'Regime_Installer': %w", err)
 	}
-	assetInfo := am.Cfg().AssetCatalog["Regime_Installer"]
-	msiName := filepath.Base(assetInfo.URL)
-	msiPath := filepath.Join(installerDir, msiName)
 
 	// 2. Проверяем, установлена ли служба "regime"
 	tui.Info("-> Этап 2: Проверка существующей установки...")
@@ -65,7 +62,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	}
 
 	// 4. Запуск установки с помощью msiexec
-	tui.InfoF("-> Этап 3: Запуск установки %s...", msiName)
+	tui.InfoF("-> Этап 3: Запуск установки %s...", filepath.Base(msiPath))
 	tui.Info("Установка будет выполнена в тихом режиме. Это может занять несколько минут...")
 
 	// Передаем слайс аргументов в RunCommand

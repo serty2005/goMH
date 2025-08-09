@@ -124,7 +124,6 @@ func (m *Module) installTeamViewer(am core.AssetManager, wu core.WinUtils) error
 	tui.Info("\n-> Начало установки TeamViewer...")
 	cfg := am.Cfg().TeamViewerConfig
 
-	// ... (весь код installTeamViewer без изменений)
 	// --- Шаг 1: Получение configId ---
 	tui.InfoF("Запрос страницы: %s", cfg.ShortURL)
 	client := &http.Client{}
