@@ -70,9 +70,29 @@ func (rw *RealWinUtils) RunCommandWithEnv(env map[string]string, name string, ar
 func (rw *RealWinUtils) GetFileVersion(filePath string) (string, error) {
 	return winutils.GetFileVersion(filePath)
 }
-
 func (rw *RealWinUtils) ListArchiveContents(archivePath string) ([]string, error) {
 	return winutils.ListArchiveContents(archivePath)
+}
+func (rw *RealWinUtils) FindFileRecursive(root, pattern string) (string, error) {
+	return winutils.FindFileRecursive(root, pattern)
+}
+func (rw *RealWinUtils) GetStartupFolders() (string, string, error) {
+	return winutils.GetStartupFolders()
+}
+func (rw *RealWinUtils) DeleteFile(path string) error {
+	return winutils.DeleteFile(path)
+}
+func (rw *RealWinUtils) CleanDirectory(path string) error {
+	return winutils.CleanDirectory(path)
+}
+func (rw *RealWinUtils) FindScheduledTaskByPath(exePath string) (string, error) {
+	return winutils.FindScheduledTaskByPath(exePath)
+}
+func (rw *RealWinUtils) DeleteScheduledTaskByName(taskName string) error {
+	return winutils.DeleteScheduledTaskByName(taskName)
+}
+func (rw *RealWinUtils) GetServiceStatus(serviceName string) (string, error) {
+	return winutils.GetServiceStatus(serviceName)
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:

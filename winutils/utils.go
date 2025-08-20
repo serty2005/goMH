@@ -344,9 +344,6 @@ func GetFileVersion(path string) (string, error) {
 
 	var fixedInfo *windows.VS_FIXEDFILEINFO
 	var len uint32
-	// --- ИСПРАВЛЕННАЯ СТРОКА ---
-	// Правильно получаем указатель на указатель: берем адрес переменной fixedInfo
-	// и приводим его к unsafe.Pointer.
 	err = windows.VerQueryValue(unsafe.Pointer(&buffer[0]), "\\", unsafe.Pointer(&fixedInfo), &len)
 	if err != nil {
 		return "", fmt.Errorf("VerQueryValue failed: could not find fixed file info block: %w", err)
@@ -394,4 +391,126 @@ func ListArchiveContents(archivePath string) ([]string, error) {
 	}
 
 	return filePaths, nil
+}
+
+// FindFileRecursive ищет файл по шаблону, начиная с корневой директории.
+func FindFileRecursive(root, pattern string) (string, error) {
+	var foundPath string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			matched, _ := filepath.Match(pattern, d.Name())
+			if matched {
+				foundPath = path
+				return fs.ErrExist // Прерываем поиск, как только нашли
+			}
+		}
+		return nil
+	})
+	if err == fs.ErrExist {
+		return foundPath, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("файл по шаблону '%s' не найден в '%s'", pattern, root)
+}
+
+// GetStartupFolders возвращает пути к папкам автозагрузки для текущего пользователя и для всех пользователей.
+func GetStartupFolders() (user, common string, err error) {
+	// Папка автозагрузки текущего пользователя
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", "", err
+	}
+	user = filepath.Join(userConfigDir, "..", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+
+	// Общая папка автозагрузки
+	common = os.ExpandEnv(`%ProgramData%\Microsoft\Windows\Start Menu\Programs\StartUp`)
+	return user, common, nil
+}
+
+// DeleteFile просто удаляет файл.
+func DeleteFile(path string) error {
+	return os.Remove(path)
+}
+
+// CleanDirectory удаляет все содержимое директории, не удаляя саму директорию.
+func CleanDirectory(path string) error {
+	dir, err := os.ReadDir(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // Если папки нет, считать задачу выполненной
+		}
+		return err
+	}
+	for _, d := range dir {
+		err := os.RemoveAll(filepath.Join(path, d.Name()))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FindScheduledTaskByPath ищет задачу в планировщике по пути к исполняемому файлу.
+func FindScheduledTaskByPath(exePath string) (string, error) {
+	out, err := RunCommand("schtasks", "/Query", "/V", "/FO", "CSV")
+	if err != nil {
+		return "", err
+	}
+
+	r := csv.NewReader(strings.NewReader(out))
+	records, err := r.ReadAll()
+	if err != nil {
+		return "", err
+	}
+
+	absExePath, _ := filepath.Abs(exePath)
+
+	for _, record := range records {
+		if len(record) > 8 {
+			taskName := record[0]
+			taskToRun := record[8]
+			// Сравниваем абсолютные пути, чтобы избежать неоднозначности
+			absTaskPath, _ := filepath.Abs(strings.Trim(taskToRun, `"`))
+			if strings.EqualFold(absTaskPath, absExePath) {
+				return taskName, nil
+			}
+		}
+	}
+	return "", nil // Не найдено - не ошибка
+}
+
+// DeleteScheduledTaskByName удаляет задачу по имени.
+func DeleteScheduledTaskByName(taskName string) error {
+	_, err := RunCommand("schtasks", "/Delete", "/TN", taskName, "/F")
+	return err
+}
+
+// GetServiceStatus возвращает статус службы (например, "RUNNING", "STOPPED").
+// Функция ищет непереводимые английские ключевые слова статуса,
+// что делает ее нечувствительной к языку операционной системы.
+func GetServiceStatus(serviceName string) (string, error) {
+	out, err := RunCommand("sc.exe", "query", serviceName)
+	if err != nil {
+		if strings.Contains(err.Error(), "1060") { // Служба не существует
+			return "NOT_FOUND", nil
+		}
+		return "", err
+	}
+
+	// Этот шаблон ищет одно из стандартных, непереводимых состояний службы.
+	// Они всегда выводятся в верхнем регистре на английском языке.
+	re := regexp.MustCompile(`(STOPPED|START_PENDING|STOP_PENDING|RUNNING|CONTINUE_PENDING|PAUSE_PENDING|PAUSED)`)
+	matches := re.FindStringSubmatch(out)
+
+	if len(matches) > 1 {
+		// Возвращаем первое найденное совпадение, например, "RUNNING"
+		return matches[1], nil
+	}
+
+	return "UNKNOWN", fmt.Errorf("не удалось определить статус службы из вывода sc.exe")
 }

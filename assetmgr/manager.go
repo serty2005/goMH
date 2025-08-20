@@ -242,6 +242,37 @@ func (m *Manager) ListFTP(path string) ([]core.FTPEntry, error) {
 	return result, nil
 }
 
+// UnpackToFlatDir распаковывает архив в указанную директорию,
+// обрабатывая случай, когда все файлы в архиве находятся в одной корневой папке.
+func (m *Manager) UnpackToFlatDir(assetName, cachePath, destDir string) error {
+	// Создаем временную директорию для анализа
+	tempExtractDir, err := os.MkdirTemp("", "unpack-check-*")
+	if err != nil {
+		return fmt.Errorf("не удалось создать временную директорию: %w", err)
+	}
+	defer os.RemoveAll(tempExtractDir)
+
+	// Распаковываем во временную папку
+	if err := unzip(cachePath, tempExtractDir); err != nil {
+		return fmt.Errorf("ошибка при первичной распаковке '%s': %w", assetName, err)
+	}
+
+	// Анализируем содержимое временной папки
+	entries, err := os.ReadDir(tempExtractDir)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать временную директорию: %w", err)
+	}
+
+	finalSourceDir := tempExtractDir
+	// Если внутри только одна папка, то именно она является источником файлов
+	if len(entries) == 1 && entries[0].IsDir() {
+		finalSourceDir = filepath.Join(tempExtractDir, entries[0].Name())
+	}
+
+	// Копируем содержимое из определенной исходной папки в конечную
+	return copyDirContents(finalSourceDir, destDir)
+}
+
 // --- Вспомогательные функции ---
 
 // createProgressBar создает и настраивает общий прогресс-бар для скачиваний.
@@ -304,6 +335,42 @@ func unzip(src, dest string) error {
 		}
 	}
 	return nil
+}
+
+// copyDirContents рекурсивно копирует содержимое одной директории в другую.
+func copyDirContents(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Формируем относительный путь, чтобы сохранить структуру
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		// Копирование файла
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+
+		dstFile, err := os.Create(dstPath)
+		if err != nil {
+			return err
+		}
+		defer dstFile.Close()
+
+		_, err = io.Copy(dstFile, srcFile)
+		return err
+	})
 }
 
 // ExtractFile извлекает файл из zip-архива.

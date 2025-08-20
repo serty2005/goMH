@@ -21,9 +21,16 @@ type WinUtils interface {
 	GetComPorts() ([]string, error)
 	GetScanners() ([]ScannerInfo, error)
 	IsProcessRunning(processName string) (bool, error)
-	CreateScheduledTask(taskName, executablePath, workingDir string) error
 	GetFileVersion(filePath string) (string, error)
 	ListArchiveContents(archivePath string) ([]string, error)
+	CreateScheduledTask(taskName, executablePath, workingDir string) error
+	FindFileRecursive(root, pattern string) (string, error)
+	GetStartupFolders() (user, common string, err error)
+	DeleteFile(path string) error
+	CleanDirectory(path string) error
+	FindScheduledTaskByPath(exePath string) (string, error)
+	DeleteScheduledTaskByName(taskName string) error
+	GetServiceStatus(serviceName string) (string, error)
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.
@@ -36,6 +43,7 @@ type AssetManager interface {
 	DownloadToCache(assetName string) (string, error)
 	ProcessFromCache(assetName, cachePath string) error
 	PurgeAsset(assetName string) error
+	UnpackToFlatDir(assetName, cachePath, destDir string) error
 	Cfg() *config.Config
 }
 

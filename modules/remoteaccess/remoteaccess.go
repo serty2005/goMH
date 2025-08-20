@@ -25,20 +25,21 @@ func (m *Module) MenuText() string {
 
 // Структура для хранения информации о компоненте
 type remoteComponent struct {
-	ID          string
-	Name        string
-	ServiceName string
-	IsInstalled bool
-	InstallFunc func(am core.AssetManager, wu core.WinUtils) error
+	ID             string
+	Name           string
+	ServiceName    string
+	IsInstalled    bool
+	AllowReinstall bool
+	InstallFunc    func(am core.AssetManager, wu core.WinUtils) error
 }
 
 // Главная функция Run теперь управляет подменю
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// Инициализируем компоненты
 	components := []*remoteComponent{
-		{ID: "1", Name: "TeamViewer", ServiceName: "TeamViewer", InstallFunc: m.installTeamViewer},
-		{ID: "2", Name: "LiteManager", ServiceName: "ROMService", InstallFunc: m.installLiteManager},
-		{ID: "3", Name: "Getad Agent", ServiceName: "MH_Getad", InstallFunc: m.installGetad},
+		{ID: "1", Name: "TeamViewer", ServiceName: "TeamViewer", InstallFunc: m.installTeamViewer, AllowReinstall: false},
+		{ID: "2", Name: "LiteManager", ServiceName: "ROMService", InstallFunc: m.installLiteManager, AllowReinstall: false},
+		{ID: "3", Name: "Getad Agent", ServiceName: "MH_Getad", InstallFunc: m.installGetad, AllowReinstall: true},
 	}
 
 	reader := bufio.NewReader(os.Stdin)
@@ -52,13 +53,18 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		// Отображаем меню
 		for _, c := range components {
 			status := tui.ColorRed + "[не установлено]" + tui.ColorReset
+			menuText := fmt.Sprintf("Установить %s", c.Name)
 			if c.IsInstalled {
 				status = tui.ColorGreen + "[установлено]" + tui.ColorReset
+				// Если разрешена переустановка, меняем текст
+				if c.AllowReinstall {
+					menuText = fmt.Sprintf("Переустановить %s", c.Name)
+				}
 			}
-			fmt.Printf(" %s. Установить %s %s\n", c.ID, c.Name, status)
+			fmt.Printf(" %s. %s %s\n", c.ID, menuText, status)
 		}
 		fmt.Println("\n 0. Назад в главное меню")
-		fmt.Print("Выберите пункт для установки или возврата: ")
+		fmt.Print("Выберите пункт: ")
 
 		// Читаем выбор пользователя
 		choiceStr, _ := reader.ReadString('\n')
@@ -79,7 +85,9 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 		// Если выбор корректен, запускаем установку
 		if chosenComponent != nil {
-			if chosenComponent.IsInstalled {
+			// Новая логика проверки
+			// Блокируем только если компонент установлен И у него НЕТ флага AllowReinstall
+			if chosenComponent.IsInstalled && !chosenComponent.AllowReinstall {
 				tui.Warn(fmt.Sprintf("\n%s уже установлен. Для переустановки сначала удалите его стандартными средствами Windows.", chosenComponent.Name))
 				fmt.Println("Нажмите Enter для продолжения...")
 				_, _ = reader.ReadString('\n')
@@ -89,9 +97,9 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 			// Запускаем функцию установки
 			err := chosenComponent.InstallFunc(am, wu)
 			if err != nil {
-				tui.Error(fmt.Sprintf("\n--- ОШИБКА при установке %s ---\n%v\n---------------------------------------\n", chosenComponent.Name, err))
+				tui.Error(fmt.Sprintf("\n--- ОШИБКА при установке/переустановке %s ---\n%v\n---------------------------------------\n", chosenComponent.Name, err))
 			} else {
-				tui.Success(fmt.Sprintf("\n--- %s успешно установлен. ---", chosenComponent.Name))
+				tui.Success(fmt.Sprintf("\n--- %s успешно установлен/переустановлен. ---", chosenComponent.Name))
 			}
 			fmt.Println("\nНажмите Enter, чтобы вернуться в меню...")
 			reader.ReadString('\n')
@@ -224,52 +232,103 @@ func (m *Module) installLiteManager(am core.AssetManager, wu core.WinUtils) erro
 // --- Установка Getad ---
 func (m *Module) installGetad(am core.AssetManager, wu core.WinUtils) error {
 	const assetName = "Getad_Agent"
-	tui.Info("\n-> Начало установки Getad Agent...")
+	const serviceName = "MH_Getad"
+	const installSubDir = "getad" // Папка внутри C:\MH
 
-	// Определяем путь установки ЗАРАНЕЕ из конфигурации
-	assetInfo := am.Cfg().AssetCatalog[assetName]
-	installDir := filepath.Join(am.Cfg().RootPath, assetInfo.Destination)
+	installDir := filepath.Join(am.Cfg().RootPath, installSubDir)
 
-	tui.InfoF("Подготовка директории: %s", installDir)
-	if err := os.MkdirAll(installDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать директорию установки %s: %w", installDir, err)
+	tui.Title("\n--- Начало установки/переустановки Getad Agent ---")
+
+	// --- ЭТАП 1: ПОИСК И ОЧИСТКА СТАРОЙ ВЕРСИИ ---
+	tui.Info("-> Этап 1: Поиск и удаление предыдущих версий...")
+
+	// Ищем старый getad*.exe
+	oldExePath, err := wu.FindFileRecursive(am.Cfg().RootPath, "getad*.exe")
+	if err == nil {
+		tui.InfoF("Найдена предыдущая установка: %s", oldExePath)
+		oldInstallDir := filepath.Dir(oldExePath)
+
+		// 1.1 Удаление службы
+		serviceExists, _ := wu.ServiceExists(serviceName)
+		if serviceExists {
+			tui.Info("Остановка и удаление службы...")
+			_, _ = wu.RunCommand(oldExePath, "stop")
+			time.Sleep(2 * time.Second) // Даем время на остановку
+			_, err := wu.RunCommand(oldExePath, "remove")
+			if err != nil {
+				// Пробуем альтернативный вариант, если 'remove' не сработал
+				_, _ = wu.RunCommand(oldExePath, "uninstall")
+			}
+		}
+
+		// 1.2 Удаление из автозагрузки
+		userStartup, commonStartup, err := wu.GetStartupFolders()
+		if err == nil {
+			for _, startupDir := range []string{userStartup, commonStartup} {
+				entries, _ := os.ReadDir(startupDir)
+				for _, entry := range entries {
+					if strings.HasSuffix(strings.ToLower(entry.Name()), ".lnk") {
+						// TODO: Нужна библиотека для чтения .lnk, чтобы проверить путь.
+						// Пока что удаляем по имени файла getad*.lnk
+						if strings.HasPrefix(strings.ToLower(entry.Name()), "getad") {
+							shortcutPath := filepath.Join(startupDir, entry.Name())
+							tui.InfoF("Удаление ярлыка из автозагрузки: %s", shortcutPath)
+							_ = wu.DeleteFile(shortcutPath)
+						}
+					}
+				}
+			}
+		}
+
+		// 1.3 Удаление из планировщика
+		taskName, _ := wu.FindScheduledTaskByPath(oldExePath)
+		if taskName != "" {
+			tui.InfoF("Удаление задачи '%s' из планировщика...", taskName)
+			_ = wu.DeleteScheduledTaskByName(taskName)
+		}
+
+		// 1.4 Очистка папки установки (если это не корневая папка C:\MH)
+		if strings.EqualFold(oldInstallDir, am.Cfg().RootPath) {
+			tui.Warn("Getad установлен в корневую папку, очистка не производится.")
+		} else {
+			tui.InfoF("Очистка директории: %s", oldInstallDir)
+			_ = wu.CleanDirectory(oldInstallDir)
+		}
+
+	} else {
+		tui.Info("Предыдущих версий не найдено, выполняется чистая установка.")
 	}
+	// Очищаем целевую папку на всякий случай
+	_ = wu.CleanDirectory(installDir)
+	_ = os.MkdirAll(installDir, 0755)
 
-	// --- ШАГ 1: Добавляем исключение в антивирус ---
+	// --- ЭТАП 2: УСТАНОВКА НОВОЙ ВЕРСИИ ---
+	tui.Info("\n-> Этап 2: Установка новой версии...")
+
+	// 2.1 Добавляем исключение в антивирус
 	tui.InfoF("Добавление пути '%s' в исключения Защитника Windows...", installDir)
 	if err := wu.AddDefenderExclusion(installDir); err != nil {
-		// Это не критичная ошибка, просто выводим предупреждение
 		tui.Warn(fmt.Sprintf("Не удалось добавить исключение: %v", err))
-	} else {
-		tui.Success("Путь успешно добавлен в исключения.")
 	}
 
-	// --- ШАГ 2: Получаем архив в кэш ---
+	// 2.2 Скачиваем и распаковываем
 	tui.Info("Скачивание архива агента...")
 	cachePath, err := am.DownloadToCache(assetName)
 	if err != nil {
 		return fmt.Errorf("не удалось скачать архив агента: %w", err)
 	}
-	tui.Success("Архив успешно скачан.")
 
-	// --- ШАГ 3: Разархивируем архив в путь установки ---
 	tui.InfoF("Распаковка архива в '%s'...", installDir)
-	if err := am.ProcessFromCache(assetName, cachePath); err != nil {
+	// Используем новую "умную" распаковку
+	if err := am.UnpackToFlatDir(assetName, cachePath, installDir); err != nil {
 		return fmt.Errorf("не удалось распаковать архив агента: %w", err)
 	}
-	tui.Success("Агент успешно распакован.")
 
-	// --- ШАГ 4: Запуск с аргументами ---
+	// 2.3 Установка и запуск службы
 	serviceExe := filepath.Join(installDir, "getad-service.exe")
-
 	if _, err := os.Stat(serviceExe); os.IsNotExist(err) {
 		return fmt.Errorf("не найден исполняемый файл службы: %s", serviceExe)
 	}
-
-	// Остановка существующей службы (на случай переустановки)
-	tui.Info("Остановка существующей службы (если есть)...")
-	_, _ = wu.RunCommand(serviceExe, "stop")
-	time.Sleep(1 * time.Second)
 
 	tui.Info("Установка службы...")
 	if _, err := wu.RunCommand(serviceExe, "--startup", "auto", "install"); err != nil {
@@ -281,10 +340,25 @@ func (m *Module) installGetad(am core.AssetManager, wu core.WinUtils) error {
 		return fmt.Errorf("не удалось запустить службу: %w", err)
 	}
 
+	// 2.4 Настройка триггеров
 	tui.Info("Настройка триггеров службы...")
 	triggers := []string{"start/machinepolicy", "start/userpolicy"}
-	if err := wu.SetServiceTriggers("MH_Getad", triggers); err != nil {
+	if err := wu.SetServiceTriggers(serviceName, triggers); err != nil {
 		tui.Warn(fmt.Sprintf("Не удалось установить триггеры: %v", err))
+	}
+
+	// --- ЭТАП 3: ПРОВЕРКА ---
+	tui.Info("\n-> Этап 3: Проверка статуса службы...")
+	time.Sleep(3 * time.Second) // Даем службе время на запуск
+	status, err := wu.GetServiceStatus(serviceName)
+	if err != nil {
+		return fmt.Errorf("не удалось проверить статус службы: %w", err)
+	}
+
+	if status == "RUNNING" {
+		tui.SuccessF("Служба '%s' успешно установлена и запущена.", serviceName)
+	} else {
+		return fmt.Errorf("служба '%s' установлена, но ее статус '%s', а не 'RUNNING'", serviceName, status)
 	}
 
 	return nil
