@@ -22,6 +22,8 @@ type WinUtils interface {
 	GetScanners() ([]ScannerInfo, error)
 	IsProcessRunning(processName string) (bool, error)
 	CreateScheduledTask(taskName, executablePath, workingDir string) error
+	GetFileVersion(filePath string) (string, error)
+	ListArchiveContents(archivePath string) ([]string, error)
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.

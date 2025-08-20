@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"goMH/modules/iiko"
 	"goMH/tui"
 	"io"
 	"io/fs"
@@ -51,6 +52,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		fmt.Println(" 1. Очистка временных файлов")
 		fmt.Println(" 2. Сборщик логов в архив")
 		fmt.Println(" 3. Просмотр лога в реальном времени (tail -f)")
+		fmt.Println(" 4. Патчи iikoFront")
 		fmt.Println("\n 0. Назад в главное меню")
 		fmt.Print("Выберите пункт: ")
 
@@ -65,6 +67,8 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 			err = m.collectLogs(am)
 		case "3":
 			err = m.viewLog(am)
+		case "4":
+			err = m.updateIikoPatches(am, wu)
 		case "0":
 			tui.Info("Возврат в главное меню.")
 			return nil
@@ -640,4 +644,36 @@ func findStartOfLastNLines(file *os.File, n int) (int64, error) {
 
 	// Если во всем файле меньше N строк, начинаем с самого начала
 	return 0, nil
+}
+
+// --- Пункт 4: Обновление патчей iikoFront ---
+func (m *Module) updateIikoPatches(am core.AssetManager, wu core.WinUtils) error {
+	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
+	const iikoFrontExe = `iikoFront.Net.exe`
+
+	frontExePath := filepath.Join(iikoFrontDir, iikoFrontExe)
+
+	if _, err := os.Stat(frontExePath); os.IsNotExist(err) {
+		return fmt.Errorf("установка iikoFront не найдена по стандартному пути: %s", iikoFrontDir)
+	}
+
+	tui.Info("Определение версии установленного iikoFront...")
+	fullVersion, err := wu.GetFileVersion(frontExePath)
+	if err != nil {
+		return fmt.Errorf("не удалось определить версию файла %s: %w", iikoFrontExe, err)
+	}
+	tui.SuccessF("Найдена версия: %s", fullVersion)
+
+	// Конвертируем полную версию в короткий формат "927"
+	parts := strings.Split(fullVersion, ".")
+	if len(parts) < 3 {
+		return fmt.Errorf("некорректный формат версии: %s", fullVersion)
+	}
+	// Собираем из 9.2.7... -> 927
+	shortVersion := parts[0] + parts[1] + parts[2][0:1]
+
+	backupDir := filepath.Join(am.Cfg().RootPath, shortVersion)
+
+	// Вызываем общий воркфлоу из модуля iiko
+	return iiko.RunPatchWorkflow(am, wu, shortVersion, iikoFrontDir, backupDir)
 }

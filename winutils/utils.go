@@ -1,8 +1,10 @@
 package winutils
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -11,8 +13,11 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unsafe"
 
+	"github.com/mholt/archives"
 	"go.bug.st/serial/enumerator"
+	"golang.org/x/sys/windows"
 )
 
 // IsAdmin остается без изменений
@@ -319,4 +324,74 @@ func GetScanners() ([]scannerInfo, error) {
 	}
 
 	return scanners, nil
+}
+
+// GetFileVersion читает информацию о версии файла напрямую через WinAPI.
+func GetFileVersion(path string) (string, error) {
+	size, err := windows.GetFileVersionInfoSize(path, nil)
+	if err != nil {
+		return "", fmt.Errorf("GetFileVersionInfoSize failed for %s: %w", path, err)
+	}
+	if size == 0 {
+		return "", fmt.Errorf("no version info found in %s", path)
+	}
+
+	buffer := make([]byte, size)
+	err = windows.GetFileVersionInfo(path, 0, size, unsafe.Pointer(&buffer[0]))
+	if err != nil {
+		return "", fmt.Errorf("GetFileVersionInfo failed for %s: %w", path, err)
+	}
+
+	var fixedInfo *windows.VS_FIXEDFILEINFO
+	var len uint32
+	// --- ИСПРАВЛЕННАЯ СТРОКА ---
+	// Правильно получаем указатель на указатель: берем адрес переменной fixedInfo
+	// и приводим его к unsafe.Pointer.
+	err = windows.VerQueryValue(unsafe.Pointer(&buffer[0]), "\\", unsafe.Pointer(&fixedInfo), &len)
+	if err != nil {
+		return "", fmt.Errorf("VerQueryValue failed: could not find fixed file info block: %w", err)
+	}
+	if fixedInfo == nil {
+		return "", fmt.Errorf("не найдена структура VS_FIXEDFILEINFO")
+	}
+
+	if fixedInfo.Signature != 0xFEEF04BD {
+		return "", fmt.Errorf("invalid fixed file info signature")
+	}
+
+	major := uint16(fixedInfo.FileVersionMS >> 16)
+	minor := uint16(fixedInfo.FileVersionMS & 0xffff)
+	patch := uint16(fixedInfo.FileVersionLS >> 16)
+	build := uint16(fixedInfo.FileVersionLS & 0xffff)
+
+	return fmt.Sprintf("%d.%d.%d.%d", major, minor, patch, build), nil
+}
+
+// ListArchiveContents возвращает список путей файлов внутри архива.
+func ListArchiveContents(archivePath string) ([]string, error) {
+	var filePaths []string
+
+	// Создаем виртуальную файловую систему из архива
+	fsys, err := archives.FileSystem(context.Background(), archivePath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось открыть архив %s как файловую систему: %w", archivePath, err)
+	}
+
+	// Проходим по всем файлам в виртуальной ФС
+	err = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err // Прерываем обход при ошибке
+		}
+		if d.IsDir() {
+			return nil // Пропускаем директории
+		}
+		filePaths = append(filePaths, path)
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("не удалось прочитать содержимое архива %s: %w", archivePath, err)
+	}
+
+	return filePaths, nil
 }

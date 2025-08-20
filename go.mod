@@ -8,6 +8,7 @@ require (
 	github.com/mholt/archives v0.1.3
 	github.com/schollz/progressbar/v3 v3.18.0
 	go.bug.st/serial v1.6.4
+	golang.org/x/sys v0.29.0
 	gopkg.in/ini.v1 v1.67.0
 )
 
@@ -33,7 +34,6 @@ require (
 	github.com/sorairolake/lzip-go v0.3.5 // indirect
 	github.com/ulikunitz/xz v0.5.12 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
-	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/term v0.28.0 // indirect
 	golang.org/x/text v0.20.0 // indirect
 )

@@ -67,6 +67,13 @@ func (rw *RealWinUtils) CreateScheduledTask(taskName, executablePath, workingDir
 func (rw *RealWinUtils) RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error) {
 	return winutils.RunCommandWithEnv(env, name, args...)
 }
+func (rw *RealWinUtils) GetFileVersion(filePath string) (string, error) {
+	return winutils.GetFileVersion(filePath)
+}
+
+func (rw *RealWinUtils) ListArchiveContents(archivePath string) ([]string, error) {
+	return winutils.ListArchiveContents(archivePath)
+}
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
 // из флага, локальный или удаленный.

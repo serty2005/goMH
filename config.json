@@ -48,7 +48,7 @@
 	},
 	"iiko_config": {
 		"base_ftp_path": "/distr/iiko",
-		"patch_route_file": "/front_patches/patcher_route.txt",
+		"patches_base_url": "https://rapid.iiko.ru/versionPatches",
 		"components_to_find": [
 			{
 				"id": "Front",

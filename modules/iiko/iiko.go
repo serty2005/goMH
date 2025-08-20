@@ -1,15 +1,12 @@
 package iiko
 
 import (
-	"archive/zip"
 	"bufio"
-	"encoding/csv"
 	"errors"
 	"fmt"
 	"goMH/config"
 	"goMH/core"
 	"goMH/tui"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,15 +22,6 @@ type DiscoveredVersions map[string][]config.IikoComponent
 
 var errUserChoseExit = errors.New("пользователь выбрал выход в главное меню")
 
-type IikoPatch struct {
-	Path        string
-	Name        string
-	Description string
-	Version     string
-	LocalPath   string
-	Downloaded  bool
-}
-
 type Module struct {
 	Cfg *config.IikoConfig
 }
@@ -45,7 +33,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	m.Cfg = &am.Cfg().IikoConfig
 
 	// 1. Сканируем FTP на предмет доступных версий
-	fmt.Println("Сканирование FTP на наличие дистрибутивов iiko...")
+	tui.Info("Сканирование FTP на наличие дистрибутивов iiko...")
 	discovered, err := m.discoverVersions(am)
 	if err != nil {
 		return fmt.Errorf("не удалось просканировать FTP: %w", err)
@@ -58,18 +46,32 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	selectedComponent, err := m.showDistroMenu(discovered)
 	if err != nil {
 		if errors.Is(err, errUserChoseExit) {
-			// Если пользователь выбрал "00", это не ошибка, просто выходим в главное меню
 			tui.Info("Возврат в главное меню.")
 			return nil
 		}
-		return err // Другая ошибка
+		return err
 	}
+
+	// --- ИЗМЕНЕНИЕ ЛОГИКИ ---
+	// 3. Сразу после выбора дистрибутива, если это Front, предлагаем выбрать патч.
+	var selectedPatch IikoPatch
+	var patchWasSelected bool
+
+	if selectedComponent.ID == "Front" {
+		// Вызываем новую функцию, которая только находит и предлагает выбрать патч
+		selectedPatch, patchWasSelected, err = FindAndSelectPatch(am, selectedComponent.Version)
+		if err != nil {
+			// В случае серьезной ошибки прерываем установку
+			return fmt.Errorf("критическая ошибка при выборе патча: %w", err)
+		}
+	}
+	// --- КОНЕЦ ИЗМЕНЕНИЯ ЛОГИКИ ---
 
 	distroName := "iiko " + selectedComponent.Version + " " + selectedComponent.MenuText
 	if selectedComponent.ID == "iikoCard" {
 		distroName = selectedComponent.MenuText
 	}
-	fmt.Printf("\n--- Начало установки %s ---\n", distroName)
+	tui.Title(fmt.Sprintf("\n--- Начало установки %s ---", distroName))
 
 	targetDir := filepath.Join(am.Cfg().RootPath, selectedComponent.Version)
 	if selectedComponent.ID == "iikoCard" {
@@ -79,19 +81,11 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 	installerPath := filepath.Join(targetDir, selectedComponent.FileName)
 
-	// 3. Скачиваем основной установщик
+	// 4. Скачиваем основной установщик
+	tui.Info("Скачивание основного дистрибутива...")
 	_, err = am.DownloadFTPWithProgress(selectedComponent.FTPPath, installerPath)
 	if err != nil {
 		return fmt.Errorf("не удалось скачать установщик %s: %w", distroName, err)
-	}
-
-	// 4. Обрабатываем патчи (только для Front)
-	var patchesToInstall []IikoPatch
-	if selectedComponent.ID == "Front" {
-		patchesToInstall, err = m.handlePatches(am, selectedComponent.Version, targetDir)
-		if err != nil {
-			fmt.Printf("Предупреждение: не удалось обработать патчи: %v. Установка продолжится без них.\n", err)
-		}
 	}
 
 	// 5. Запускаем установщик
@@ -103,29 +97,30 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		return fmt.Errorf("установщик завершился с кодом ошибки: %d", exitCode)
 	}
 
-	fmt.Printf("\nУстановка %s успешно завершена.\n", distroName)
+	tui.Success(fmt.Sprintf("\nУстановка %s успешно завершена.", distroName))
 
-	// 6. Применяем патчи
-	if len(patchesToInstall) > 0 {
+	// --- ИЗМЕНЕНИЕ ЛОГИКИ ---
+	// 6. Применяем предварительно выбранный патч
+	if patchWasSelected {
 		if selectedComponent.RunAfter != "" {
 			installDir := filepath.Dir(selectedComponent.RunAfter)
-			for _, patch := range patchesToInstall {
-				if patch.Downloaded {
-					fmt.Printf("\n--- Применение патча: %s ---\n", patch.Name)
-					if err := m.applyIikoPatch(installDir, patch.LocalPath, patch.Name); err != nil {
-						fmt.Printf("ОШИБКА при применении патча %s: %v\n", patch.Name, err)
-					}
-				}
+			// Вызываем функцию, которая только применяет патч
+			err = applyPatch(am, wu, selectedPatch, installDir, targetDir)
+			if err != nil {
+				// Применение патча - важный шаг, в случае ошибки сообщаем о ней
+				tui.Error(fmt.Sprintf("Критическая ошибка при применении патча: %v", err))
+				tui.Error("Основная программа была установлена, но патч - нет. Попробуйте установить патч через Утилиты обслуживания.")
 			}
 		} else {
-			fmt.Printf("Предупреждение: не удалось применить патчи, так как не указана команда запуска после установки.\n")
+			tui.Warn("Не удалось применить патч, так как не указан путь установки iiko (run_after).")
 		}
 	}
+	// --- КОНЕЦ ИЗМЕНЕНИЯ ЛОГИКИ ---
 
 	// 7. Запуск приложения после установки
 	if selectedComponent.RunAfter != "" {
 		if _, err := os.Stat(selectedComponent.RunAfter); err == nil {
-			fmt.Printf("Запуск %s...\n", selectedComponent.RunAfter)
+			tui.InfoF("Запуск %s...", selectedComponent.RunAfter)
 			exec.Command(selectedComponent.RunAfter).Start()
 		}
 	}
@@ -230,85 +225,6 @@ func (m *Module) showDistroMenu(versions DiscoveredVersions) (config.IikoCompone
 	}
 }
 
-func (m *Module) handlePatches(am core.AssetManager, version, targetDir string) ([]IikoPatch, error) {
-	routeFTPPath := m.Cfg.BaseFTPPath + m.Cfg.PatchRouteFile
-	tempRouteFile := filepath.Join(os.TempDir(), "patcher_route.txt")
-
-	_, err := am.DownloadFTPWithProgress(routeFTPPath, tempRouteFile)
-	if err != nil {
-		return nil, fmt.Errorf("не удалось скачать файл с патчами: %w", err)
-	}
-	defer os.Remove(tempRouteFile)
-
-	file, err := os.Open(tempRouteFile)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	r := csv.NewReader(file)
-	r.FieldsPerRecord = 4
-	records, err := r.ReadAll()
-	if err != nil {
-		return nil, err
-	}
-
-	var availablePatches []IikoPatch
-	for _, rec := range records {
-		if strings.TrimSpace(rec[3]) == version {
-			availablePatches = append(availablePatches, IikoPatch{
-				Path:        rec[0],
-				Name:        rec[1],
-				Description: rec[2],
-				Version:     rec[3],
-			})
-		}
-	}
-
-	if len(availablePatches) == 0 {
-		fmt.Println("Актуальные патчи для этой версии не найдены.")
-		return nil, nil
-	}
-
-	// Показываем меню выбора патчей
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("\nНайдены следующие патчи. Выберите, какие установить:")
-	for i, p := range availablePatches {
-		fmt.Printf(" %d) %s - %s\n", i+1, p.Name, p.Description)
-	}
-	fmt.Print("Введите номера через запятую (напр., 1,3) или Enter для пропуска: ")
-	choiceStr, _ := reader.ReadString('\n')
-	choiceStr = strings.TrimSpace(choiceStr)
-	if choiceStr == "" {
-		return nil, nil
-	}
-
-	var selectedPatches []IikoPatch
-	for _, idxStr := range strings.Split(choiceStr, ",") {
-		idx, err := strconv.Atoi(strings.TrimSpace(idxStr))
-		if err == nil && idx >= 1 && idx <= len(availablePatches) {
-			patch := availablePatches[idx-1]
-			patch.LocalPath = filepath.Join(targetDir, filepath.Base(patch.Path))
-			patch.Downloaded = false
-			selectedPatches = append(selectedPatches, patch)
-		}
-	}
-
-	// Скачиваем выбранные патчи
-	for i := range selectedPatches {
-		patch := &selectedPatches[i] // Берем указатель, чтобы изменять поле Downloaded
-		ftpURL := m.Cfg.BaseFTPPath + patch.Path
-		_, err := am.DownloadFTPWithProgress(ftpURL, patch.LocalPath)
-		if err != nil {
-			fmt.Printf("ОШИБКА скачивания патча %s: %v\n", patch.Name, err)
-		} else {
-			patch.Downloaded = true
-		}
-	}
-
-	return selectedPatches, nil
-}
-
 func (m *Module) runInstaller(wu core.WinUtils, installerPath, args, rootPath string) (int, error) {
 	// Создаем путь для временного лог-файла
 	logFileName := fmt.Sprintf("installer_log_%d.txt", time.Now().Unix())
@@ -352,57 +268,4 @@ func (m *Module) runInstaller(wu core.WinUtils, installerPath, args, rootPath st
 	}
 
 	return exitCode, nil
-}
-
-func (m *Module) applyIikoPatch(installDir, patchZipPath, patchName string) error {
-	backupDir := filepath.Join(filepath.Dir(patchZipPath), fmt.Sprintf("backup_%s_%d", patchName, time.Now().Unix()))
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать папку для бэкапа: %w", err)
-	}
-	fmt.Printf("Создана папка для бэкапа: %s\n", backupDir)
-
-	r, err := zip.OpenReader(patchZipPath)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	for _, f := range r.File {
-		destPath := filepath.Join(installDir, f.Name)
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(destPath, f.Mode())
-			continue
-		}
-
-		// Бэкап существующего файла
-		if _, err := os.Stat(destPath); err == nil {
-			backupPath := filepath.Join(backupDir, f.Name)
-			os.MkdirAll(filepath.Dir(backupPath), 0755)
-			if err := os.Rename(destPath, backupPath); err != nil {
-				fmt.Printf("Предупреждение: не удалось сделать бэкап файла %s: %v\n", destPath, err)
-			}
-		}
-
-		// Распаковка нового файла
-		os.MkdirAll(filepath.Dir(destPath), 0755)
-		destFile, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
-		}
-
-		srcFile, err := f.Open()
-		if err != nil {
-			destFile.Close()
-			return err
-		}
-
-		_, err = io.Copy(destFile, srcFile)
-		destFile.Close()
-		srcFile.Close()
-		if err != nil {
-			return err
-		}
-	}
-	fmt.Printf("Патч '%s' успешно применен.\n", patchName)
-	return nil
 }
