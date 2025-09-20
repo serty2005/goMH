@@ -3,6 +3,7 @@ name: Build and Release
 on:
   push:
     branches: [ main, develop ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, develop ]
 
@@ -54,7 +55,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: build-windows
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || startsWith(github.ref, 'refs/tags/v')
 
     steps:
     - name: Checkout code
@@ -69,8 +70,8 @@ jobs:
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v${{ github.run_number }}
-        name: Release v${{ github.run_number }}
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
         body: |
           ## goMH - Мультитул для техподдержки iiko и Syrve
 
@@ -87,7 +88,7 @@ jobs:
           - Требуются права администратора для полноценной работы
           - Поддерживает работу со службами Windows, сканерами, COM-портами
         draft: false
-        prerelease: false
+        prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
         files: ./artifacts/windows/goMH.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
