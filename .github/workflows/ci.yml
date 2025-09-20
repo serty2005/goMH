@@ -48,7 +48,7 @@ jobs:
       with:
         name: goMH-windows-${{ github.run_number }}
         path: goMH.exe
-        retention-days: 30
+        retention-days: 21
 
   release:
     name: Create Release
