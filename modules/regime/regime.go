@@ -6,7 +6,9 @@ import (
 	"goMH/core"
 	"goMH/tui"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,6 +42,79 @@ func getCredentials() (username, password string, err error) {
 	return username, password, nil
 }
 
+// checkDotNet48 проверяет установленную версию .NET Framework 4.8
+func checkDotNet48() (bool, error) {
+	// PowerShell команда для получения версии .NET Framework
+	cmd := exec.Command("powershell", "-Command",
+		"Get-ItemProperty 'HKLM:SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full\\' -Name Release -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Release")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("не удалось выполнить проверку .NET Framework: %w", err)
+	}
+
+	releaseStr := strings.TrimSpace(string(output))
+	if releaseStr == "" {
+		return false, fmt.Errorf(".NET Framework 4.8 не установлен")
+	}
+
+	release, err := strconv.Atoi(releaseStr)
+	if err != nil {
+		return false, fmt.Errorf("не удалось преобразовать версию .NET Framework: %w", err)
+	}
+
+	// .NET Framework 4.8 соответствует Release >= 528040
+	isInstalled := release >= 528040
+	return isInstalled, nil
+}
+
+// installDotNet48 скачивает и устанавливает .NET Framework 4.8 Developer Pack
+func installDotNet48(rootPath string) error {
+	dotNetUrl := "https://go.microsoft.com/fwlink/?linkid=2088517"
+
+	tui.Info("-> Скачивание .NET Framework 4.8 Developer Pack...")
+	tui.InfoF("URL: %s", dotNetUrl)
+
+	// Создаем директорию _assets в корне проекта для скачивания
+	assetsDir := filepath.Join(rootPath, "_assets")
+	if err := os.MkdirAll(assetsDir, 0755); err != nil {
+		return fmt.Errorf("не удалось создать директорию _assets: %w", err)
+	}
+
+	installerPath := filepath.Join(assetsDir, "ndp48-devpack-enu.exe")
+
+	// PowerShell команда для скачивания файла
+	downloadCmd := fmt.Sprintf(
+		"Invoke-WebRequest -Uri '%s' -OutFile '%s' -UseBasicParsing",
+		dotNetUrl, installerPath)
+
+	cmd := exec.Command("powershell", "-Command", downloadCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("не удалось скачать .NET Framework 4.8: %s. Ошибка: %w", string(output), err)
+	}
+
+	tui.Success("Файл успешно скачан")
+
+	// Установка в тихом режиме
+	tui.Info("-> Установка .NET Framework 4.8 Developer Pack...")
+	installCmd := exec.Command(installerPath, "/quiet", "/norestart")
+
+	installOutput, err := installCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("не удалось установить .NET Framework 4.8: %s. Ошибка: %w", string(installOutput), err)
+	}
+
+	tui.Success(".NET Framework 4.8 Developer Pack успешно установлен")
+
+	// Удаляем установщик после установки
+	if err := os.Remove(installerPath); err != nil {
+		tui.Warn(fmt.Sprintf("Не удалось удалить временный файл установщика: %v", err))
+	}
+
+	return nil
+}
+
 func (m *Module) ID() string {
 	return "Regime"
 }
@@ -67,6 +142,32 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		return fmt.Errorf("не удалось проверить наличие службы '%s': %w", serviceName, err)
 	}
 
+	// 2.5. Проверяем наличие .NET Framework 4.8
+	tui.Info("-> Этап 2.5: Проверка .NET Framework 4.8...")
+	isDotNetInstalled, err := checkDotNet48()
+	if err != nil {
+		tui.Warn(fmt.Sprintf("Не удалось проверить установку .NET Framework 4.8: %v", err))
+		tui.Info("Продолжаем установку без проверки .NET Framework...")
+	} else if !isDotNetInstalled {
+		tui.Warn(".NET Framework 4.8 не обнаружен. Начинаем установку...")
+
+		// Устанавливаем .NET Framework 4.8
+		if err := installDotNet48(am.Cfg().RootPath); err != nil {
+			return fmt.Errorf("не удалось установить .NET Framework 4.8: %w", err)
+		}
+
+		// Проверяем установку еще раз после установки
+		tui.Info("-> Повторная проверка .NET Framework 4.8...")
+		isDotNetInstalled, err = checkDotNet48()
+		if err != nil || !isDotNetInstalled {
+			return fmt.Errorf("не удалось подтвердить установку .NET Framework 4.8: %w", err)
+		}
+
+		tui.Success(".NET Framework 4.8 успешно установлен и проверен")
+	} else {
+		tui.Success(".NET Framework 4.8 уже установлен")
+	}
+
 	// 3. Формируем аргументы для msiexec
 	logDir := filepath.Join(am.Cfg().RootPath, "logs")
 	_ = os.MkdirAll(logDir, 0755)
@@ -88,7 +189,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		tui.Info("Новая установка 'regime'.")
 
 		// 4. Запрашиваем учетные данные у пользователя только для новой установки
-		tui.Info("-> Этап 3: Запрос учетных данных...")
+		tui.Info("-> Этап 4: Запрос учетных данных...")
 		username, password, err := getCredentials()
 		if err != nil {
 			return fmt.Errorf("не удалось получить учетные данные: %w", err)
@@ -102,7 +203,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	}
 
 	// 5. Запуск установки с помощью msiexec
-	tui.InfoF("-> Этап 4: Запуск установки %s...", filepath.Base(msiPath))
+	tui.InfoF("-> Этап 5: Запуск установки %s...", filepath.Base(msiPath))
 	tui.Info("Установка будет выполнена в тихом режиме. Это может занять несколько минут...")
 
 	// Передаем слайс аргументов в RunCommand

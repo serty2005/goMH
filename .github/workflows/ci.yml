@@ -1,0 +1,93 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.1'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Build
+      run: go build -v -o goMH.exe .
+
+    - name: Test build
+      run: |
+        if (Test-Path "goMH.exe") {
+          Write-Host "Build successful: goMH.exe created"
+          Get-Item "goMH.exe" | Select-Object Name, Length, LastWriteTime
+        } else {
+          Write-Error "Build failed: goMH.exe not found"
+          exit 1
+        }
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: goMH-windows-${{ github.run_number }}
+        path: goMH.exe
+        retention-days: 30
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build-windows
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download Windows build
+      uses: actions/download-artifact@v4
+      with:
+        name: goMH-windows-${{ github.run_number }}
+        path: ./artifacts/windows/
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ github.run_number }}
+        name: Release v${{ github.run_number }}
+        body: |
+          ## goMH - Мультитул для техподдержки iiko и Syrve
+
+          ### Скачать:
+          - **Windows**: `goMH.exe` (требуются права администратора)
+
+          ### Требования:
+          - Go 1.23+ для сборки
+          - Windows: права администратора для запуска
+          - Для корректной работы требуется Windows с поддержкой всех системных функций (службы, COM-порты, сканеры)
+
+          ### Важно:
+          - Это приложение предназначено только для Windows-систем
+          - Требуются права администратора для полноценной работы
+          - Поддерживает работу со службами Windows, сканерами, COM-портами
+        draft: false
+        prerelease: false
+        files: ./artifacts/windows/goMH.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
