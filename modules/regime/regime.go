@@ -1,15 +1,44 @@
 package regime
 
 import (
+	"bufio"
 	"fmt"
 	"goMH/core"
 	"goMH/tui"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Module struct{}
+
+// getCredentials запрашивает у пользователя логин и пароль для установки Regime
+func getCredentials() (username, password string, err error) {
+	scanner := bufio.NewScanner(os.Stdin)
+
+	// Запрос логина
+	fmt.Print("Введите логин администратора: ")
+	if !scanner.Scan() {
+		return "", "", fmt.Errorf("ошибка чтения логина")
+	}
+	username = strings.TrimSpace(scanner.Text())
+	if username == "" {
+		return "", "", fmt.Errorf("логин не может быть пустым")
+	}
+
+	// Запрос пароля
+	fmt.Print("Введите пароль администратора: ")
+	if !scanner.Scan() {
+		return "", "", fmt.Errorf("ошибка чтения пароля")
+	}
+	password = strings.TrimSpace(scanner.Text())
+	if password == "" {
+		return "", "", fmt.Errorf("пароль не может быть пустым")
+	}
+
+	return username, password, nil
+}
 
 func (m *Module) ID() string {
 	return "Regime"
@@ -49,8 +78,6 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		"/qn", // Тихий режим без интерфейса
 		"/norestart",
 		"/L*v", logPath,
-		"ADMINUSER=MH",
-		"ADMINPASSWORD=mhrcadmin994525",
 	}
 
 	// Условное добавление флага переустановки
@@ -59,10 +86,23 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		args = append(args, "REINSTALL_FLAG=1")
 	} else {
 		tui.Info("Новая установка 'regime'.")
+
+		// 4. Запрашиваем учетные данные у пользователя только для новой установки
+		tui.Info("-> Этап 3: Запрос учетных данных...")
+		username, password, err := getCredentials()
+		if err != nil {
+			return fmt.Errorf("не удалось получить учетные данные: %w", err)
+		}
+
+		// Добавляем учетные данные к аргументам
+		args = append(args,
+			fmt.Sprintf("ADMINUSER=%s", username),
+			fmt.Sprintf("ADMINPASSWORD=%s", password),
+		)
 	}
 
-	// 4. Запуск установки с помощью msiexec
-	tui.InfoF("-> Этап 3: Запуск установки %s...", filepath.Base(msiPath))
+	// 5. Запуск установки с помощью msiexec
+	tui.InfoF("-> Этап 4: Запуск установки %s...", filepath.Base(msiPath))
 	tui.Info("Установка будет выполнена в тихом режиме. Это может занять несколько минут...")
 
 	// Передаем слайс аргументов в RunCommand

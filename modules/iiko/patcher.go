@@ -165,18 +165,13 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 	}
 	defer os.Remove(patchCachePath)
 
-	// 3. Проверяем архив на "плоскость"
-	tui.Info("Проверка содержимого архива...")
+	// 3. Получаем содержимое архива для создания бэкапа
+	tui.Info("Анализ содержимого архива...")
 	contents, err := wu.ListArchiveContents(patchCachePath)
 	if err != nil {
 		return fmt.Errorf("не удалось прочитать содержимое архива: %w", err)
 	}
-	for _, fileInArchive := range contents {
-		if strings.Contains(fileInArchive, "/") || strings.Contains(fileInArchive, "\\") {
-			return fmt.Errorf("ошибка безопасности: архив '%s' содержит вложенные папки ('%s'). Установка отменена", patch.ShortName, fileInArchive)
-		}
-	}
-	tui.Success("Архив успешно прошел проверку.")
+	tui.Success("Содержимое архива проанализировано.")
 
 	// 4. Создаем новый бэкап
 	if err := createBackup(installDir, contents, backupBaseDir, patch.BuildNumber); err != nil {
@@ -203,8 +198,11 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 		}
 		defer srcFile.Close()
 
+		// Извлекаем только имя файла, игнорируя структуру папок архива
+		fileName := filepath.Base(pathInArchive)
+		destPath := filepath.Join(installDir, fileName)
+
 		// Создаем конечный файл на диске
-		destPath := filepath.Join(installDir, pathInArchive)
 		destFile, err := os.Create(destPath)
 		if err != nil {
 			return fmt.Errorf("не удалось создать файл '%s' на диске: %w", destPath, err)
@@ -248,6 +246,12 @@ func restoreFromBackup(installDir, backupBaseDir string) error {
 		}
 		relativePath, _ := filepath.Rel(backupDir, path)
 		destPath := filepath.Join(installDir, relativePath)
+
+		// Создаем подкаталоги в целевом каталоге, если они есть во вложенных путях
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return err
+		}
+
 		// Просто перемещаем файл с заменой
 		return os.Rename(path, destPath)
 	})
@@ -272,7 +276,11 @@ func createBackup(installDir string, filesToReplace []string, backupBaseDir stri
 	}
 
 	var copiedCount int
-	for _, fileName := range filesToReplace {
+	for _, filePathInArchive := range filesToReplace {
+		// Извлекаем только имя файла из полного пути в архиве
+		fileName := filepath.Base(filePathInArchive)
+
+		// Ищем файл в корне installDir, а не по полному пути из архива
 		sourcePath := filepath.Join(installDir, fileName)
 		destPath := filepath.Join(backupDir, fileName)
 
@@ -283,6 +291,11 @@ func createBackup(installDir string, filesToReplace []string, backupBaseDir stri
 				continue
 			}
 			defer sourceFile.Close()
+
+			// Создаем подкаталоги в бэкапе, если они есть во вложенных путях
+			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+				continue
+			}
 
 			destFile, err := os.Create(destPath)
 			if err != nil {
