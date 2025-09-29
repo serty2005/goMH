@@ -245,9 +245,9 @@ func (m *Manager) ListFTP(path string) ([]core.FTPEntry, error) {
 // UnpackToFlatDir распаковывает архив в указанную директорию,
 // обрабатывая случай, когда все файлы в архиве находятся в одной корневой папке.
 func (m *Manager) UnpackToFlatDir(assetName, cachePath, destDir string) error {
-	// Создаем временную директорию для анализа
-	tempExtractDir, err := os.MkdirTemp("", "unpack-check-*")
-	if err != nil {
+	// Создаем временную директорию для анализа внутри root-каталога проекта
+	tempExtractDir := filepath.Join(m.cfg.RootPath, "temp", "unpack-check-"+filepath.Base(assetName))
+	if err := os.MkdirAll(tempExtractDir, 0755); err != nil {
 		return fmt.Errorf("не удалось создать временную директорию: %w", err)
 	}
 	defer os.RemoveAll(tempExtractDir)

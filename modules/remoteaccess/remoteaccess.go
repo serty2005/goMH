@@ -325,7 +325,7 @@ func (m *Module) installGetad(am core.AssetManager, wu core.WinUtils) error {
 	}
 
 	// 2.3 Установка и запуск службы
-	serviceExe := filepath.Join(installDir, "getad-service.exe")
+	serviceExe := filepath.Join(installDir, "getadsc.exe")
 	if _, err := os.Stat(serviceExe); os.IsNotExist(err) {
 		return fmt.Errorf("не найден исполняемый файл службы: %s", serviceExe)
 	}

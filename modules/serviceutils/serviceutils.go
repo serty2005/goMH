@@ -231,8 +231,8 @@ func (m *Module) collectLogs(am core.AssetManager) error {
 	tui.InfoF("Поиск файлов (.log, .txt, .zip, .gz), измененных после %s", cutoffDate.Format("2006-01-02"))
 
 	var filesToArchive []fileToArchive
-	tempExtractDir, err := os.MkdirTemp("", "log_collector_extract_*")
-	if err != nil {
+	tempExtractDir := filepath.Join(am.Cfg().RootPath, "temp", "log_collector_extract")
+	if err := os.MkdirAll(tempExtractDir, 0755); err != nil {
 		return fmt.Errorf("не удалось создать временную директорию: %w", err)
 	}
 	defer os.RemoveAll(tempExtractDir)

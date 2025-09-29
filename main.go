@@ -17,10 +17,12 @@ import (
 	"goMH/tui"
 	"goMH/winutils"
 	"io"
-	"net/http"
-
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 )
 
 type RealWinUtils struct{}
@@ -134,8 +136,12 @@ func getConfigPath(configFlag *string) (string, error) {
 		return "", fmt.Errorf("сервер вернул ошибку при скачивании конфигурации: %s", resp.Status)
 	}
 
-	// Создаем временный файл для хранения конфигурации
-	tempFile, err := os.CreateTemp("", "config-*.json")
+	// Создаем временный файл для хранения конфигурации внутри текущей директории
+	tempDir := filepath.Join(".", "temp")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return "", fmt.Errorf("не удалось создать временную директорию: %w", err)
+	}
+	tempFile, err := os.CreateTemp(tempDir, "config-*.json")
 	if err != nil {
 		return "", fmt.Errorf("не удалось создать временный файл для конфигурации: %w", err)
 	}
@@ -150,7 +156,38 @@ func getConfigPath(configFlag *string) (string, error) {
 	return tempFile.Name(), nil
 }
 
+func cleanupTempDir() {
+	tempDir := filepath.Join(".", "temp")
+	if _, err := os.Stat(tempDir); err == nil {
+		if err := os.RemoveAll(tempDir); err != nil {
+			fmt.Printf("Предупреждение: не удалось удалить временную директорию %s: %v\n", tempDir, err)
+		} else {
+			fmt.Println("Временная директория temp успешно очищена.")
+		}
+	}
+}
+
+func setupSignalHandler() {
+	// Канал для получения сигналов завершения
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+
+	// Горутина для обработки сигналов
+	go func() {
+		sig := <-sigChan
+		fmt.Printf("\nПолучен сигнал %v. Выполняется очистка временных файлов...\n", sig)
+		cleanupTempDir()
+		os.Exit(0)
+	}()
+}
+
 func main() {
+	// Устанавливаем обработчик сигналов для принудительного завершения
+	setupSignalHandler()
+
+	// Добавляем очистку временной папки при нормальном завершении приложения
+	defer cleanupTempDir()
+
 	// 0. Обработка аргументов командной строки
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
 	flag.Parse()

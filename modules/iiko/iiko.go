@@ -226,9 +226,9 @@ func (m *Module) showDistroMenu(versions DiscoveredVersions) (config.IikoCompone
 }
 
 func (m *Module) runInstaller(wu core.WinUtils, installerPath, args, rootPath string) (int, error) {
-	// Создаем путь для временного лог-файла
+	// Создаем путь для временного лог-файла внутри root-каталога
 	logFileName := fmt.Sprintf("installer_log_%d.txt", time.Now().Unix())
-	tempLogPath := filepath.Join(os.TempDir(), logFileName)
+	tempLogPath := filepath.Join(rootPath, "temp", logFileName)
 
 	// Формируем аргументы для установщика
 	baseArgs := strings.Fields(args)

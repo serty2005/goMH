@@ -64,8 +64,12 @@ func CreateScheduledTask(taskName, executablePath, workingDir string) error {
 		return fmt.Errorf("не удалось сгенерировать XML для задачи: %w", err)
 	}
 
-	// 2. Создаем временный файл для XML
-	tempFile, err := os.CreateTemp("", "task-*.xml")
+	// 2. Создаем временный файл для XML внутри текущей рабочей директории
+	tempDir := filepath.Join(".", "temp")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return fmt.Errorf("не удалось создать временную директорию: %w", err)
+	}
+	tempFile, err := os.CreateTemp(tempDir, "task-*.xml")
 	if err != nil {
 		return fmt.Errorf("не удалось создать временный XML-файл: %w", err)
 	}
