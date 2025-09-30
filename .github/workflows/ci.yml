@@ -54,12 +54,12 @@ jobs:
         if ($LASTEXITCODE -eq 0) {
           Write-Host "✅ Сборка успешно завершена" -ForegroundColor Green
           Write-Host "📋 Результат сборки:" -ForegroundColor Cyan
-          ls -la goMH.exe
+          Get-ChildItem goMH.exe | Format-Table -AutoSize
         } else {
           Write-Error "❌ Ошибка при сборке проекта"
           Write-Host "🔍 Диагностика проблемы:" -ForegroundColor Yellow
           Write-Host "Проверка директории проекта:" -ForegroundColor Yellow
-          ls -la
+          Get-ChildItem | Format-Table -AutoSize
           Write-Host "Проверка наличия main.go:" -ForegroundColor Yellow
           if (Test-Path "main.go") {
             Write-Host "Файл main.go найден" -ForegroundColor Green
@@ -118,35 +118,37 @@ jobs:
         name: goMH-windows-${{ github.run_number }}
         path: ./artifacts/windows/
 
-    - name: Get latest version
+    - name: Check commit message for version
       id: version
       run: |
-        echo "Получение последней версии из существующих релизов..."
-        LATEST_VERSION=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          | jq -r '.tag_name // "v0.0.0"' 2>/dev/null || echo "v0.0.0")
+        echo "🔍 Проверка сообщения коммита на наличие версии..."
 
-        if [[ $LATEST_VERSION =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-          MAJOR=${BASH_REMATCH[1]}
-          MINOR=${BASH_REMATCH[2]}
-          PATCH=${BASH_REMATCH[3]}
-          NEW_VERSION="v$MAJOR.$MINOR.$((PATCH + 1))"
-          echo "Последняя версия: $LATEST_VERSION"
-          echo "Новая версия: $NEW_VERSION"
+        # Получаем сообщение коммита
+        COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+        echo "Сообщение коммита: $COMMIT_MESSAGE"
+
+        # Проверяем, начинается ли коммит с версии в формате v*.*.*
+        if [[ $COMMIT_MESSAGE =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          echo "✅ Обнаружена версия в коммите: $DETECTED_VERSION"
+          echo "Создание релиза для версии: $DETECTED_VERSION"
+          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
+          echo "DETECTED_VERSION=$DETECTED_VERSION" >> $GITHUB_ENV
+          echo "should_create_release=true" >> $GITHUB_OUTPUT
         else
-          NEW_VERSION="v0.0.1"
-          echo "Не удалось получить последнюю версию, устанавливаем: $NEW_VERSION"
+          echo "❌ Версия не найдена в сообщении коммита"
+          echo "Пропуск создания релиза"
+          echo "should_create_release=false" >> $GITHUB_OUTPUT
+          echo "detected_version=" >> $GITHUB_OUTPUT
         fi
-
-        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-        echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
     - name: Create Release
       id: create_release
+      if: steps.version.outputs.should_create_release == 'true'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ steps.version.outputs.new_version || github.ref_name }}
-        name: Release ${{ steps.version.outputs.new_version || github.ref_name }}
+        tag_name: ${{ steps.version.outputs.detected_version }}
+        name: Release ${{ steps.version.outputs.detected_version }}
         body: |
           ## goMH - Мультитул для техподдержки iiko и Syrve
 
@@ -173,13 +175,17 @@ jobs:
       run: |
         echo "Отправка уведомления о статусе сборки и релиза..."
 
-        if [[ "${{ job.status }}" == "success" && "${{ steps.create_release.outcome }}" == "success" ]]; then
+        if [[ "${{ job.status }}" == "success" && "${{ steps.version.outputs.should_create_release }}" == "true" && "${{ steps.create_release.outcome }}" == "success" ]]; then
           STATUS="✅ УСПЕШНО"
-          MESSAGE="Сборка и релиз ${{ env.NEW_VERSION || github.ref_name }} успешно завершены!"
+          MESSAGE="Сборка и релиз ${{ env.DETECTED_VERSION }} успешно завершены!"
           COLOR="good"
-        elif [[ "${{ steps.create_release.outcome }}" == "failure" ]]; then
+        elif [[ "${{ steps.version.outputs.should_create_release }}" == "true" && "${{ steps.create_release.outcome }}" == "failure" ]]; then
           STATUS="❌ ОШИБКА РЕЛИЗА"
           MESSAGE="Сборка прошла успешно, но создание релиза завершилось неудачно"
+          COLOR="warning"
+        elif [[ "${{ steps.version.outputs.should_create_release }}" == "true" ]]; then
+          STATUS="⏭️ ПРОПУСК РЕЛИЗА"
+          MESSAGE="Сборка прошла успешно, но релиз не создан (версия не указана в коммите)"
           COLOR="warning"
         else
           STATUS="❌ ОШИБКА СБОРКИ"
