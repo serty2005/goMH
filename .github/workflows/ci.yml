@@ -18,7 +18,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.25.1'
+        go-version: '1.23'
 
     - name: Cache Go modules
       uses: actions/cache@v4
@@ -29,18 +29,69 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Download dependencies
-      run: go mod download
+      run: |
+        echo "📦 Загрузка зависимостей Go..."
+        go mod download
+        if ($LASTEXITCODE -eq 0) {
+          Write-Host "✅ Зависимости успешно загружены" -ForegroundColor Green
+          go list -m all | Write-Host
+        } else {
+          Write-Error "❌ Ошибка при загрузке зависимостей"
+          Write-Host "🔍 Проверка go.mod файла..." -ForegroundColor Yellow
+          if (Test-Path "go.mod") {
+            Write-Host "Файл go.mod найден, проверка содержимого:" -ForegroundColor Yellow
+            Get-Content "go.mod" | Write-Host
+          } else {
+            Write-Host "Файл go.mod не найден!" -ForegroundColor Red
+          }
+          exit 1
+        }
 
     - name: Build
-      run: go build -v -o goMH.exe .
+      run: |
+        echo "🔨 Запуск сборки goMH.exe..."
+        go build -v -o goMH.exe .
+        if ($LASTEXITCODE -eq 0) {
+          Write-Host "✅ Сборка успешно завершена" -ForegroundColor Green
+          Write-Host "📋 Результат сборки:" -ForegroundColor Cyan
+          ls -la goMH.exe
+        } else {
+          Write-Error "❌ Ошибка при сборке проекта"
+          Write-Host "🔍 Диагностика проблемы:" -ForegroundColor Yellow
+          Write-Host "Проверка директории проекта:" -ForegroundColor Yellow
+          ls -la
+          Write-Host "Проверка наличия main.go:" -ForegroundColor Yellow
+          if (Test-Path "main.go") {
+            Write-Host "Файл main.go найден" -ForegroundColor Green
+          } else {
+            Write-Host "Файл main.go НЕ найден!" -ForegroundColor Red
+          }
+          Write-Host "Проверка версии Go:" -ForegroundColor Yellow
+          go version
+          exit 1
+        }
 
     - name: Test build
       run: |
+        Write-Host "Проверка результатов сборки..."
         if (Test-Path "goMH.exe") {
-          Write-Host "Build successful: goMH.exe created"
-          Get-Item "goMH.exe" | Select-Object Name, Length, LastWriteTime
+          $file = Get-Item "goMH.exe"
+          Write-Host "✅ Сборка успешна: goMH.exe создан" -ForegroundColor Green
+          Write-Host "📊 Информация о файле:" -ForegroundColor Cyan
+          Write-Host "   Имя: $($file.Name)"
+          Write-Host "   Размер: $([math]::Round($file.Length / 1MB, 2)) MB"
+          Write-Host "   Время создания: $($file.LastWriteTime)"
+          Write-Host "   Время модификации: $($file.LastWriteTime)"
         } else {
-          Write-Error "Build failed: goMH.exe not found"
+          Write-Error "❌ Сборка неудачна: goMH.exe не найден в корневой директории"
+          Write-Host "🔍 Поиск файла в других директориях..." -ForegroundColor Yellow
+          $foundFiles = Get-ChildItem -Name "goMH.exe" -Recurse -ErrorAction SilentlyContinue
+          if ($foundFiles) {
+            Write-Host "Найденные файлы:" -ForegroundColor Yellow
+            $foundFiles | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+          } else {
+            Write-Host "Файл goMH.exe не найден ни в одной директории" -ForegroundColor Red
+          }
           exit 1
         }
 
@@ -55,7 +106,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: build-windows
-    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || startsWith(github.ref, 'refs/tags/v')
+    if: (github.ref == 'refs/heads/develop' && github.event_name == 'push') || startsWith(github.ref, 'refs/tags/v')
 
     steps:
     - name: Checkout code
@@ -67,11 +118,35 @@ jobs:
         name: goMH-windows-${{ github.run_number }}
         path: ./artifacts/windows/
 
+    - name: Get latest version
+      id: version
+      run: |
+        echo "Получение последней версии из существующих релизов..."
+        LATEST_VERSION=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          | jq -r '.tag_name // "v0.0.0"' 2>/dev/null || echo "v0.0.0")
+
+        if [[ $LATEST_VERSION =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+          MAJOR=${BASH_REMATCH[1]}
+          MINOR=${BASH_REMATCH[2]}
+          PATCH=${BASH_REMATCH[3]}
+          NEW_VERSION="v$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "Последняя версия: $LATEST_VERSION"
+          echo "Новая версия: $NEW_VERSION"
+        else
+          NEW_VERSION="v0.0.1"
+          echo "Не удалось получить последнюю версию, устанавливаем: $NEW_VERSION"
+        fi
+
+        echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+
     - name: Create Release
+      id: create_release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
+        tag_name: ${{ steps.version.outputs.new_version || github.ref_name }}
+        name: Release ${{ steps.version.outputs.new_version || github.ref_name }}
         body: |
           ## goMH - Мультитул для техподдержки iiko и Syrve
 
@@ -92,3 +167,33 @@ jobs:
         files: ./artifacts/windows/goMH.exe
       env:
         GITHUB_TOKEN: ${{ secrets.RELEASE_PUSHER }}
+
+    - name: Send notification
+      if: always()
+      run: |
+        echo "Отправка уведомления о статусе сборки и релиза..."
+
+        if [[ "${{ job.status }}" == "success" && "${{ steps.create_release.outcome }}" == "success" ]]; then
+          STATUS="✅ УСПЕШНО"
+          MESSAGE="Сборка и релиз ${{ env.NEW_VERSION || github.ref_name }} успешно завершены!"
+          COLOR="good"
+        elif [[ "${{ steps.create_release.outcome }}" == "failure" ]]; then
+          STATUS="❌ ОШИБКА РЕЛИЗА"
+          MESSAGE="Сборка прошла успешно, но создание релиза завершилось неудачно"
+          COLOR="warning"
+        else
+          STATUS="❌ ОШИБКА СБОРКИ"
+          MESSAGE="Сборка завершилась неудачно"
+          COLOR="danger"
+        fi
+
+        echo "Статус: $STATUS"
+        echo "Сообщение: $MESSAGE"
+        echo "Ссылка на сборку: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+        # Здесь можно добавить интеграцию с Telegram, Slack или другим сервисом уведомлений
+        # Например, для Telegram:
+        # curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+        #   -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+        #   -d text="$STATUS%0A$MESSAGE%0A%0AСсылка: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+        #   -d parse_mode="HTML"
