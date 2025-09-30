@@ -61,7 +61,7 @@ func findLatestPatches(baseURL, version string) ([]IikoPatch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("не удалось определить полную версию для '%s': %w", version, err)
 	}
-	targetURL := fmt.Sprintf("%s/%s/Patches", baseURL, fullVersion)
+	targetURL := getPatchesPath(baseURL, fullVersion)
 	tui.InfoF("Поиск патчей по адресу: %s", targetURL)
 
 	resp, err := http.Get(targetURL)
@@ -324,8 +324,25 @@ func getFullVersionString(shortVersion string) (string, error) {
 	if shortVersion == "926" {
 		return "9.2.6029.0", nil
 	}
+	if shortVersion == "928" {
+		return "9.2.8035.0", nil
+	}
+	if shortVersion == "936" {
+		return "9.3.6065.0", nil
+	}
+
 	// и т.д.
 	return "", fmt.Errorf("не удалось найти полное имя версии для %s", shortVersion)
+}
+
+// getPatchesPath определяет путь к патчам в зависимости от версии.
+// Для версии "9.2.8035.0" используется корневой путь (без /Patches),
+// для всех остальных версий используется путь с подпапкой /Patches.
+func getPatchesPath(baseURL, fullVersion string) string {
+	if fullVersion == "9.2.8035.0" {
+		return fmt.Sprintf("%s/%s", baseURL, fullVersion)
+	}
+	return fmt.Sprintf("%s/%s/Patches", baseURL, fullVersion)
 }
 
 // FindAndSelectPatch выполняет поиск и предлагает пользователю выбрать патч.
