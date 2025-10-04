@@ -53,6 +53,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		fmt.Println(" 2. Сборщик логов в архив")
 		fmt.Println(" 3. Просмотр лога в реальном времени (tail -f)")
 		fmt.Println(" 4. Патчи iikoFront")
+		fmt.Println(" 5. Скачивание и запуск OrderCheck")
 		fmt.Println("\n 0. Назад в главное меню")
 		fmt.Print("Выберите пункт: ")
 
@@ -69,6 +70,8 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 			err = m.viewLog(am)
 		case "4":
 			err = m.updateIikoPatches(am, wu)
+		case "5":
+			err = m.downloadAndRunOrderCheck(am, wu)
 		case "0":
 			tui.Info("Возврат в главное меню.")
 			return nil
@@ -646,6 +649,39 @@ func findStartOfLastNLines(file *os.File, n int) (int64, error) {
 	return 0, nil
 }
 
+// detectIikoFrontDbType определяет тип базы данных iikoFront.
+// Возвращает "db", "sdf" или ошибку если база данных не найдена.
+func (m *Module) detectIikoFrontDbType() (string, error) {
+	// Путь к базе данных iikoFront
+	appData := os.ExpandEnv("$APPDATA")
+	dbPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities")
+
+	// Проверяем наличие файлов базы данных
+	dbFile := dbPath + ".db"
+	sdfFile := dbPath + ".sdf"
+
+	tui.Info("Поиск базы данных iikoFront...")
+
+	// Проверяем файл .db
+	if _, err := os.Stat(dbFile); err == nil {
+		tui.Success("Найдена база данных типа .db")
+		return "db", nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("ошибка при проверке файла %s: %w", dbFile, err)
+	}
+
+	// Проверяем файл .sdf
+	if _, err := os.Stat(sdfFile); err == nil {
+		tui.Success("Найдена база данных типа .sdf")
+		return "sdf", nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("ошибка при проверке файла %s: %w", sdfFile, err)
+	}
+
+	// Если ни один файл не найден
+	return "", errors.New("база данных iikoFront не найдена (проверьте путь или запустите iikoFront)")
+}
+
 // --- Пункт 4: Обновление патчей iikoFront ---
 func (m *Module) updateIikoPatches(am core.AssetManager, wu core.WinUtils) error {
 	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
@@ -676,4 +712,75 @@ func (m *Module) updateIikoPatches(am core.AssetManager, wu core.WinUtils) error
 
 	// Вызываем общий воркфлоу из модуля iiko
 	return iiko.RunPatchWorkflow(am, wu, shortVersion, iikoFrontDir, backupDir)
+}
+
+// --- Пункт 5: Скачивание и запуск OrderCheck ---
+func (m *Module) downloadAndRunOrderCheck(am core.AssetManager, wu core.WinUtils) error {
+	tui.Info("Начинается скачивание и запуск OrderCheck...")
+
+	// Используем менеджер ассетов для скачивания OrderCheck
+	// Предполагаем, что ассет называется "ordercheck" и настроен в конфигурации
+	const assetName = "ordercheck"
+
+	// Проверяем, настроен ли ассет в конфигурации
+	if _, exists := am.Cfg().AssetCatalog[assetName]; !exists {
+		return fmt.Errorf("ассет '%s' не найден в каталоге конфигурации", assetName)
+	}
+
+	// Скачиваем и обрабатываем ассет через менеджер ассетов
+	tui.Info("Скачивание и обработка OrderCheck через менеджер ассетов...")
+	finalPath, err := am.Get(assetName)
+	if err != nil {
+		return fmt.Errorf("не удалось скачать и обработать ассет: %w", err)
+	}
+
+	// Путь к исполняемому файлу OrderCheck.exe
+	orderCheckExe := filepath.Join(finalPath, "OrderCheck.exe")
+	if _, err := os.Stat(orderCheckExe); os.IsNotExist(err) {
+		// Если OrderCheck.exe не найден в корне, ищем его рекурсивно
+		foundPath, err := wu.FindFileRecursive(finalPath, "OrderCheck.exe")
+		if err != nil {
+			return fmt.Errorf("OrderCheck.exe не найден в распакованных файлах: %w", err)
+		}
+		orderCheckExe = foundPath
+	}
+
+	tui.SuccessF("OrderCheck найден: %s", orderCheckExe)
+
+	// Проверяем права администратора
+	if !wu.IsAdmin() {
+		tui.Warn("Для запуска OrderCheck требуются права администратора")
+		tui.Info("Пытаемся запустить с повышенными правами...")
+
+		// Создаем задачу в планировщике для запуска с правами администратора
+		taskName := "goMH_OrderCheck_Run"
+		err := wu.CreateScheduledTask(taskName, orderCheckExe, filepath.Dir(orderCheckExe))
+		if err != nil {
+			return fmt.Errorf("не удалось создать задачу планировщика: %w", err)
+		}
+
+		// Запускаем задачу
+		tui.Info("Запуск OrderCheck через планировщик задач...")
+		_, err = wu.RunCommand("schtasks", "/Run", "/TN", taskName)
+		if err != nil {
+			return fmt.Errorf("не удалось запустить задачу: %w", err)
+		}
+
+		tui.Success("OrderCheck запущен с правами администратора")
+
+		// Ждем немного и удаляем задачу
+		time.Sleep(3 * time.Second)
+		wu.DeleteScheduledTaskByName(taskName)
+		tui.Info("Временная задача планировщика удалена")
+	} else {
+		// Запускаем напрямую если уже есть права администратора
+		tui.Info("Запуск OrderCheck.exe...")
+		_, err := wu.RunCommand(orderCheckExe)
+		if err != nil {
+			return fmt.Errorf("не удалось запустить OrderCheck: %w", err)
+		}
+		tui.Success("OrderCheck.exe запущен успешно")
+	}
+
+	return nil
 }

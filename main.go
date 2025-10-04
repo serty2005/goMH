@@ -96,6 +96,9 @@ func (rw *RealWinUtils) DeleteScheduledTaskByName(taskName string) error {
 func (rw *RealWinUtils) GetServiceStatus(serviceName string) (string, error) {
 	return winutils.GetServiceStatus(serviceName)
 }
+func (rw *RealWinUtils) IsAdmin() bool {
+	return winutils.IsAdmin()
+}
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
 // из флага, локальный или удаленный.

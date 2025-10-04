@@ -91,14 +91,16 @@
 			"C:\\Windows\\SoftwareDistribution\\Download",
 			"C:\\Users\\*\\AppData\\Local\\Temp",
 			"C:\\ProgramData\\Microsoft\\Windows\\WER\\*",
-			"C:\\Users\\*\\AppData\\Local\\CrashDumps"
+			"C:\\Users\\*\\AppData\\Local\\CrashDumps",
+			"C:\\ProgramData\\Microsoft\\Diagnosis\\ETLLogs\\*"
 		],
 		"LogCollectorPaths": [
 			"C:\\Users\\*\\AppData\\Roaming\\iiko\\CashServer\\Logs",
 			"C:\\Windows\\ServiceProfiles\\iikoCard5POS\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
 			"C:\\Users\\*\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
 			"C:\\sc552",
-			"C:\\Program Files(x86)\\INPAS\\DualConnector"
+			"C:\\Program Files(x86)\\INPAS\\DualConnector",
+			"C:\\UTM\\transporter\\l"
 		]
 	},
 	"dto_config": {
@@ -128,22 +130,30 @@
 		},
 		"Com0Com_Installer": {
 			"url": "https://f.serty.top/distr/installer/assets/com0com_Setup_v3_x64.exe",
-			"type": "file",
-			"destination": "vcomcaster"
+			"type": "file"
 		},
 		"Regime_Installer": {
-			"url": "https://f.serty.top/regime-1.4.1-445.msi",
+			"url": "https://f.serty.top/regime-1.5.0-462.msi",
 			"type": "file",
+			"destination": "_assets",
 			"download_method": "HTTP"
 		},
 		"DTO_Installer": {
 			"url": "ftp://ftp.serty.top/KKT10-10.10.7.0-windows32-setup.exe",
 			"type": "file",
+			"destination": "_assets",
 			"download_method": "FTP"
 		},
 		"UTM_Installer": {
 			"url": "https://f.serty.top/silent-setup-4.2.0-b2644.exe",
 			"type": "file",
+			"destination": "_assets",
+			"download_method": "HTTP"
+		},
+		"ordercheck": {
+			"url": "https://clearbat.iiko.online/downloads/OrderCheck.exe",
+			"type": "file",
+			"destination": "_assets",
 			"download_method": "HTTP"
 		}
 	}

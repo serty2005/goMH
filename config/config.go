@@ -53,6 +53,11 @@ type TeamViewerConfig struct {
 type MaintenanceConfig struct {
 	TempPaths         []string `json:"TempPaths"`
 	LogCollectorPaths []string `json:"LogCollectorPaths"`
+	OrderCheckURL     string   `json:"order_check_url"`
+	OrderCheckFile    string   `json:"order_check_file"`
+	FrontToolsSdfURL  string   `json:"front_tools_sdf_url"`
+	FrontToolsDbURL   string   `json:"front_tools_db_url"`
+	IikoFrontDbPath   string   `json:"iiko_front_db_path"`
 }
 
 // DTOConfig содержит настройки для установщика драйверов АТОЛ

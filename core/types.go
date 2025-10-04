@@ -31,6 +31,7 @@ type WinUtils interface {
 	FindScheduledTaskByPath(exePath string) (string, error)
 	DeleteScheduledTaskByName(taskName string) error
 	GetServiceStatus(serviceName string) (string, error)
+	IsAdmin() bool
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.
