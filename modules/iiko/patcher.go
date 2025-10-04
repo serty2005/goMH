@@ -165,59 +165,74 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 	}
 	defer os.Remove(patchCachePath)
 
-	// 3. Получаем содержимое архива для создания бэкапа
-	tui.Info("Анализ содержимого архива...")
-	contents, err := wu.ListArchiveContents(patchCachePath)
+	// 3. Подготовка исходных файлов патча (распаковка, поиск вложенных архивов и т.д.)
+	tui.Info("Подготовка исходных файлов патча...")
+	// Определяем корневую директорию приложения для создания временных файлов
+	exePath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("не удалось прочитать содержимое архива: %w", err)
+		return fmt.Errorf("не удалось определить путь к исполняемому файлу: %w", err)
 	}
-	tui.Success("Содержимое архива проанализировано.")
+	tempRootPath := filepath.Dir(exePath)
 
-	// 4. Создаем новый бэкап
-	if err := createBackup(installDir, contents, backupBaseDir, patch.BuildNumber); err != nil {
-		return fmt.Errorf("критическая ошибка: не удалось создать бэкап перед установкой патча: %w", err)
-	}
-
-	// 5. Распаковываем патч
-	tui.InfoF("Распаковка '%s' в '%s'...", patch.ShortName, installDir)
-
-	fsys, err := archives.FileSystem(context.Background(), patchCachePath, nil)
+	sourceDir, cleanup, err := preparePatchSource(patchCachePath, tempRootPath)
 	if err != nil {
-		return fmt.Errorf("не удалось открыть архив для распаковки: %w", err)
+		return fmt.Errorf("не удалось подготовить исходные файлы патча: %w", err)
 	}
+	defer cleanup()
 
-	err = fs.WalkDir(fsys, ".", func(pathInArchive string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	// 4. Собираем список файлов для бэкапа из исходной директории
+	var filesToBackup []string
+	err = filepath.WalkDir(sourceDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
 			return err
 		}
-
-		// Открываем исходный файл из виртуальной ФС
-		srcFile, err := fsys.Open(pathInArchive)
-		if err != nil {
-			return fmt.Errorf("не удалось открыть '%s' в архиве: %w", pathInArchive, err)
-		}
-		defer srcFile.Close()
-
-		// Извлекаем только имя файла, игнорируя структуру папок архива
-		fileName := filepath.Base(pathInArchive)
-		destPath := filepath.Join(installDir, fileName)
-
-		// Создаем конечный файл на диске
-		destFile, err := os.Create(destPath)
-		if err != nil {
-			return fmt.Errorf("не удалось создать файл '%s' на диске: %w", destPath, err)
-		}
-		defer destFile.Close()
-
-		// Копируем содержимое
-		if _, err := io.Copy(destFile, srcFile); err != nil {
-			return fmt.Errorf("не удалось скопировать данные для '%s': %w", pathInArchive, err)
+		if !d.IsDir() {
+			// Нам нужно относительное имя файла, как это было в ListArchiveContents
+			relPath, err := filepath.Rel(sourceDir, path)
+			if err != nil {
+				return err
+			}
+			filesToBackup = append(filesToBackup, relPath)
 		}
 		return nil
 	})
-
 	if err != nil {
-		return fmt.Errorf("ошибка при распаковке архива: %w", err)
+		return fmt.Errorf("не удалось составить список файлов для бэкапа: %w", err)
+	}
+	tui.Success("Анализ файлов патча завершен.")
+
+	// 5. Создаем новый бэкап
+	if err := createBackup(installDir, filesToBackup, backupBaseDir, patch.BuildNumber); err != nil {
+		return fmt.Errorf("критическая ошибка: не удалось создать бэкап перед установкой патча: %w", err)
+	}
+
+	// 6. Копируем файлы патча в директорию установки
+	tui.InfoF("Копирование файлов патча в '%s'...", installDir)
+	for _, fileRelPath := range filesToBackup {
+		srcPath := filepath.Join(sourceDir, fileRelPath)
+		destPath := filepath.Join(installDir, fileRelPath)
+
+		// Создаем подкаталоги в целевом каталоге
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return fmt.Errorf("не удалось создать директорию '%s': %w", filepath.Dir(destPath), err)
+		}
+
+		// Копируем файл
+		srcFile, err := os.Open(srcPath)
+		if err != nil {
+			return fmt.Errorf("не удалось открыть исходный файл '%s': %w", srcPath, err)
+		}
+		defer srcFile.Close()
+
+		destFile, err := os.Create(destPath)
+		if err != nil {
+			return fmt.Errorf("не удалось создать целевой файл '%s': %w", destPath, err)
+		}
+		defer destFile.Close()
+
+		if _, err := io.Copy(destFile, srcFile); err != nil {
+			return fmt.Errorf("не удалось скопировать файл '%s': %w", fileRelPath, err)
+		}
 	}
 
 	tui.Success("Патч успешно применен.")
@@ -266,8 +281,6 @@ func restoreFromBackup(installDir, backupBaseDir string) error {
 
 // createBackup создает новую папку бэкапа и копирует в нее файлы, которые будут заменены.
 func createBackup(installDir string, filesToReplace []string, backupBaseDir string, buildNumber int) error {
-	// Генерируем случайное число для имени, чтобы избежать конфликтов
-
 	backupDir := filepath.Join(backupBaseDir, fmt.Sprintf("backup_%d", buildNumber))
 
 	tui.InfoF("Создание нового бэкапа в: %s", backupDir)
@@ -275,39 +288,28 @@ func createBackup(installDir string, filesToReplace []string, backupBaseDir stri
 		return err
 	}
 
-	var copiedCount int
-	for _, filePathInArchive := range filesToReplace {
-		// Извлекаем только имя файла из полного пути в архиве
-		fileName := filepath.Base(filePathInArchive)
+	var movedCount int
+	for _, fileRelPath := range filesToReplace {
+		sourcePath := filepath.Join(installDir, fileRelPath)
+		destPath := filepath.Join(backupDir, fileRelPath)
 
-		// Ищем файл в корне installDir, а не по полному пути из архива
-		sourcePath := filepath.Join(installDir, fileName)
-		destPath := filepath.Join(backupDir, fileName)
-
-		// Копируем только если исходный файл существует
+		// Перемещаем только если исходный файл существует
 		if _, err := os.Stat(sourcePath); err == nil {
-			sourceFile, err := os.Open(sourcePath)
-			if err != nil {
-				continue
-			}
-			defer sourceFile.Close()
-
-			// Создаем подкаталоги в бэкапе, если они есть во вложенных путях
+			// Создаем родительскую директорию для файла в бэкапе
 			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-				continue
+				tui.Warn(fmt.Sprintf("Не удалось создать директорию для бэкапа '%s': %v", destPath, err))
+				continue // Пропускаем этот файл
 			}
 
-			destFile, err := os.Create(destPath)
-			if err != nil {
-				continue
+			// Используем Rename для перемещения файла
+			if err := os.Rename(sourcePath, destPath); err != nil {
+				tui.Warn(fmt.Sprintf("Не удалось переместить файл '%s' в бэкап: %v", sourcePath, err))
+				continue // Пропускаем этот файл
 			}
-			defer destFile.Close()
-
-			io.Copy(destFile, sourceFile)
-			copiedCount++
+			movedCount++
 		}
 	}
-	tui.InfoF("Зарезервировано %d файлов.", copiedCount)
+	tui.InfoF("Перемещено в бэкап %d файлов.", movedCount)
 	return nil
 }
 
@@ -371,4 +373,177 @@ func FindAndSelectPatch(am core.AssetManager, version string) (IikoPatch, bool, 
 
 	tui.SuccessF("Выбран патч: %s. Он будет установлен после основного дистрибутива.", selectedPatch.ShortName)
 	return selectedPatch, true, nil
+}
+
+// preparePatchSource распаковывает архив и находит исходную директорию с файлами патча.
+// Возвращает путь к исходной директории, функцию для очистки временных файлов и ошибку.
+func preparePatchSource(archivePath string, tempRootPath string) (sourceDir string, cleanup func(), err error) {
+	// 1. Создаем основную временную директорию для всех операций внутри корневого каталога приложения
+	tempBaseDir, err := os.MkdirTemp(tempRootPath, "gomh_patch_*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("не удалось создать временную директорию: %w", err)
+	}
+
+	cleanup = func() { os.RemoveAll(tempBaseDir) }
+
+	// 2. Распаковываем основной архив
+	unpackDir := filepath.Join(tempBaseDir, "unpacked")
+	if err := os.Mkdir(unpackDir, 0755); err != nil {
+		return "", cleanup, fmt.Errorf("не удалось создать директорию для распаковки: %w", err)
+	}
+
+	fsys, err := archives.FileSystem(context.Background(), archivePath, nil)
+	if err != nil {
+		return "", cleanup, fmt.Errorf("не удалось открыть архив '%s': %w", archivePath, err)
+	}
+
+	err = fs.WalkDir(fsys, ".", func(pathInArchive string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if pathInArchive == "." {
+			return nil
+		}
+		destPath := filepath.Join(unpackDir, pathInArchive)
+		if d.IsDir() {
+			return os.MkdirAll(destPath, 0755)
+		}
+		srcFile, err := fsys.Open(pathInArchive)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return err
+		}
+		destFile, err := os.Create(destPath)
+		if err != nil {
+			return err
+		}
+		defer destFile.Close()
+		_, err = io.Copy(destFile, srcFile)
+		return err
+	})
+	if err != nil {
+		return "", cleanup, fmt.Errorf("ошибка при первичной распаковке: %w", err)
+	}
+
+	// 3. Гибридный алгоритм поиска исходной директории
+	searchBaseDir := unpackDir // По умолчанию ищем в результатах первичной распаковки
+
+	nestedArchive, err := findNestedFrontArchive(unpackDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", cleanup, fmt.Errorf("ошибка при поиске вложенного архива: %w", err)
+	}
+
+	// Если вложенный архив найден, распаковываем его и меняем базу для поиска
+	if err == nil {
+		tui.InfoF("Найден вложенный архив: %s. Распаковываем...", filepath.Base(nestedArchive))
+		nestedUnpackDir := filepath.Join(tempBaseDir, "nested_unpacked")
+		if err := os.Mkdir(nestedUnpackDir, 0755); err != nil {
+			return "", cleanup, fmt.Errorf("не удалось создать директорию для вложенной распаковки: %w", err)
+		}
+
+		// Распаковываем вложенный архив
+		fsysNested, err := archives.FileSystem(context.Background(), nestedArchive, nil)
+		if err != nil {
+			return "", cleanup, fmt.Errorf("не удалось открыть вложенный архив '%s': %w", nestedArchive, err)
+		}
+		err = fs.WalkDir(fsysNested, ".", func(pathInArchive string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if pathInArchive == "." {
+				return nil
+			}
+			destPath := filepath.Join(nestedUnpackDir, pathInArchive)
+			if d.IsDir() {
+				return os.MkdirAll(destPath, 0755)
+			}
+			srcFile, err := fsysNested.Open(pathInArchive)
+			if err != nil {
+				return err
+			}
+			defer srcFile.Close()
+			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+				return err
+			}
+			destFile, err := os.Create(destPath)
+			if err != nil {
+				return err
+			}
+			defer destFile.Close()
+			_, err = io.Copy(destFile, srcFile)
+			return err
+		})
+		if err != nil {
+			return "", cleanup, fmt.Errorf("ошибка при распаковке вложенного архива: %w", err)
+		}
+
+		searchBaseDir = nestedUnpackDir // Обновляем базу для поиска
+	} else {
+		tui.Info("Вложенный архив не найден, поиск файлов в основной директории.")
+	}
+
+	// 4. Ищем самую глубокую папку в searchBaseDir
+	var allDirs []string
+	err = filepath.WalkDir(searchBaseDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			allDirs = append(allDirs, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", cleanup, fmt.Errorf("не удалось обойти директорию '%s': %w", searchBaseDir, err)
+	}
+
+	if len(allDirs) == 0 {
+		return searchBaseDir, cleanup, nil // Если папок нет, возвращаем базовую
+	}
+
+	deepestDir := searchBaseDir
+	maxDepth := -1
+	for _, dir := range allDirs {
+		depth := len(strings.Split(dir, string(os.PathSeparator)))
+		if depth > maxDepth {
+			maxDepth = depth
+			deepestDir = dir
+		}
+	}
+
+	tui.InfoF("Рабочая директория патча определена: %s", deepestDir)
+	return deepestDir, cleanup, nil
+}
+
+// findNestedFrontArchive рекурсивно ищет архив, содержащий "front" в имени.
+func findNestedFrontArchive(dir string) (string, error) {
+	var foundPath string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		// Если уже нашли, дальше не ищем
+		if foundPath != "" {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() {
+			lowerCaseName := strings.ToLower(d.Name())
+			if strings.Contains(lowerCaseName, "front") && (strings.HasSuffix(lowerCaseName, ".zip") || strings.HasSuffix(lowerCaseName, ".7z")) {
+				foundPath = path
+				return filepath.SkipDir // Прерываем поиск, как только нашли первый
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+	if foundPath == "" {
+		return "", os.ErrNotExist // Используем стандартную ошибку, чтобы легко ее проверять
+	}
+	return foundPath, nil
 }
