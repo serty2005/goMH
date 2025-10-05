@@ -53,7 +53,8 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		fmt.Println(" 2. Сборщик логов в архив")
 		fmt.Println(" 3. Просмотр лога в реальном времени (tail -f)")
 		fmt.Println(" 4. Патчи iikoFront")
-		fmt.Println(" 5. Скачивание и запуск OrderCheck")
+		fmt.Println(" 5. OrderCheck")
+		fmt.Println(" 6. FrontTools")
 		fmt.Println("\n 0. Назад в главное меню")
 		fmt.Print("Выберите пункт: ")
 
@@ -72,6 +73,8 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 			err = m.updateIikoPatches(am, wu)
 		case "5":
 			err = m.downloadAndRunOrderCheck(am, wu)
+		case "6":
+			err = m.downloadAndRunFrontTools(am, wu)
 		case "0":
 			tui.Info("Возврат в главное меню.")
 			return nil
@@ -654,7 +657,7 @@ func findStartOfLastNLines(file *os.File, n int) (int64, error) {
 func (m *Module) detectIikoFrontDbType() (string, error) {
 	// Путь к базе данных iikoFront
 	appData := os.ExpandEnv("$APPDATA")
-	dbPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities")
+	dbPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities")
 
 	// Проверяем наличие файлов базы данных
 	dbFile := dbPath + ".db"
@@ -780,6 +783,90 @@ func (m *Module) downloadAndRunOrderCheck(am core.AssetManager, wu core.WinUtils
 			return fmt.Errorf("не удалось запустить OrderCheck: %w", err)
 		}
 		tui.Success("OrderCheck.exe запущен успешно")
+	}
+
+	return nil
+}
+
+// --- Пункт 6: Скачивание и запуск FrontTools ---
+func (m *Module) downloadAndRunFrontTools(am core.AssetManager, wu core.WinUtils) error {
+	tui.Info("Начинается скачивание и запуск FrontTools...")
+
+	// Определяем тип базы данных iikoFront
+	dbType, err := m.detectIikoFrontDbType()
+	if err != nil {
+		return fmt.Errorf("не удалось определить тип базы данных: %w", err)
+	}
+
+	// Выбираем соответствующий ассет на основе типа базы данных
+	var assetName string
+	if dbType == "sdf" {
+		assetName = "fronttools_sdf"
+		tui.Info("Выбран ассет FrontTools для баз данных типа .sdf")
+	} else {
+		assetName = "fronttools_db"
+		tui.Info("Выбран ассет FrontTools для баз данных типа .db")
+	}
+
+	// Проверяем, настроен ли ассет в конфигурации
+	if _, exists := am.Cfg().AssetCatalog[assetName]; !exists {
+		return fmt.Errorf("ассет '%s' не найден в каталоге конфигурации", assetName)
+	}
+
+	// Скачиваем и обрабатываем ассет через менеджер ассетов
+	tui.Info("Скачивание и обработка FrontTools через менеджер ассетов...")
+	finalPath, err := am.Get(assetName)
+	if err != nil {
+		return fmt.Errorf("не удалось скачать и обработать ассет: %w", err)
+	}
+
+	// Рекурсивно ищем FrontTools.exe в распакованных файлах
+	tui.Info("Поиск FrontTools.exe в распакованных файлах...")
+	frontToolsExe := filepath.Join(finalPath, "FrontTools.exe")
+	if _, err := os.Stat(frontToolsExe); os.IsNotExist(err) {
+		// Если FrontTools.exe не найден в корне, ищем его рекурсивно
+		foundPath, err := wu.FindFileRecursive(finalPath, "FrontTools.exe")
+		if err != nil {
+			return fmt.Errorf("FrontTools.exe не найден в распакованных файлах: %w", err)
+		}
+		frontToolsExe = foundPath
+	}
+
+	tui.SuccessF("FrontTools найден: %s", frontToolsExe)
+
+	// Проверяем права администратора
+	if !wu.IsAdmin() {
+		tui.Warn("Для запуска FrontTools требуются права администратора")
+		tui.Info("Пытаемся запустить с повышенными правами...")
+
+		// Создаем задачу в планировщике для запуска с правами администратора
+		taskName := "goMH_FrontTools_Run"
+		err := wu.CreateScheduledTask(taskName, frontToolsExe, filepath.Dir(frontToolsExe))
+		if err != nil {
+			return fmt.Errorf("не удалось создать задачу планировщика: %w", err)
+		}
+
+		// Запускаем задачу
+		tui.Info("Запуск FrontTools через планировщик задач...")
+		_, err = wu.RunCommand("schtasks", "/Run", "/TN", taskName)
+		if err != nil {
+			return fmt.Errorf("не удалось запустить задачу: %w", err)
+		}
+
+		tui.Success("FrontTools запущен с правами администратора")
+
+		// Ждем немного и удаляем задачу
+		time.Sleep(3 * time.Second)
+		wu.DeleteScheduledTaskByName(taskName)
+		tui.Info("Временная задача планировщика удалена")
+	} else {
+		// Запускаем напрямую если уже есть права администратора
+		tui.Info("Запуск FrontTools.exe...")
+		_, err := wu.RunCommand(frontToolsExe)
+		if err != nil {
+			return fmt.Errorf("не удалось запустить FrontTools: %w", err)
+		}
+		tui.Success("FrontTools.exe запущен успешно")
 	}
 
 	return nil

@@ -155,6 +155,18 @@
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "HTTP"
+		},
+		"fronttools_sdf": {
+			"url": "https://fronttools.iiko.it/fronttools.zip",
+			"type": "zip",
+			"destination": "fronttools",
+			"download_method": "HTTP"
+		},
+		"fronttools_db": {
+			"url": "https://fronttools.iiko.it/fronttools_sqlite.zip",
+			"type": "zip",
+			"destination": "fronttools",
+			"download_method": "HTTP"
 		}
 	}
 }
