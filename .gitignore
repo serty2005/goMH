@@ -3,4 +3,4 @@ go_files_dump.txt
 *.exe
 *.json
 pipeline*
-.kilocode*
+.kilocode
