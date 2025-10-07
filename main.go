@@ -78,6 +78,9 @@ func (rw *RealWinUtils) ListArchiveContents(archivePath string) ([]string, error
 func (rw *RealWinUtils) FindFileRecursive(root, pattern string) (string, error) {
 	return winutils.FindFileRecursive(root, pattern)
 }
+func (rw *RealWinUtils) FindNewestFileByPattern(root, pattern string) (string, error) {
+	return winutils.FindNewestFileByPattern(root, pattern)
+}
 func (rw *RealWinUtils) GetStartupFolders() (string, string, error) {
 	return winutils.GetStartupFolders()
 }

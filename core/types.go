@@ -25,6 +25,7 @@ type WinUtils interface {
 	ListArchiveContents(archivePath string) ([]string, error)
 	CreateScheduledTask(taskName, executablePath, workingDir string) error
 	FindFileRecursive(root, pattern string) (string, error)
+	FindNewestFileByPattern(root, pattern string) (string, error)
 	GetStartupFolders() (user, common string, err error)
 	DeleteFile(path string) error
 	CleanDirectory(path string) error

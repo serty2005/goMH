@@ -717,9 +717,9 @@ func (m *Module) updateIikoPatches(am core.AssetManager, wu core.WinUtils) error
 	return iiko.RunPatchWorkflow(am, wu, shortVersion, iikoFrontDir, backupDir)
 }
 
-// --- Пункт 5: Скачивание и запуск OrderCheck ---
-func (m *Module) downloadAndRunOrderCheck(am core.AssetManager, wu core.WinUtils) error {
-	tui.Info("Начинается скачивание и запуск OrderCheck...")
+// downloadOrderCheck скачивает утилиту OrderCheck через менеджер ассетов
+func (m *Module) downloadOrderCheck(am core.AssetManager, wu core.WinUtils) (string, error) {
+	tui.Info("Начинается скачивание OrderCheck...")
 
 	// Используем менеджер ассетов для скачивания OrderCheck
 	// Предполагаем, что ассет называется "ordercheck" и настроен в конфигурации
@@ -727,14 +727,14 @@ func (m *Module) downloadAndRunOrderCheck(am core.AssetManager, wu core.WinUtils
 
 	// Проверяем, настроен ли ассет в конфигурации
 	if _, exists := am.Cfg().AssetCatalog[assetName]; !exists {
-		return fmt.Errorf("ассет '%s' не найден в каталоге конфигурации", assetName)
+		return "", fmt.Errorf("ассет '%s' не найден в каталоге конфигурации", assetName)
 	}
 
 	// Скачиваем и обрабатываем ассет через менеджер ассетов
 	tui.Info("Скачивание и обработка OrderCheck через менеджер ассетов...")
 	finalPath, err := am.Get(assetName)
 	if err != nil {
-		return fmt.Errorf("не удалось скачать и обработать ассет: %w", err)
+		return "", fmt.Errorf("не удалось скачать и обработать ассет: %w", err)
 	}
 
 	// Путь к исполняемому файлу OrderCheck.exe
@@ -743,49 +743,114 @@ func (m *Module) downloadAndRunOrderCheck(am core.AssetManager, wu core.WinUtils
 		// Если OrderCheck.exe не найден в корне, ищем его рекурсивно
 		foundPath, err := wu.FindFileRecursive(finalPath, "OrderCheck.exe")
 		if err != nil {
-			return fmt.Errorf("OrderCheck.exe не найден в распакованных файлах: %w", err)
+			return "", fmt.Errorf("OrderCheck.exe не найден в распакованных файлах: %w", err)
 		}
 		orderCheckExe = foundPath
 	}
 
 	tui.SuccessF("OrderCheck найден: %s", orderCheckExe)
+	return orderCheckExe, nil
+}
 
-	// Проверяем права администратора
-	if !wu.IsAdmin() {
-		tui.Warn("Для запуска OrderCheck требуются права администратора")
-		tui.Info("Пытаемся запустить с повышенными правами...")
-
-		// Создаем задачу в планировщике для запуска с правами администратора
-		taskName := "goMH_OrderCheck_Run"
-		err := wu.CreateScheduledTask(taskName, orderCheckExe, filepath.Dir(orderCheckExe))
-		if err != nil {
-			return fmt.Errorf("не удалось создать задачу планировщика: %w", err)
-		}
-
-		// Запускаем задачу
-		tui.Info("Запуск OrderCheck через планировщик задач...")
-		_, err = wu.RunCommand("schtasks", "/Run", "/TN", taskName)
-		if err != nil {
-			return fmt.Errorf("не удалось запустить задачу: %w", err)
-		}
-
-		tui.Success("OrderCheck запущен с правами администратора")
-
-		// Ждем немного и удаляем задачу
-		time.Sleep(3 * time.Second)
-		wu.DeleteScheduledTaskByName(taskName)
-		tui.Info("Временная задача планировщика удалена")
-	} else {
-		// Запускаем напрямую если уже есть права администратора
-		tui.Info("Запуск OrderCheck.exe...")
-		_, err := wu.RunCommand(orderCheckExe)
-		if err != nil {
-			return fmt.Errorf("не удалось запустить OrderCheck: %w", err)
-		}
-		tui.Success("OrderCheck.exe запущен успешно")
+// runOrderCheck проверяет базы данных и запускает утилиту OrderCheck
+func (m *Module) runOrderCheck(am core.AssetManager, wu core.WinUtils, orderCheckExe string) error {
+	// Определяем путь к выбранной базе данных
+	dbPath, err := m.selectDatabase(wu)
+	if err != nil {
+		return fmt.Errorf("не удалось определить базу данных: %w", err)
 	}
 
+	tui.InfoF("Используется база данных: %s", dbPath)
+
+	// Запускаем OrderCheck с путем к базе данных как аргументом
+	tui.Info("Запуск OrderCheck.exe...")
+	_, err = wu.RunCommand(orderCheckExe, dbPath)
+	if err != nil {
+		return fmt.Errorf("не удалось запустить OrderCheck: %w", err)
+	}
+
+	tui.Success("OrderCheck.exe запущен успешно")
 	return nil
+}
+
+// selectDatabase определяет путь к базе данных для OrderCheck
+func (m *Module) selectDatabase(wu core.WinUtils) (string, error) {
+	// Проверяем наличие БД Алкоплагина
+	alcoholDbPath, err := m.findAlcoholMarkingPluginDb(wu)
+	alcoholDbFound := err == nil
+
+	// Определяем тип БД iikoFront
+	dbType, err := m.detectIikoFrontDbType()
+	if err != nil {
+		return "", fmt.Errorf("не удалось определить тип базы данных iikoFront: %w", err)
+	}
+
+	// Определяем путь к БД iikoFront
+	appData := os.ExpandEnv("$APPDATA")
+	iikoFrontDbPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities."+dbType)
+
+	if alcoholDbFound {
+		// Если найдена БД Алкоплагина, предлагаем выбор
+		tui.Info("Найдена база данных Алкоплагина")
+		tui.InfoF("БД Алкоплагина: %s", alcoholDbPath)
+		tui.InfoF("БД iikoFront: %s", iikoFrontDbPath)
+
+		reader := bufio.NewReader(os.Stdin)
+		tui.Title("\n--- Выбор базы данных для OrderCheck ---")
+		fmt.Println(" 1. База данных Алкоплагина")
+		fmt.Println(" 2. База данных iikoFront")
+		fmt.Print("Выберите номер (1-2): ")
+
+		choiceStr, _ := reader.ReadString('\n')
+		choiceStr = strings.TrimSpace(choiceStr)
+
+		switch choiceStr {
+		case "1":
+			tui.Info("Выбрана база данных Алкоплагина")
+			return alcoholDbPath, nil
+		case "2":
+			tui.Info("Выбрана база данных iikoFront")
+			return iikoFrontDbPath, nil
+		default:
+			return "", errors.New("неверный выбор базы данных")
+		}
+	} else {
+		// Если БД Алкоплагина не найдена, используем БД iikoFront
+		tui.Info("База данных Алкоплагина не найдена, используется база данных iikoFront")
+		return iikoFrontDbPath, nil
+	}
+}
+
+// findAlcoholMarkingPluginDb ищет базу данных Алкоплагина
+func (m *Module) findAlcoholMarkingPluginDb(wu core.WinUtils) (string, error) {
+	// Путь для поиска БД Алкоплагина
+	appData := os.ExpandEnv("$APPDATA")
+	searchPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Plugins")
+
+	tui.Info("Поиск базы данных Алкоплагина...")
+
+	// Используем новую функцию WinUtils для поиска самого нового файла по паттерну
+	newestFile, err := wu.FindNewestFileByPattern(searchPath, "AlcoholMarkingPluginStorage.sdf")
+	if err != nil {
+		return "", fmt.Errorf("база данных Алкоплагина не найдена: %w", err)
+	}
+
+	tui.SuccessF("Найдена база данных Алкоплагина: %s", newestFile)
+	return newestFile, nil
+}
+
+// --- Пункт 5: Скачивание и запуск OrderCheck ---
+func (m *Module) downloadAndRunOrderCheck(am core.AssetManager, wu core.WinUtils) error {
+	tui.Info("Начинается скачивание и запуск OrderCheck...")
+
+	// Скачиваем OrderCheck
+	orderCheckExe, err := m.downloadOrderCheck(am, wu)
+	if err != nil {
+		return err
+	}
+
+	// Запускаем OrderCheck с проверкой баз данных
+	return m.runOrderCheck(am, wu, orderCheckExe)
 }
 
 // --- Пункт 6: Скачивание и запуск FrontTools ---

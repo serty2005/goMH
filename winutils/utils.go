@@ -494,6 +494,56 @@ func DeleteScheduledTaskByName(taskName string) error {
 	return err
 }
 
+// FindNewestFileByPattern ищет самый новый файл по паттерну в указанной директории и всех поддиректориях.
+// Возвращает путь к файлу с самой поздней датой последнего изменения или ошибку если файлы не найдены.
+func FindNewestFileByPattern(root, pattern string) (string, error) {
+	var newestFile string
+	var newestModTime time.Time
+	found := false
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // Продолжаем поиск даже при ошибках доступа
+		}
+
+		if d.IsDir() {
+			return nil // Пропускаем директории
+		}
+
+		// Проверяем соответствие паттерну
+		matched, err := filepath.Match(pattern, d.Name())
+		if err != nil {
+			return nil // Продолжаем поиск при ошибке сопоставления паттерна
+		}
+
+		if matched {
+			fileInfo, err := d.Info()
+			if err != nil {
+				return nil // Продолжаем поиск при ошибке получения информации о файле
+			}
+
+			// Если это первый найденный файл или файл новее предыдущего
+			if !found || fileInfo.ModTime().After(newestModTime) {
+				newestModTime = fileInfo.ModTime()
+				newestFile = path
+				found = true
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("ошибка при обходе директории %s: %w", root, err)
+	}
+
+	if !found {
+		return "", fmt.Errorf("файлы по паттерну '%s' не найдены в '%s'", pattern, root)
+	}
+
+	return newestFile, nil
+}
+
 // GetServiceStatus возвращает статус службы (например, "RUNNING", "STOPPED").
 // Функция ищет непереводимые английские ключевые слова статуса,
 // что делает ее нечувствительной к языку операционной системы.
