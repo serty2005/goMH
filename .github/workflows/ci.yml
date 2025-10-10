@@ -15,12 +15,25 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Check version commit
+      id: check_version
+      shell: bash
+      run: |
+        COMMIT_MSG=$(git log -1 --pretty=%B)
+        if [[ $COMMIT_MSG =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          echo "is_version=true" >> $GITHUB_OUTPUT
+        else
+          echo "is_version=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: Set up Go
+      if: steps.check_version.outputs.is_version == 'true'
       uses: actions/setup-go@v5
       with:
         go-version: '1.23'
 
     - name: Cache Go modules
+      if: steps.check_version.outputs.is_version == 'true'
       uses: actions/cache@v4
       with:
         path: ~/go/pkg/mod
@@ -29,6 +42,8 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Download dependencies
+      if: steps.check_version.outputs.is_version == 'true'
+      shell: bash
       run: |
         echo "📦 Загрузка зависимостей Go..."
         go mod download
@@ -48,6 +63,8 @@ jobs:
         }
 
     - name: Build
+      if: steps.check_version.outputs.is_version == 'true'
+      shell: bash
       run: |
         echo "🔨 Запуск сборки goMH.exe..."
         go build -v -o goMH.exe .
@@ -72,6 +89,8 @@ jobs:
         }
 
     - name: Test build
+      if: steps.check_version.outputs.is_version == 'true'
+      shell: bash
       run: |
         Write-Host "Проверка результатов сборки..."
         if (Test-Path "goMH.exe") {
@@ -96,6 +115,7 @@ jobs:
         }
 
     - name: Upload build artifacts
+      if: steps.check_version.outputs.is_version == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: goMH-windows-${{ github.run_number }}
@@ -172,18 +192,24 @@ jobs:
 
     - name: Send notification
       if: always()
+      env:
+        JOB_STATUS: ${{ job.status }}
+        RELEASE_URL: ${{ steps.release.outputs.html_url }}
+        DETECTED_VERSION: ${{ steps.version.outputs.detected_version }}
+        SHOULD_CREATE_RELEASE: ${{ steps.version.outputs.should_create_release }}
+        CREATE_RELEASE_OUTCOME: ${{ steps.create_release.outcome }}
       run: |
         echo "Отправка уведомления о статусе сборки и релиза..."
 
-        if [[ "${{ job.status }}" == "success" && "${{ steps.version.outputs.should_create_release }}" == "true" && "${{ steps.create_release.outcome }}" == "success" ]]; then
+        if [[ "$JOB_STATUS" == "success" && "$SHOULD_CREATE_RELEASE" == "true" && "$CREATE_RELEASE_OUTCOME" == "success" ]]; then
           STATUS="✅ УСПЕШНО"
           MESSAGE="Сборка и релиз ${{ env.DETECTED_VERSION }} успешно завершены!"
           COLOR="good"
-        elif [[ "${{ steps.version.outputs.should_create_release }}" == "true" && "${{ steps.create_release.outcome }}" == "failure" ]]; then
+        elif [[ "$SHOULD_CREATE_RELEASE" == "true" && "$CREATE_RELEASE_OUTCOME" == "failure" ]]; then
           STATUS="❌ ОШИБКА РЕЛИЗА"
           MESSAGE="Сборка прошла успешно, но создание релиза завершилось неудачно"
           COLOR="warning"
-        elif [[ "${{ steps.version.outputs.should_create_release }}" == "true" ]]; then
+        elif [[ "$SHOULD_CREATE_RELEASE" == "true" ]]; then
           STATUS="⏭️ ПРОПУСК РЕЛИЗА"
           MESSAGE="Сборка прошла успешно, но релиз не создан (версия не указана в коммите)"
           COLOR="warning"
