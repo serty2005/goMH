@@ -8,13 +8,10 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  build-windows:
-    name: Build Windows
-    runs-on: windows-latest
-
+  check-version:
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-
     - name: Check version commit
       id: check_version
       shell: bash
@@ -25,15 +22,21 @@ jobs:
         else
           echo "is_version=false" >> $GITHUB_OUTPUT
         fi
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    needs: check-version
+    if: needs.check-version.outputs.is_version == 'true'
+
+    steps:
+    - uses: actions/checkout@v4
 
     - name: Set up Go
-      if: steps.check_version.outputs.is_version == 'true'
       uses: actions/setup-go@v5
       with:
         go-version: '1.23'
 
     - name: Cache Go modules
-      if: steps.check_version.outputs.is_version == 'true'
       uses: actions/cache@v4
       with:
         path: ~/go/pkg/mod
@@ -42,7 +45,6 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Download dependencies
-      if: steps.check_version.outputs.is_version == 'true'
       shell: bash
       run: |
         echo "📦 Загрузка зависимостей Go..."
@@ -63,7 +65,6 @@ jobs:
         }
 
     - name: Build
-      if: steps.check_version.outputs.is_version == 'true'
       shell: bash
       run: |
         echo "🔨 Запуск сборки goMH.exe..."
@@ -89,7 +90,6 @@ jobs:
         }
 
     - name: Test build
-      if: steps.check_version.outputs.is_version == 'true'
       shell: bash
       run: |
         Write-Host "Проверка результатов сборки..."
@@ -115,7 +115,6 @@ jobs:
         }
 
     - name: Upload build artifacts
-      if: steps.check_version.outputs.is_version == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: goMH-windows-${{ github.run_number }}
@@ -125,8 +124,8 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: build-windows
-    if: (github.ref == 'refs/heads/develop' && github.event_name == 'push') || startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, check-version]
+    if: needs.check-version.outputs.is_version == 'true' && ((github.ref == 'refs/heads/develop' && github.event_name == 'push') || startsWith(github.ref, 'refs/tags/v'))
 
     steps:
     - name: Checkout code
