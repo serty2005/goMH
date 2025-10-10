@@ -12,7 +12,6 @@ import (
 type IikoConfig struct {
 	BaseFTPPath      string          `json:"base_ftp_path"`
 	PatchesBaseURL   string          `json:"patches_base_url"`
-	PatchRouteFile   string          `json:"patch_route_file"`
 	ComponentsToFind []IikoComponent `json:"components_to_find"`
 	CardPOS          IikoComponent   `json:"card_pos"`
 	// ExcludedPlugins список плагинов для исключения из всех операций (например: ["plugin1", "plugin2"])
