@@ -568,3 +568,37 @@ func GetServiceStatus(serviceName string) (string, error) {
 
 	return "UNKNOWN", fmt.Errorf("не удалось определить статус службы из вывода sc.exe")
 }
+
+// CopyFile копирует файл из src в dst с сохранением атрибутов
+func CopyFile(src, dst string) error {
+	// Используем xcopy для копирования с сохранением атрибутов (/H скрытые, /K атрибуты)
+	_, err := RunCommand("xcopy", "/Y", "/H", "/K", src, dst)
+	return err
+}
+
+// CopyDir рекурсивно копирует директорию из src в dst с сохранением атрибутов
+func CopyDir(src, dst string) error {
+	// Используем robocopy для копирования директорий с сохранением всех атрибутов
+	// /E - копировать поддиректории включая пустые
+	// /COPYALL - копировать все атрибуты (время, атрибуты, владелец, аудиты)
+	// /R:0 - не повторять при ошибках
+	// /W:0 - не ждать при ошибках
+	output, err := RunCommand("robocopy", src, dst, "/E", "/COPYALL", "/R:0", "/W:0")
+	if err != nil {
+		// Robocopy возвращает коды выхода: 0-7 успешные, 8+ ошибки
+		// Но RunCommand возвращает ошибку только если команда не запустилась
+		// Проверим код выхода, но поскольку RunCommand не возвращает код, проверим output
+		if strings.Contains(output, "ERROR") || strings.Contains(output, "не удалось") {
+			return fmt.Errorf("ошибка копирования директории: %s", output)
+		}
+	}
+	return nil
+}
+
+// MoveDir перемещает директорию из src в dst (копирует и удаляет)
+func MoveDir(src, dst string) error {
+	if err := CopyDir(src, dst); err != nil {
+		return err
+	}
+	return os.RemoveAll(src)
+}

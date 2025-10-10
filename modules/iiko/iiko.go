@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"goMH/modules/iiko-plugins"
 	"goMH/tui"
 	"os"
 	"os/exec"
@@ -98,6 +99,17 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	}
 
 	tui.Success(fmt.Sprintf("\nУстановка %s успешно завершена.", distroName))
+
+	// Автоматическое обновление плагинов для iikoFront
+	if selectedComponent.ID == "Front" {
+		tui.Info("Выполняется автоматическое обновление плагинов iiko...")
+		pluginsModule := &iikoplugins.Module{}
+		if err := pluginsModule.AutoUpdatePlugins(am, wu); err != nil {
+			tui.Warn(fmt.Sprintf("Ошибка при автоматическом обновлении плагинов: %v", err))
+		} else {
+			tui.Success("Автоматическое обновление плагинов завершено.")
+		}
+	}
 
 	// --- ИЗМЕНЕНИЕ ЛОГИКИ ---
 	// 6. Применяем предварительно выбранный патч

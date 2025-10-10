@@ -9,6 +9,7 @@ import (
 	"goMH/modules/dto"
 	"goMH/modules/frpc"
 	"goMH/modules/iiko"
+	"goMH/modules/iiko-plugins"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
 	"goMH/modules/serviceutils"
@@ -101,6 +102,15 @@ func (rw *RealWinUtils) GetServiceStatus(serviceName string) (string, error) {
 }
 func (rw *RealWinUtils) IsAdmin() bool {
 	return winutils.IsAdmin()
+}
+func (rw *RealWinUtils) CopyFile(src, dst string) error {
+	return winutils.CopyFile(src, dst)
+}
+func (rw *RealWinUtils) CopyDir(src, dst string) error {
+	return winutils.CopyDir(src, dst)
+}
+func (rw *RealWinUtils) MoveDir(src, dst string) error {
+	return winutils.MoveDir(src, dst)
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
@@ -234,6 +244,7 @@ func main() {
 	registeredModules := map[string]core.Installer{
 		"VComCaster":   &vcomcaster.Module{},
 		"iiko":         &iiko.Module{},
+		"iiko-plugins": &iikoplugins.Module{},
 		"FRPC":         &frpc.Module{},
 		"Regime":       &regime.Module{},
 		"RemoteAccess": &remoteaccess.Module{},

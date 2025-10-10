@@ -4,3 +4,4 @@ go_files_dump.txt
 *.json
 pipeline*
 .kilocode
+*.pdf

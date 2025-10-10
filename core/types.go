@@ -33,6 +33,9 @@ type WinUtils interface {
 	DeleteScheduledTaskByName(taskName string) error
 	GetServiceStatus(serviceName string) (string, error)
 	IsAdmin() bool
+	CopyFile(src, dst string) error
+	CopyDir(src, dst string) error
+	MoveDir(src, dst string) error
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.

@@ -15,6 +15,10 @@ type IikoConfig struct {
 	PatchRouteFile   string          `json:"patch_route_file"`
 	ComponentsToFind []IikoComponent `json:"components_to_find"`
 	CardPOS          IikoComponent   `json:"card_pos"`
+	// ExcludedPlugins список плагинов для исключения из всех операций (например: ["plugin1", "plugin2"])
+	ExcludedPlugins []string `json:"excluded_plugins"`
+	// AutoUpdatePlugins список плагинов для автообновления после установки iikoFront (например: ["plugin3", "plugin4"])
+	AutoUpdatePlugins []string `json:"auto_update_plugins"`
 }
 
 type IikoComponent struct {

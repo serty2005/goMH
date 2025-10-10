@@ -79,7 +79,13 @@
 			"install_args": "/install /passive",
 			"run_after": "",
 			"target_subdir": "iikoCardPOS"
-		}
+		},
+		"excluded_plugins": [
+			"Updater", "UpdaterAssistant", "WebServer", "Delivery", "iikoTransport"
+		],
+		"auto_update_plugins": [
+			"DualConnector", "SberbankPlugin"
+		]
 	},
 	"TeamViewerConfig": {
 		"ShortURL": "http://get.teamviewer.com/myhoreca",
@@ -96,6 +102,7 @@
 		],
 		"LogCollectorPaths": [
 			"C:\\Users\\*\\AppData\\Roaming\\iiko\\CashServer\\Logs",
+			"C:\\Users\\*\\AppData\\Roaming\\Syrve\\CashServer\\Logs",
 			"C:\\Windows\\ServiceProfiles\\iikoCard5POS\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
 			"C:\\Users\\*\\AppData\\Roaming\\iiko\\iikoCard5\\Logs",
 			"C:\\sc552",
