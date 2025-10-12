@@ -470,7 +470,7 @@ func (m *Module) createLogArchive(files []fileToArchive, rootPath string, days i
 			tui.Warn(fmt.Sprintf("    Не удалось скопировать данные в архив: %v", err))
 		}
 	}
-	tui.SuccessF("%d файлов добавлено в архив.", len(files))
+	tui.SuccessF("%d файлов добавлено в архив (%s)", len(files), archivePath)
 	return nil
 }
 
