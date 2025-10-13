@@ -36,6 +36,7 @@ type WinUtils interface {
 	CopyFile(src, dst string) error
 	CopyDir(src, dst string) error
 	MoveDir(src, dst string) error
+	Find7z() (string, error)
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.

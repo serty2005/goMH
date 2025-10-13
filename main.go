@@ -9,7 +9,7 @@ import (
 	"goMH/modules/dto"
 	"goMH/modules/frpc"
 	"goMH/modules/iiko"
-	"goMH/modules/iiko-plugins"
+	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
 	"goMH/modules/serviceutils"
@@ -111,6 +111,9 @@ func (rw *RealWinUtils) CopyDir(src, dst string) error {
 }
 func (rw *RealWinUtils) MoveDir(src, dst string) error {
 	return winutils.MoveDir(src, dst)
+}
+func (rw *RealWinUtils) Find7z() (string, error) {
+	return winutils.Find7z()
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:

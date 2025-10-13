@@ -3,6 +3,7 @@ package winutils
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -569,10 +570,14 @@ func GetServiceStatus(serviceName string) (string, error) {
 	return "UNKNOWN", fmt.Errorf("не удалось определить статус службы из вывода sc.exe")
 }
 
-// CopyFile копирует файл из src в dst с сохранением атрибутов
+// CopyFile копирует файл из src в dst.
+// Эта версия специально адаптирована для xcopy: в качестве dst передается только директория.
 func CopyFile(src, dst string) error {
-	// Используем xcopy для копирования с сохранением атрибутов (/H скрытые, /K атрибуты)
-	_, err := RunCommand("xcopy", "/Y", "/H", "/K", src, dst)
+	// Для xcopy нужно указать только целевую ДИРЕКТОРИЮ, чтобы избежать вопроса "File or Directory?".
+	destDir := filepath.Dir(dst)
+
+	// Копируем с сохранением атрибутов (/H скрытые, /K атрибуты), /I предполагает, что назначение - это каталог.
+	_, err := RunCommand("xcopy", src, destDir, "/Y", "/H", "/K", "/I")
 	return err
 }
 
@@ -601,4 +606,26 @@ func MoveDir(src, dst string) error {
 		return err
 	}
 	return os.RemoveAll(src)
+}
+
+// Find7z ищет исполняемый файл 7z.exe в стандартных местах.
+func Find7z() (string, error) {
+	// 1. Проверяем стандартные пути установки
+	potentialPaths := []string{
+		`C:\Program Files\7-Zip\7z.exe`,
+		`C:\Program Files (x86)\7-Zip\7z.exe`,
+	}
+	for _, path := range potentialPaths {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	// 2. Ищем в системной переменной PATH
+	path, err := exec.LookPath("7z.exe")
+	if err == nil {
+		return path, nil
+	}
+
+	return "", errors.New("исполняемый файл 7z.exe не найден. Убедитесь, что 7-Zip установлен")
 }
