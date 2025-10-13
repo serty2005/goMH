@@ -163,16 +163,14 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 	if _, err := am.DownloadHTTPWithProgress(patch.FullURL, patchCachePath); err != nil {
 		return fmt.Errorf("не удалось скачать патч: %w", err)
 	}
-	defer os.Remove(patchCachePath)
 
 	// 3. Подготовка исходных файлов патча (распаковка, поиск вложенных архивов и т.д.)
 	tui.Info("Подготовка исходных файлов патча...")
-	// Определяем корневую директорию приложения для создания временных файлов
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("не удалось определить путь к исполняемому файлу: %w", err)
+	// Временная директория будет создана внутри root_path/temp
+	tempRootPath := filepath.Join(am.Cfg().RootPath, "temp")
+	if err := os.MkdirAll(tempRootPath, 0755); err != nil {
+		return fmt.Errorf("не удалось создать корневую временную директорию: %w", err)
 	}
-	tempRootPath := filepath.Dir(exePath)
 
 	sourceDir, cleanup, err := preparePatchSource(patchCachePath, tempRootPath)
 	if err != nil {
@@ -206,8 +204,8 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 		return fmt.Errorf("критическая ошибка: не удалось создать бэкап перед установкой патча: %w", err)
 	}
 
-	// 6. Копируем файлы патча в директорию установки
-	tui.InfoF("Копирование файлов патча в '%s'...", installDir)
+	// 6. Перемещаем файлы патча в директорию установки (сохраняет метаданные)
+	tui.InfoF("Перемещение файлов патча в '%s'...", installDir)
 	for _, fileRelPath := range filesToBackup {
 		srcPath := filepath.Join(sourceDir, fileRelPath)
 		destPath := filepath.Join(installDir, fileRelPath)
@@ -217,21 +215,9 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 			return fmt.Errorf("не удалось создать директорию '%s': %w", filepath.Dir(destPath), err)
 		}
 
-		// Копируем файл
-		srcFile, err := os.Open(srcPath)
-		if err != nil {
-			return fmt.Errorf("не удалось открыть исходный файл '%s': %w", srcPath, err)
-		}
-		defer srcFile.Close()
-
-		destFile, err := os.Create(destPath)
-		if err != nil {
-			return fmt.Errorf("не удалось создать целевой файл '%s': %w", destPath, err)
-		}
-		defer destFile.Close()
-
-		if _, err := io.Copy(destFile, srcFile); err != nil {
-			return fmt.Errorf("не удалось скопировать файл '%s': %w", fileRelPath, err)
+		// Перемещаем файл вместо копирования - сохраняет все метаданные, включая оригинальную дату из архива.
+		if err := os.Rename(srcPath, destPath); err != nil {
+			return fmt.Errorf("не удалось переместить файл '%s' в '%s': %w", srcPath, destPath, err)
 		}
 	}
 
@@ -378,7 +364,7 @@ func FindAndSelectPatch(am core.AssetManager, version string) (IikoPatch, bool, 
 // preparePatchSource распаковывает архив и находит исходную директорию с файлами патча.
 // Возвращает путь к исходной директории, функцию для очистки временных файлов и ошибку.
 func preparePatchSource(archivePath string, tempRootPath string) (sourceDir string, cleanup func(), err error) {
-	// 1. Создаем основную временную директорию для всех операций внутри корневого каталога приложения
+	// 1. Создаем основную временную директорию для всех операций внутри указанного каталога
 	tempBaseDir, err := os.MkdirTemp(tempRootPath, "gomh_patch_*")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("не удалось создать временную директорию: %w", err)
