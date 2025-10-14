@@ -41,6 +41,7 @@ jobs:
     steps:
     - name: Check version commit
       id: check_version
+      shell: bash
       run: |
         echo "🔍 Проверка версии в коммите..."
 
