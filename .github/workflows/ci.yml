@@ -53,7 +53,7 @@ jobs:
           Write-Host "✅ Зависимости успешно загружены" -ForegroundColor Green
           go list -m all | Write-Host
         } else {
-          Write-Error "❌ Ошибка при загрузке зависимостей"
+          Write-Error "❌ Ошибка при загрузках зависимостей"
           Write-Host "🔍 Проверка go.mod файла..." -ForegroundColor Yellow
           if (Test-Path "go.mod") {
             Write-Host "Файл go.mod найден, проверка содержимого:" -ForegroundColor Yellow
