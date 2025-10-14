@@ -37,20 +37,40 @@ jobs:
   build-windows:
     name: Build Windows
     runs-on: windows-latest
-    needs: check-version
-    if: needs.check-version.outputs.is_version == 'true'
 
     steps:
+    - name: Check version commit
+      id: check_version
+      run: |
+        echo "🔍 Проверка версии в коммите..."
+
+        # Получаем сообщение коммита
+        COMMIT_MSG=$(git log -1 --pretty=%B)
+        echo "Сообщение коммита: '$COMMIT_MSG'"
+
+        # Проверяем формат версии
+        if [[ $COMMIT_MSG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[a-zA-Z0-9]+)?) ]]; then
+          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          echo "✅ Обнаружена версия: $DETECTED_VERSION"
+          echo "is_version=true" >> $GITHUB_OUTPUT
+          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Версия не найдена в формате v*.*.* или v*.*.*-*"
+          echo "Проверяемые форматы: v0.3.0, v0.3.2293, v1.2.3-beta"
+          echo "is_version=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
     - name: Debug job conditions
       run: |
         echo "🔍 Диагностика условий запуска задачи build-windows:"
-        echo "needs.check-version.outputs.is_version: '${{ needs.check-version.outputs.is_version }}'"
-        echo "needs.check-version.outputs.detected_version: '${{ needs.check-version.outputs.detected_version }}'"
+        echo "steps.check_version.outputs.is_version: '${{ steps.check_version.outputs.is_version }}'"
+        echo "steps.check_version.outputs.detected_version: '${{ steps.check_version.outputs.detected_version }}'"
         echo "github.ref: '${{ github.ref }}'"
         echo "github.event_name: '${{ github.event_name }}'"
 
         # Проверяем условие is_version
-        if [[ "${{ needs.check-version.outputs.is_version }}" == "true" ]]; then
+        if [[ "${{ steps.check_version.outputs.is_version }}" == "true" ]]; then
           echo "✅ Условие is_version выполнено"
         else
           echo "❌ Условие is_version НЕ выполнено"
@@ -151,27 +171,53 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-windows, check-version]
-    if: needs.check-version.outputs.is_version == 'true' && needs.check-version.outputs.detected_version != '' && github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    needs: [build-windows]
+    if: always() && github.ref == 'refs/heads/develop' && github.event_name == 'push'
 
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check version commit
+      id: check_version
+      shell: bash
+      run: |
+        echo "🔍 Проверка версии в коммите..."
+
+        # Получаем сообщение коммита
+        COMMIT_MSG=$(git log -1 --pretty=%B)
+        echo "Сообщение коммита: '$COMMIT_MSG'"
+
+        # Проверяем формат версии
+        if [[ $COMMIT_MSG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[a-zA-Z0-9]+)?) ]]; then
+          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          echo "✅ Обнаружена версия: $DETECTED_VERSION"
+          echo "is_version=true" >> $GITHUB_OUTPUT
+          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Версия не найдена в формате v*.*.* или v*.*.*-*"
+          echo "Проверяемые форматы: v0.3.0, v0.3.2293, v1.2.3-beta"
+          echo "is_version=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
     - name: Debug job conditions
       run: |
         echo "🔍 Диагностика условий запуска задачи release:"
-        echo "needs.check-version.outputs.is_version: '${{ needs.check-version.outputs.is_version }}'"
-        echo "needs.check-version.outputs.detected_version: '${{ needs.check-version.outputs.detected_version }}'"
+        echo "steps.check_version.outputs.is_version: '${{ steps.check_version.outputs.is_version }}'"
+        echo "steps.check_version.outputs.detected_version: '${{ steps.check_version.outputs.detected_version }}'"
         echo "github.ref: '${{ github.ref }}'"
         echo "github.event_name: '${{ github.event_name }}'"
 
         # Проверяем условие is_version
-        if [[ "${{ needs.check-version.outputs.is_version }}" == "true" ]]; then
+        if [[ "${{ steps.check_version.outputs.is_version }}" == "true" ]]; then
           echo "✅ Условие is_version выполнено"
         else
           echo "❌ Условие is_version НЕ выполнено"
         fi
 
         # Проверяем условие detected_version
-        if [[ "${{ needs.check-version.outputs.detected_version }}" != "" ]]; then
+        if [[ "${{ steps.check_version.outputs.detected_version }}" != "" ]]; then
           echo "✅ Условие detected_version выполнено"
         else
           echo "❌ Условие detected_version НЕ выполнено"
@@ -201,16 +247,17 @@ jobs:
         path: ./artifacts/windows/
 
     - name: Set version for release
+      if: steps.check_version.outputs.is_version == 'true' && steps.check_version.outputs.detected_version != ''
       id: version
       run: |
-        echo "📋 Использование версии из предыдущего шага: ${{ needs.check-version.outputs.detected_version }}"
-        DETECTED_VERSION="${{ needs.check-version.outputs.detected_version }}"
+        echo "📋 Использование версии из предыдущего шага: ${{ steps.check_version.outputs.detected_version }}"
+        DETECTED_VERSION="${{ steps.check_version.outputs.detected_version }}"
         echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
         echo "DETECTED_VERSION=$DETECTED_VERSION" >> $GITHUB_ENV
         echo "should_create_release=true" >> $GITHUB_OUTPUT
 
     - name: Create Git tag
-      if: steps.version.outputs.should_create_release == 'true'
+      if: steps.version.outputs.should_create_release == 'true' && steps.check_version.outputs.is_version == 'true'
       run: |
         echo "🏷️ Создание git-тега для версии ${{ steps.version.outputs.detected_version }}..."
 
@@ -230,7 +277,7 @@ jobs:
 
     - name: Create Release
       id: create_release
-      if: steps.version.outputs.should_create_release == 'true'
+      if: steps.version.outputs.should_create_release == 'true' && steps.check_version.outputs.is_version == 'true'
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.version.outputs.detected_version }}
