@@ -16,6 +16,8 @@ import (
 	"time"
 	"unsafe"
 
+	"goMH/core"
+
 	"github.com/mholt/archives"
 	"go.bug.st/serial/enumerator"
 	"golang.org/x/sys/windows"
@@ -608,8 +610,8 @@ func MoveDir(src, dst string) error {
 	return os.RemoveAll(src)
 }
 
-// Find7z ищет исполняемый файл 7z.exe в стандартных местах.
-func Find7z() (string, error) {
+// FindAndInstall7z ищет исполняемый файл 7z.exe в стандартных местах и устанавливает его при необходимости.
+func FindAndInstall7z(am core.AssetManager, wu core.WinUtils) (string, error) {
 	// 1. Проверяем стандартные пути установки
 	potentialPaths := []string{
 		`C:\Program Files\7-Zip\7z.exe`,
@@ -627,5 +629,85 @@ func Find7z() (string, error) {
 		return path, nil
 	}
 
-	return "", errors.New("исполняемый файл 7z.exe не найден. Убедитесь, что 7-Zip установлен")
+	// 3. Если 7z не найден, пытаемся скачать и установить
+	fmt.Println("7z.exe не найден в системе. Попытка автоматической установки...")
+
+	var installPath string
+
+	// Пытаемся скачать через AssetManager, если настроен SevenZipAssetID
+	cfg := am.Cfg()
+	if cfg != nil && cfg.MaintenanceConfig.SevenZipAssetID != "" {
+		fmt.Printf("Попытка скачивания 7-Zip через AssetManager с ID: %s...\n", cfg.MaintenanceConfig.SevenZipAssetID)
+
+		// Скачиваем ассет в кэш
+		cachePath, err := am.DownloadToCache(cfg.MaintenanceConfig.SevenZipAssetID)
+		if err == nil {
+			fmt.Printf("7-Zip скачан в кэш: %s\n", cachePath)
+
+			// Выполняем установку прямо из кэша без копирования
+			fmt.Println("Установка 7-Zip из кэша...")
+			_, err = wu.RunCommand(cachePath, "/S")
+			if err == nil {
+				// Ждем немного, чтобы установка завершилась
+				time.Sleep(3 * time.Second)
+
+				// Удаляем установщик из кэша
+				os.Remove(cachePath)
+
+				// Проверяем установку
+				installPath = `C:\Program Files\7-Zip\7z.exe`
+				if _, err := os.Stat(installPath); err == nil {
+					fmt.Println("7-Zip успешно установлен через AssetManager.")
+					return installPath, nil
+				}
+			}
+			fmt.Printf("Предупреждение: не удалось установить 7-Zip через AssetManager: %v\n", err)
+		}
+
+		// Fallback к текущей логике с жестко закодированными URL
+		fmt.Println("Использование fallback метода скачивания 7-Zip...")
+
+		// Определяем URL для скачивания 7z в зависимости от архитектуры
+		var downloadURL string
+		if wu.Is64BitOS() {
+			downloadURL = "https://www.7-zip.org/a/7z2301-x64.exe"
+		} else {
+			downloadURL = "https://www.7-zip.org/a/7z2301.exe"
+		}
+
+		// Скачиваем установщик прямо в кэш
+		fmt.Printf("Скачивание 7-Zip с %s...\n", downloadURL)
+
+		// Скачиваем установщик
+		success, err := am.DownloadHTTPWithProgress(downloadURL, cachePath)
+		if err != nil || !success {
+			if err == nil {
+				err = errors.New("скачивание 7-Zip не удалось")
+			}
+			return "", fmt.Errorf("не удалось скачать установщик 7-Zip: %w", err)
+		}
+
+		// Устанавливаем 7-Zip с тихим режимом (без указания директории - по умолчанию)
+		fmt.Println("Установка 7-Zip...")
+		output, err := wu.RunCommand(cachePath, "/S")
+		if err != nil {
+			return "", fmt.Errorf("не удалось установить 7-Zip из %s: %w, вывод команды: %s", cachePath, err, output)
+		}
+
+		// Ждем немного, чтобы установка завершилась
+		time.Sleep(3 * time.Second)
+
+		// Удаляем установщик из кэша
+		// os.Remove(cachePath)
+
+		// Проверяем установку снова
+		installPath = `C:\Program Files\7-Zip\7z.exe`
+		if _, err := os.Stat(installPath); err == nil {
+			fmt.Println("7-Zip успешно установлен через fallback метод.")
+			return installPath, nil
+		}
+		return "", errors.New("не удалось найти 7z.exe после установки. Проверьте права администратора")
+	}
+
+	return installPath, nil
 }

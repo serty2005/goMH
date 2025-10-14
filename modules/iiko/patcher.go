@@ -138,7 +138,7 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 	tui.Title(fmt.Sprintf("\n--- Применение патча: %s ---", patch.ShortName))
 
 	// 0. Проверяем наличие 7z.exe
-	sevenZipPath, err := wu.Find7z()
+	sevenZipPath, err := wu.FindAndInstall7z(am, wu)
 	if err != nil {
 		return err
 	}

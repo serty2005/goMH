@@ -2,7 +2,6 @@ package iikoplugins
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"goMH/core"
@@ -18,8 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/mholt/archives"
 )
 
 // Plugin представляет информацию о плагине
@@ -265,10 +262,23 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 		return fmt.Errorf("не удалось скачать плагин: %w", err)
 	}
 
+	// Получить путь к 7z.exe
+	sevenZipPath, err := wu.FindAndInstall7z(am, wu)
+	if err != nil {
+		return fmt.Errorf("не удалось найти или установить 7z.exe: %w", err)
+	}
+
 	// Распаковать
 	extractDir := filepath.Join(tempDir, strings.TrimSuffix(filepath.Base(zipPath), ".zip"))
-	if err := Unzip(zipPath, extractDir); err != nil {
-		return fmt.Errorf("не удалось распаковать архив: %w", err)
+	// Создать директорию для распаковки заранее
+	if err := os.MkdirAll(extractDir, 0755); err != nil {
+		return fmt.Errorf("не удалось создать директорию для распаковки: %w", err)
+	}
+
+	// Использовать 7z для распаковки
+	_, err = wu.RunCommand(sevenZipPath, "x", zipPath, "-o"+extractDir, "-y")
+	if err != nil {
+		return fmt.Errorf("не удалось распаковать архив с помощью 7z: %w", err)
 	}
 
 	// Обработать содержимое распакованной папки
@@ -349,13 +359,23 @@ func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootP
 		return fmt.Errorf("не удалось скачать плагин: %w", err)
 	}
 
+	// Получить путь к 7z.exe
+	sevenZipPath, err := wu.FindAndInstall7z(am, wu)
+	if err != nil {
+		return fmt.Errorf("не удалось найти или установить 7z.exe: %w", err)
+	}
+
 	// Распаковать
 	extractDir := filepath.Join(tempDir, strings.TrimSuffix(filepath.Base(zipPath), ".zip"))
+	// Создать директорию для распаковки заранее
 	if err := os.MkdirAll(extractDir, 0755); err != nil {
 		return fmt.Errorf("не удалось создать директорию для распаковки: %w", err)
 	}
-	if err := Unzip(zipPath, extractDir); err != nil {
-		return fmt.Errorf("не удалось распаковать архив: %w", err)
+
+	// Использовать 7z для распаковки
+	_, err = wu.RunCommand(sevenZipPath, "x", zipPath, "-o"+extractDir, "-y")
+	if err != nil {
+		return fmt.Errorf("не удалось распаковать архив с помощью 7z: %w", err)
 	}
 
 	// Обработать содержимое распакованной папки
@@ -822,85 +842,6 @@ func DownloadFile(am core.AssetManager, urlStr, dir string) (string, error) {
 	localPath := filepath.Join(dir, filename)
 	_, err = am.DownloadHTTPWithProgress(urlStr, localPath)
 	return localPath, err
-}
-
-// Unzip автоматически распаковывает архив любого поддерживаемого типа
-// в указанную директорию, создавая все недостающие подкаталоги.
-// Использует Extract для корректной обработки глубокой иерархии папок.
-func Unzip(srcArchive, destDir string) error {
-	// Проверяем существование архива
-	if _, err := os.Stat(srcArchive); os.IsNotExist(err) {
-		return fmt.Errorf("архив не найден: %s", srcArchive)
-	}
-
-	// Открываем архив как файл
-	file, err := os.Open(srcArchive)
-	if err != nil {
-		return fmt.Errorf("не удалось открыть архив: %w", err)
-	}
-	defer file.Close()
-
-	// Создать директорию назначения
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать каталог назначения: %w", err)
-	}
-
-	// Определяем формат архива
-	ctx := context.Background()
-	format, _, err := archives.Identify(ctx, filepath.Base(srcArchive), file)
-	if err != nil {
-		return fmt.Errorf("не удалось определить формат архива: %w", err)
-	}
-
-	// Проверяем, поддерживает ли формат извлечение
-	extractor, ok := format.(archives.Extractor)
-	if !ok {
-		return fmt.Errorf("формат %T не поддерживает извлечение", format)
-	}
-
-	// Определяем temp_dir и plugin для сообщения об ошибке
-	tempDir := filepath.Dir(destDir)
-	plugin := filepath.Base(destDir)
-
-	// Проверяем на многоуровневость архива с dummy callback
-	if err := extractor.Extract(ctx, file, func(ctx context.Context, f archives.FileInfo) error {
-		if strings.Count(f.NameInArchive, "\\") > 1 {
-			return fmt.Errorf("на текущий момент работа с многоуровневыми архивами не реализована. Плагин загружен в %s/%s, распакуйте и установите вручную", tempDir, plugin)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	// Перематываем файл в начало
-	if _, err := file.Seek(0, 0); err != nil {
-		return fmt.Errorf("не удалось перемотать файл: %w", err)
-	}
-
-	// Извлекаем файлы с помощью callback
-	return extractor.Extract(ctx, file, func(ctx context.Context, f archives.FileInfo) error {
-		targetPath := filepath.Join(destDir, f.NameInArchive)
-		if f.FileInfo.Mode().IsDir() {
-			return os.MkdirAll(targetPath, 0755)
-		} else {
-			parentDir := filepath.Dir(targetPath)
-			if err := os.MkdirAll(parentDir, 0755); err != nil {
-				return err
-			}
-			src, err := f.Open()
-			if err != nil {
-				return err
-			}
-			defer src.Close()
-			dest, err := os.Create(targetPath)
-			if err != nil {
-				return err
-			}
-			defer dest.Close()
-			_, err = io.Copy(dest, src)
-			return err
-		}
-	})
 }
 
 // processExtractedContent обрабатывает содержимое распакованной папки

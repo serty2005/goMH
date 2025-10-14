@@ -112,8 +112,8 @@ func (rw *RealWinUtils) CopyDir(src, dst string) error {
 func (rw *RealWinUtils) MoveDir(src, dst string) error {
 	return winutils.MoveDir(src, dst)
 }
-func (rw *RealWinUtils) Find7z() (string, error) {
-	return winutils.Find7z()
+func (rw *RealWinUtils) FindAndInstall7z(am core.AssetManager, wu core.WinUtils) (string, error) {
+	return winutils.FindAndInstall7z(am, wu)
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
