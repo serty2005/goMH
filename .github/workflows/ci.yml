@@ -16,68 +16,20 @@ jobs:
       id: check_version
       shell: bash
       run: |
-        echo "🔍 Проверка версии в коммите..."
-
-        # Получаем сообщение коммита
         COMMIT_MSG=$(git log -1 --pretty=%B)
-        echo "Сообщение коммита: '$COMMIT_MSG'"
-
-        # Проверяем формат версии
-        if [[ $COMMIT_MSG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[a-zA-Z0-9]+)?) ]]; then
-          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-          echo "✅ Обнаружена версия: $DETECTED_VERSION"
+        if [[ $COMMIT_MSG =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
           echo "is_version=true" >> $GITHUB_OUTPUT
-          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
         else
-          echo "❌ Версия не найдена в формате v*.*.* или v*.*.*-*"
-          echo "Проверяемые форматы: v0.3.0, v0.3.2293, v1.2.3-beta"
           echo "is_version=false" >> $GITHUB_OUTPUT
         fi
-
   build-windows:
     name: Build Windows
     runs-on: windows-latest
+    needs: check-version
+    if: needs.check-version.outputs.is_version == 'true'
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Check version commit
-      id: check_version
-      shell: bash
-      run: |
-        echo "🔍 Проверка версии в коммите..."
-
-        # Получаем сообщение коммита
-        COMMIT_MSG=$(git log -1 --pretty=%B)
-        echo "Сообщение коммита: '$COMMIT_MSG'"
-
-        # Проверяем формат версии
-        if [[ $COMMIT_MSG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[a-zA-Z0-9]+)?) ]]; then
-          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-          echo "✅ Обнаружена версия: $DETECTED_VERSION"
-          echo "is_version=true" >> $GITHUB_OUTPUT
-          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
-        else
-          echo "❌ Версия не найдена в формате v*.*.* или v*.*.*-*"
-          echo "Проверяемые форматы: v0.3.0, v0.3.2293, v1.2.3-beta"
-          echo "is_version=false" >> $GITHUB_OUTPUT
-          exit 1
-        fi
-
-    - name: Debug job conditions
-      run: |
-        echo "🔍 Диагностика условий запуска задачи build-windows:"
-        echo "steps.check_version.outputs.is_version: '${{ steps.check_version.outputs.is_version }}'"
-        echo "steps.check_version.outputs.detected_version: '${{ steps.check_version.outputs.detected_version }}'"
-        echo "github.ref: '${{ github.ref }}'"
-        echo "github.event_name: '${{ github.event_name }}'"
-
-        # Проверяем условие is_version
-        if [[ "${{ steps.check_version.outputs.is_version }}" == "true" ]]; then
-          echo "✅ Условие is_version выполнено"
-        else
-          echo "❌ Условие is_version НЕ выполнено"
-        fi
 
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -93,19 +45,19 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Download dependencies
-      shell: powershell
+      shell: bash
       run: |
-        Write-Host "📦 Загрузка зависимостей Go..." -ForegroundColor Cyan
+        echo "📦 Загрузка зависимостей Go..."
         go mod download
         if ($LASTEXITCODE -eq 0) {
           Write-Host "✅ Зависимости успешно загружены" -ForegroundColor Green
-          go list -m all
+          go list -m all | Write-Host
         } else {
           Write-Error "❌ Ошибка при загрузке зависимостей"
           Write-Host "🔍 Проверка go.mod файла..." -ForegroundColor Yellow
           if (Test-Path "go.mod") {
             Write-Host "Файл go.mod найден, проверка содержимого:" -ForegroundColor Yellow
-            Get-Content "go.mod"
+            Get-Content "go.mod" | Write-Host
           } else {
             Write-Host "Файл go.mod не найден!" -ForegroundColor Red
           }
@@ -113,9 +65,9 @@ jobs:
         }
 
     - name: Build
-      shell: powershell
+      shell: bash
       run: |
-        Write-Host "🔨 Запуск сборки goMH.exe..." -ForegroundColor Cyan
+        echo "🔨 Запуск сборки goMH.exe..."
         go build -v -o goMH.exe .
         if ($LASTEXITCODE -eq 0) {
           Write-Host "✅ Сборка успешно завершена" -ForegroundColor Green
@@ -138,9 +90,9 @@ jobs:
         }
 
     - name: Test build
-      shell: powershell
+      shell: bash
       run: |
-        Write-Host "Проверка результатов сборки..." -ForegroundColor Cyan
+        Write-Host "Проверка результатов сборки..."
         if (Test-Path "goMH.exe") {
           $file = Get-Item "goMH.exe"
           Write-Host "✅ Сборка успешна: goMH.exe создан" -ForegroundColor Green
@@ -172,73 +124,10 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-windows]
-    if: always() && github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    needs: [build-windows, check-version]
+    if: needs.check-version.outputs.is_version == 'true' && ((github.ref == 'refs/heads/develop' && github.event_name == 'push') || startsWith(github.ref, 'refs/tags/v'))
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Check version commit
-      id: check_version
-      shell: bash
-      run: |
-        echo "🔍 Проверка версии в коммите..."
-
-        # Получаем сообщение коммита
-        COMMIT_MSG=$(git log -1 --pretty=%B)
-        echo "Сообщение коммита: '$COMMIT_MSG'"
-
-        # Проверяем формат версии
-        if [[ $COMMIT_MSG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[a-zA-Z0-9]+)?) ]]; then
-          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-          echo "✅ Обнаружена версия: $DETECTED_VERSION"
-          echo "is_version=true" >> $GITHUB_OUTPUT
-          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
-        else
-          echo "❌ Версия не найдена в формате v*.*.* или v*.*.*-*"
-          echo "Проверяемые форматы: v0.3.0, v0.3.2293, v1.2.3-beta"
-          echo "is_version=false" >> $GITHUB_OUTPUT
-          exit 1
-        fi
-
-    - name: Debug job conditions
-      shell: bash
-      run: |
-        echo "🔍 Диагностика условий запуска задачи release:"
-        echo "steps.check_version.outputs.is_version: '${{ steps.check_version.outputs.is_version }}'"
-        echo "steps.check_version.outputs.detected_version: '${{ steps.check_version.outputs.detected_version }}'"
-        echo "github.ref: '${{ github.ref }}'"
-        echo "github.event_name: '${{ github.event_name }}'"
-
-        # Проверяем условие is_version
-        if [[ "${{ steps.check_version.outputs.is_version }}" == "true" ]]; then
-          echo "✅ Условие is_version выполнено"
-        else
-          echo "❌ Условие is_version НЕ выполнено"
-        fi
-
-        # Проверяем условие detected_version
-        if [[ "${{ steps.check_version.outputs.detected_version }}" != "" ]]; then
-          echo "✅ Условие detected_version выполнено"
-        else
-          echo "❌ Условие detected_version НЕ выполнено"
-        fi
-
-        # Проверяем условие ветки
-        if [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
-          echo "✅ Условие ветки выполнено"
-        else
-          echo "❌ Условие ветки НЕ выполнено (текущая: ${{ github.ref }})"
-        fi
-
-        # Проверяем условие события
-        if [[ "${{ github.event_name }}" == "push" ]]; then
-          echo "✅ Условие события выполнено"
-        else
-          echo "❌ Условие события НЕ выполнено (текущее: ${{ github.event_name }})"
-        fi
-
     - name: Checkout code
       uses: actions/checkout@v4
 
@@ -248,38 +137,33 @@ jobs:
         name: goMH-windows-${{ github.run_number }}
         path: ./artifacts/windows/
 
-    - name: Set version for release
-      if: steps.check_version.outputs.is_version == 'true' && steps.check_version.outputs.detected_version != ''
+    - name: Check commit message for version
       id: version
       run: |
-        echo "📋 Использование версии из предыдущего шага: ${{ steps.check_version.outputs.detected_version }}"
-        DETECTED_VERSION="${{ steps.check_version.outputs.detected_version }}"
-        echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
-        echo "DETECTED_VERSION=$DETECTED_VERSION" >> $GITHUB_ENV
-        echo "should_create_release=true" >> $GITHUB_OUTPUT
+        echo "🔍 Проверка сообщения коммита на наличие версии..."
 
-    - name: Create Git tag
-      if: steps.version.outputs.should_create_release == 'true' && steps.check_version.outputs.is_version == 'true'
-      run: |
-        echo "🏷️ Создание git-тега для версии ${{ steps.version.outputs.detected_version }}..."
+        # Получаем сообщение коммита
+        COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+        echo "Сообщение коммита: $COMMIT_MESSAGE"
 
-        # Проверяем, существует ли уже такой тэг
-        if git tag -l | grep -q "^${{ steps.version.outputs.detected_version }}$"; then
-          echo "⚠️ Тэг ${{ steps.version.outputs.detected_version }} уже существует"
+        # Проверяем, начинается ли коммит с версии в формате v*.*.*
+        if [[ $COMMIT_MESSAGE =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          echo "✅ Обнаружена версия в коммите: $DETECTED_VERSION"
+          echo "Создание релиза для версии: $DETECTED_VERSION"
+          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
+          echo "DETECTED_VERSION=$DETECTED_VERSION" >> $GITHUB_ENV
+          echo "should_create_release=true" >> $GITHUB_OUTPUT
         else
-          # Создаем аннотированный тэг
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git tag -a ${{ steps.version.outputs.detected_version }} -m "Release ${{ steps.version.outputs.detected_version }}"
-
-          # Отправляем тэг в репозиторий
-          git push origin ${{ steps.version.outputs.detected_version }}
-          echo "✅ Тэг ${{ steps.version.outputs.detected_version }} успешно создан и отправлен"
+          echo "❌ Версия не найдена в сообщении коммита"
+          echo "Пропуск создания релиза"
+          echo "should_create_release=false" >> $GITHUB_OUTPUT
+          echo "detected_version=" >> $GITHUB_OUTPUT
         fi
 
     - name: Create Release
       id: create_release
-      if: steps.version.outputs.should_create_release == 'true' && steps.check_version.outputs.is_version == 'true'
+      if: steps.version.outputs.should_create_release == 'true'
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.version.outputs.detected_version }}
@@ -309,7 +193,7 @@ jobs:
       if: always()
       env:
         JOB_STATUS: ${{ job.status }}
-        RELEASE_URL: ${{ steps.create_release.outputs.html_url }}
+        RELEASE_URL: ${{ steps.release.outputs.html_url }}
         DETECTED_VERSION: ${{ steps.version.outputs.detected_version }}
         SHOULD_CREATE_RELEASE: ${{ steps.version.outputs.should_create_release }}
         CREATE_RELEASE_OUTCOME: ${{ steps.create_release.outcome }}
