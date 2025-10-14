@@ -39,6 +39,8 @@ jobs:
     runs-on: windows-latest
 
     steps:
+    - uses: actions/checkout@v4
+
     - name: Check version commit
       id: check_version
       shell: bash
@@ -76,8 +78,6 @@ jobs:
         else
           echo "❌ Условие is_version НЕ выполнено"
         fi
-
-    - uses: actions/checkout@v4
 
     - name: Set up Go
       uses: actions/setup-go@v5
