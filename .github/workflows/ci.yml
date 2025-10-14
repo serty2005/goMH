@@ -41,6 +41,21 @@ jobs:
     if: needs.check-version.outputs.is_version == 'true'
 
     steps:
+    - name: Debug job conditions
+      run: |
+        echo "🔍 Диагностика условий запуска задачи build-windows:"
+        echo "needs.check-version.outputs.is_version: '${{ needs.check-version.outputs.is_version }}'"
+        echo "needs.check-version.outputs.detected_version: '${{ needs.check-version.outputs.detected_version }}'"
+        echo "github.ref: '${{ github.ref }}'"
+        echo "github.event_name: '${{ github.event_name }}'"
+
+        # Проверяем условие is_version
+        if [[ "${{ needs.check-version.outputs.is_version }}" == "true" ]]; then
+          echo "✅ Условие is_version выполнено"
+        else
+          echo "❌ Условие is_version НЕ выполнено"
+        fi
+
     - uses: actions/checkout@v4
 
     - name: Set up Go
@@ -140,6 +155,42 @@ jobs:
     if: needs.check-version.outputs.is_version == 'true' && needs.check-version.outputs.detected_version != '' && github.ref == 'refs/heads/develop' && github.event_name == 'push'
 
     steps:
+    - name: Debug job conditions
+      run: |
+        echo "🔍 Диагностика условий запуска задачи release:"
+        echo "needs.check-version.outputs.is_version: '${{ needs.check-version.outputs.is_version }}'"
+        echo "needs.check-version.outputs.detected_version: '${{ needs.check-version.outputs.detected_version }}'"
+        echo "github.ref: '${{ github.ref }}'"
+        echo "github.event_name: '${{ github.event_name }}'"
+
+        # Проверяем условие is_version
+        if [[ "${{ needs.check-version.outputs.is_version }}" == "true" ]]; then
+          echo "✅ Условие is_version выполнено"
+        else
+          echo "❌ Условие is_version НЕ выполнено"
+        fi
+
+        # Проверяем условие detected_version
+        if [[ "${{ needs.check-version.outputs.detected_version }}" != "" ]]; then
+          echo "✅ Условие detected_version выполнено"
+        else
+          echo "❌ Условие detected_version НЕ выполнено"
+        fi
+
+        # Проверяем условие ветки
+        if [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+          echo "✅ Условие ветки выполнено"
+        else
+          echo "❌ Условие ветки НЕ выполнено (текущая: ${{ github.ref }})"
+        fi
+
+        # Проверяем условие события
+        if [[ "${{ github.event_name }}" == "push" ]]; then
+          echo "✅ Условие события выполнено"
+        else
+          echo "❌ Условие события НЕ выполнено (текущее: ${{ github.event_name }})"
+        fi
+
     - name: Checkout code
       uses: actions/checkout@v4
 
