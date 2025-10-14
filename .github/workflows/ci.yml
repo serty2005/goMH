@@ -92,19 +92,19 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Download dependencies
-      shell: bash
+      shell: powershell
       run: |
-        echo "📦 Загрузка зависимостей Go..."
+        Write-Host "📦 Загрузка зависимостей Go..." -ForegroundColor Cyan
         go mod download
         if ($LASTEXITCODE -eq 0) {
           Write-Host "✅ Зависимости успешно загружены" -ForegroundColor Green
-          go list -m all | Write-Host
+          go list -m all
         } else {
           Write-Error "❌ Ошибка при загрузке зависимостей"
           Write-Host "🔍 Проверка go.mod файла..." -ForegroundColor Yellow
           if (Test-Path "go.mod") {
             Write-Host "Файл go.mod найден, проверка содержимого:" -ForegroundColor Yellow
-            Get-Content "go.mod" | Write-Host
+            Get-Content "go.mod"
           } else {
             Write-Host "Файл go.mod не найден!" -ForegroundColor Red
           }
@@ -112,9 +112,9 @@ jobs:
         }
 
     - name: Build
-      shell: bash
+      shell: powershell
       run: |
-        echo "🔨 Запуск сборки goMH.exe..."
+        Write-Host "🔨 Запуск сборки goMH.exe..." -ForegroundColor Cyan
         go build -v -o goMH.exe .
         if ($LASTEXITCODE -eq 0) {
           Write-Host "✅ Сборка успешно завершена" -ForegroundColor Green
@@ -137,9 +137,9 @@ jobs:
         }
 
     - name: Test build
-      shell: bash
+      shell: powershell
       run: |
-        Write-Host "Проверка результатов сборки..."
+        Write-Host "Проверка результатов сборки..." -ForegroundColor Cyan
         if (Test-Path "goMH.exe") {
           $file = Get-Item "goMH.exe"
           Write-Host "✅ Сборка успешна: goMH.exe создан" -ForegroundColor Green
