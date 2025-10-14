@@ -16,10 +16,21 @@ jobs:
       id: check_version
       shell: bash
       run: |
+        echo "🔍 Проверка версии в коммите..."
+
+        # Получаем сообщение коммита
         COMMIT_MSG=$(git log -1 --pretty=%B)
-        if [[ $COMMIT_MSG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)? ]]; then
+        echo "Сообщение коммита: '$COMMIT_MSG'"
+
+        # Проверяем формат версии
+        if [[ $COMMIT_MSG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[a-zA-Z0-9]+)?) ]]; then
+          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          echo "✅ Обнаружена версия: $DETECTED_VERSION"
           echo "is_version=true" >> $GITHUB_OUTPUT
+          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
         else
+          echo "❌ Версия не найдена в формате v*.*.* или v*.*.*-*"
+          echo "Проверяемые форматы: v0.3.0, v0.3.2293, v1.2.3-beta"
           echo "is_version=false" >> $GITHUB_OUTPUT
         fi
 
@@ -126,7 +137,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [build-windows, check-version]
-    if: needs.check-version.outputs.is_version == 'true' && github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    if: needs.check-version.outputs.is_version == 'true' && needs.check-version.outputs.detected_version != '' && github.ref == 'refs/heads/develop' && github.event_name == 'push'
 
     steps:
     - name: Checkout code
@@ -138,29 +149,14 @@ jobs:
         name: goMH-windows-${{ github.run_number }}
         path: ./artifacts/windows/
 
-    - name: Check commit message for version
+    - name: Set version for release
       id: version
       run: |
-        echo "🔍 Проверка сообщения коммита на наличие версии..."
-
-        # Получаем сообщение коммита
-        COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-        echo "Сообщение коммита: $COMMIT_MESSAGE"
-
-        # Проверяем, начинается ли коммит с версии в формате v*.*.* или v*.*.*-*
-        if [[ $COMMIT_MESSAGE =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[a-zA-Z0-9]+)?) ]]; then
-          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-          echo "✅ Обнаружена версия в коммите: $DETECTED_VERSION"
-          echo "Создание релиза для версии: $DETECTED_VERSION"
-          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
-          echo "DETECTED_VERSION=$DETECTED_VERSION" >> $GITHUB_ENV
-          echo "should_create_release=true" >> $GITHUB_OUTPUT
-        else
-          echo "❌ Версия не найдена в сообщении коммита"
-          echo "Пропуск создания релиза"
-          echo "should_create_release=false" >> $GITHUB_OUTPUT
-          echo "detected_version=" >> $GITHUB_OUTPUT
-        fi
+        echo "📋 Использование версии из предыдущего шага: ${{ needs.check-version.outputs.detected_version }}"
+        DETECTED_VERSION="${{ needs.check-version.outputs.detected_version }}"
+        echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
+        echo "DETECTED_VERSION=$DETECTED_VERSION" >> $GITHUB_ENV
+        echo "should_create_release=true" >> $GITHUB_OUTPUT
 
     - name: Create Git tag
       if: steps.version.outputs.should_create_release == 'true'
