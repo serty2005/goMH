@@ -203,6 +203,7 @@ jobs:
         fi
 
     - name: Debug job conditions
+      shell: bash
       run: |
         echo "🔍 Диагностика условий запуска задачи release:"
         echo "steps.check_version.outputs.is_version: '${{ steps.check_version.outputs.is_version }}'"
