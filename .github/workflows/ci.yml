@@ -3,33 +3,55 @@ name: Build and Release
 on:
   push:
     branches: [ main, develop ]
-    tags: [ 'v*' ]
   pull_request:
     branches: [ main, develop ]
 
 jobs:
-  check-version:
+  # ЗАДАЧА 1: Определяем, является ли коммит релизным, и извлекаем версию.
+  # Эта задача - единственный источник правды для всего пайплайна.
+  determine-version:
+    name: Determine release version
     runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.check_commit.outputs.is_release }}
+      tag: ${{ steps.check_commit.outputs.tag }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Check version commit
-      id: check_version
-      shell: bash
-      run: |
-        COMMIT_MSG=$(git log -1 --pretty=%B)
-        if [[ $COMMIT_MSG =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-          echo "is_version=true" >> $GITHUB_OUTPUT
-        else
-          echo "is_version=false" >> $GITHUB_OUTPUT
-        fi
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Нужна полная история для лога
+
+      - name: Check commit message for version
+        id: check_commit
+        shell: bash
+        run: |
+          # Получаем сообщение самого последнего коммита
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Commit message: $COMMIT_MSG"
+
+          # Ищем сообщение, которое начинается с 'v' и версии до знака тире или конца строки
+          # Например: v1.2.3 или v1.2.3-some-fix
+          if [[ $COMMIT_MSG =~ ^(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            VERSION_TAG="${BASH_REMATCH[1]}"
+            echo "✅ Version found: $VERSION_TAG"
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "tag=$VERSION_TAG" >> $GITHUB_OUTPUT
+          else
+            echo " M Commit does not start with a version. Skipping release."
+            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "tag=" >> $GITHUB_OUTPUT
+          fi
+
+  # ЗАДАЧА 2: Сборка под Windows. Запускается ТОЛЬКО если первая задача нашла версию.
   build-windows:
     name: Build Windows
     runs-on: windows-latest
-    needs: check-version
-    if: needs.check-version.outputs.is_version == 'true'
+    needs: determine-version
+    if: needs.determine-version.outputs.is_release == 'true'
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -45,87 +67,26 @@ jobs:
           ${{ runner.os }}-go-
 
     - name: Download dependencies
-      shell: bash
-      run: |
-        echo "📦 Загрузка зависимостей Go..."
-        go mod download
-        if ($LASTEXITCODE -eq 0) {
-          Write-Host "✅ Зависимости успешно загружены" -ForegroundColor Green
-          go list -m all | Write-Host
-        } else {
-          Write-Error "❌ Ошибка при загрузках зависимостей"
-          Write-Host "🔍 Проверка go.mod файла..." -ForegroundColor Yellow
-          if (Test-Path "go.mod") {
-            Write-Host "Файл go.mod найден, проверка содержимого:" -ForegroundColor Yellow
-            Get-Content "go.mod" | Write-Host
-          } else {
-            Write-Host "Файл go.mod не найден!" -ForegroundColor Red
-          }
-          exit 1
-        }
+      run: go mod download
 
     - name: Build
-      shell: bash
-      run: |
-        echo "🔨 Запуск сборки goMH.exe..."
-        go build -v -o goMH.exe .
-        if ($LASTEXITCODE -eq 0) {
-          Write-Host "✅ Сборка успешно завершена" -ForegroundColor Green
-          Write-Host "📋 Результат сборки:" -ForegroundColor Cyan
-          Get-ChildItem goMH.exe | Format-Table -AutoSize
-        } else {
-          Write-Error "❌ Ошибка при сборке проекта"
-          Write-Host "🔍 Диагностика проблемы:" -ForegroundColor Yellow
-          Write-Host "Проверка директории проекта:" -ForegroundColor Yellow
-          Get-ChildItem | Format-Table -AutoSize
-          Write-Host "Проверка наличия main.go:" -ForegroundColor Yellow
-          if (Test-Path "main.go") {
-            Write-Host "Файл main.go найден" -ForegroundColor Green
-          } else {
-            Write-Host "Файл main.go НЕ найден!" -ForegroundColor Red
-          }
-          Write-Host "Проверка версии Go:" -ForegroundColor Yellow
-          go version
-          exit 1
-        }
-
-    - name: Test build
-      shell: bash
-      run: |
-        Write-Host "Проверка результатов сборки..."
-        if (Test-Path "goMH.exe") {
-          $file = Get-Item "goMH.exe"
-          Write-Host "✅ Сборка успешна: goMH.exe создан" -ForegroundColor Green
-          Write-Host "📊 Информация о файле:" -ForegroundColor Cyan
-          Write-Host "   Имя: $($file.Name)"
-          Write-Host "   Размер: $([math]::Round($file.Length / 1MB, 2)) MB"
-          Write-Host "   Время создания: $($file.LastWriteTime)"
-          Write-Host "   Время модификации: $($file.LastWriteTime)"
-        } else {
-          Write-Error "❌ Сборка неудачна: goMH.exe не найден в корневой директории"
-          Write-Host "🔍 Поиск файла в других директориях..." -ForegroundColor Yellow
-          $foundFiles = Get-ChildItem -Name "goMH.exe" -Recurse -ErrorAction SilentlyContinue
-          if ($foundFiles) {
-            Write-Host "Найденные файлы:" -ForegroundColor Yellow
-            $foundFiles | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
-          } else {
-            Write-Host "Файл goMH.exe не найден ни в одной директории" -ForegroundColor Red
-          }
-          exit 1
-        }
+      run: go build -v -o goMH.exe .
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: goMH-windows-${{ github.run_number }}
+        name: goMH-windows
         path: goMH.exe
-        retention-days: 21
 
-  release:
+  # ЗАДАЧA 3: Публикация релиза. Запускается ТОЛЬКО если первая задача нашла версию.
+  create-release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-windows, check-version]
-    if: needs.check-version.outputs.is_version == 'true' && ((github.ref == 'refs/heads/develop' && github.event_name == 'push') || startsWith(github.ref, 'refs/tags/v'))
+    needs: [build-windows, determine-version]
+    if: needs.determine-version.outputs.is_release == 'true'
+    # Добавляем права на запись контента для создания релиза
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout code
@@ -134,97 +95,20 @@ jobs:
     - name: Download Windows build
       uses: actions/download-artifact@v4
       with:
-        name: goMH-windows-${{ github.run_number }}
-        path: ./artifacts/windows/
-
-    - name: Check commit message for version
-      id: version
-      run: |
-        echo "🔍 Проверка сообщения коммита на наличие версии..."
-
-        # Получаем сообщение коммита
-        COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-        echo "Сообщение коммита: $COMMIT_MESSAGE"
-
-        # Проверяем, начинается ли коммит с версии в формате v*.*.*
-        if [[ $COMMIT_MESSAGE =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-          DETECTED_VERSION="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
-          echo "✅ Обнаружена версия в коммите: $DETECTED_VERSION"
-          echo "Создание релиза для версии: $DETECTED_VERSION"
-          echo "detected_version=$DETECTED_VERSION" >> $GITHUB_OUTPUT
-          echo "DETECTED_VERSION=$DETECTED_VERSION" >> $GITHUB_ENV
-          echo "should_create_release=true" >> $GITHUB_OUTPUT
-        else
-          echo "❌ Версия не найдена в сообщении коммита"
-          echo "Пропуск создания релиза"
-          echo "should_create_release=false" >> $GITHUB_OUTPUT
-          echo "detected_version=" >> $GITHUB_OUTPUT
-        fi
+        name: goMH-windows # Имя артефакта теперь без номера сборки для простоты
+        path: ./release-assets/
 
     - name: Create Release
-      id: create_release
-      if: steps.version.outputs.should_create_release == 'true'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ steps.version.outputs.detected_version }}
-        name: Release ${{ steps.version.outputs.detected_version }}
+        # Версию берем напрямую из вывода первой задачи
+        tag_name: ${{ needs.determine-version.outputs.tag }}
+        name: Release ${{ needs.determine-version.outputs.tag }}
         body: |
           ## goMH - Мультитул для техподдержки iiko и Syrve
 
           ### Скачать:
           - **Windows**: `goMH.exe` (требуются права администратора)
-
-          ### Требования:
-          - Go 1.23+ для сборки
-          - Windows: права администратора для запуска
-          - Для корректной работы требуется Windows с поддержкой всех системных функций (службы, COM-порты, сканеры)
-
-          ### Важно:
-          - Это приложение предназначено только для Windows-систем
-          - Требуются права администратора для полноценной работы
-          - Поддерживает работу со службами Windows, сканерами, COM-портами
         draft: false
         prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
-        files: ./artifacts/windows/goMH.exe
-      env:
-        GITHUB_TOKEN: ${{ secrets.RELEASE_PUSHER }}
-
-    - name: Send notification
-      if: always()
-      env:
-        JOB_STATUS: ${{ job.status }}
-        RELEASE_URL: ${{ steps.release.outputs.html_url }}
-        DETECTED_VERSION: ${{ steps.version.outputs.detected_version }}
-        SHOULD_CREATE_RELEASE: ${{ steps.version.outputs.should_create_release }}
-        CREATE_RELEASE_OUTCOME: ${{ steps.create_release.outcome }}
-      run: |
-        echo "Отправка уведомления о статусе сборки и релиза..."
-
-        if [[ "$JOB_STATUS" == "success" && "$SHOULD_CREATE_RELEASE" == "true" && "$CREATE_RELEASE_OUTCOME" == "success" ]]; then
-          STATUS="✅ УСПЕШНО"
-          MESSAGE="Сборка и релиз ${{ env.DETECTED_VERSION }} успешно завершены!"
-          COLOR="good"
-        elif [[ "$SHOULD_CREATE_RELEASE" == "true" && "$CREATE_RELEASE_OUTCOME" == "failure" ]]; then
-          STATUS="❌ ОШИБКА РЕЛИЗА"
-          MESSAGE="Сборка прошла успешно, но создание релиза завершилось неудачно"
-          COLOR="warning"
-        elif [[ "$SHOULD_CREATE_RELEASE" == "true" ]]; then
-          STATUS="⏭️ ПРОПУСК РЕЛИЗА"
-          MESSAGE="Сборка прошла успешно, но релиз не создан (версия не указана в коммите)"
-          COLOR="warning"
-        else
-          STATUS="❌ ОШИБКА СБОРКИ"
-          MESSAGE="Сборка завершилась неудачно"
-          COLOR="danger"
-        fi
-
-        echo "Статус: $STATUS"
-        echo "Сообщение: $MESSAGE"
-        echo "Ссылка на сборку: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-        # Здесь можно добавить интеграцию с Telegram, Slack или другим сервисом уведомлений
-        # Например, для Telegram:
-        # curl -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-        #   -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-        #   -d text="$STATUS%0A$MESSAGE%0A%0AСсылка: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-        #   -d parse_mode="HTML"
+        files: ./release-assets/goMH.exe
