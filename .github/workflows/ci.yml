@@ -84,13 +84,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-windows, determine-version]
     if: needs.determine-version.outputs.is_release == 'true'
-    # Добавляем права на запись контента для создания релиза
     permissions:
       contents: write
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Нужна полная история для лога
 
     - name: Download Windows build
       uses: actions/download-artifact@v4
@@ -98,17 +99,77 @@ jobs:
         name: goMH-windows # Имя артефакта теперь без номера сборки для простоты
         path: ./release-assets/
 
+    - name: Generate Release Notes from Commit
+      id: generate_notes
+      shell: bash
+      run: |
+        # --- 1. Формируем заголовок релиза ---
+        RELEASE_TAG=${{ needs.determine-version.outputs.tag }}
+        RELEASE_DATE=$(date +'%d.%m.%Y')
+        RELEASE_TITLE="$RELEASE_TAG от $RELEASE_DATE"
+        echo "Release title: $RELEASE_TITLE"
+        echo "release_title=$RELEASE_TITLE" >> $GITHUB_OUTPUT
+
+        # --- 2. Извлекаем тело коммита (все, кроме первой строки с версией) ---
+        COMMIT_BODY=$(git log -1 --pretty=%B | tail -n +2)
+
+        # --- 3. Готовим тело релиза, начиная с заголовка ---
+        RELEASE_BODY="## $RELEASE_TITLE\n\n"
+
+        # --- 4. Определяем ключевые слова и заголовки секций ---
+        declare -A SECTIONS
+        SECTIONS=( ["UPD"]="UPDATE" ["ADD"]="ADDED" ["FIX"]="FIXED" ["DEL"]="REMOVED" )
+
+        # --- 5. Парсим тело коммита и формируем секции ---
+        HAS_CONTENT=false
+        for KEY in "${!SECTIONS[@]}"; do
+          HEADER="${SECTIONS[$KEY]}"
+          # Ищем строки, начинающиеся с ключа (например, "UPD:")
+          ENTRIES=$(echo "$COMMIT_BODY" | grep -i "^${KEY}:" || true)
+
+          if [[ -n "$ENTRIES" ]]; then
+            HAS_CONTENT=true
+            RELEASE_BODY+="### ${HEADER}:\n"
+            # Преобразуем каждую найденную строку в элемент списка Markdown
+            while IFS= read -r line; do
+              # Удаляем ключ (например, "UPD: "), выделяем компонент жирным и добавляем дефис
+              FORMATTED_LINE=$(echo "$line" | sed -E "s/^[^:]+: *([^:]+): *(.*)/- **\1**: \2/")
+              RELEASE_BODY+="${FORMATTED_LINE}\n"
+            done <<< "$ENTRIES"
+            RELEASE_BODY+="\n"
+          fi
+        done
+
+        # Если в коммите не было ничего похожего на changelog, добавляем заглушку
+        if [ "$HAS_CONTENT" = false ]; then
+          RELEASE_BODY+="Изменения в этой версии не описаны в сообщении коммита.\n\n"
+        fi
+
+        # --- 6. Добавляем статический футер ---
+        FOOTER=$(cat <<'EOF'
+### Важно:
+- Это приложение предназначено только для Windows-систем (10+)
+- Требуются права администратора для работы
+- Антивирусы могут ругаться из-за характера ПО (вот такая вот темпераментная утилита, хочет качать всякое)
+EOF
+        )
+        RELEASE_BODY+="$FOOTER"
+
+        # --- 7. Сохраняем итоговое тело релиза в файл ---
+        # Используем разделитель, чтобы не было проблем с многострочным текстом
+        {
+          echo 'release_body<<EOF'
+          echo -e "$RELEASE_BODY"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
+
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
-        # Версию берем напрямую из вывода первой задачи
+        # Используем данные, сгенерированные на предыдущем шаге
         tag_name: ${{ needs.determine-version.outputs.tag }}
-        name: Release ${{ needs.determine-version.outputs.tag }}
-        body: |
-          ## goMH - Мультитул для техподдержки iiko и Syrve
-
-          ### Скачать:
-          - **Windows**: `goMH.exe` (требуются права администратора)
+        name: ${{ steps.generate_notes.outputs.release_title }}
+        body: ${{ steps.generate_notes.outputs.release_body }}
         draft: false
         prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
         files: ./release-assets/goMH.exe
