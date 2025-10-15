@@ -18,6 +18,7 @@ import (
 	"github.com/mholt/archives"
 	"go.bug.st/serial/enumerator"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 // IsAdmin остается без изменений
@@ -605,4 +606,19 @@ func MoveDir(src, dst string) error {
 		return err
 	}
 	return os.RemoveAll(src)
+}
+
+// ReadRegistryKey читает строковое значение из указанного ключа реестра.
+func ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error) {
+	k, err := registry.OpenKey(rootKey, path, registry.QUERY_VALUE)
+	if err != nil {
+		return "", err
+	}
+	defer k.Close()
+
+	s, _, err := k.GetStringValue(valueName)
+	if err != nil {
+		return "", err
+	}
+	return s, nil
 }

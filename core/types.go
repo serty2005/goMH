@@ -1,6 +1,10 @@
 package core
 
-import "goMH/config"
+import (
+	"goMH/config"
+
+	"golang.org/x/sys/windows/registry"
+)
 
 // ScannerInfo содержит информацию о найденном устройстве-сканере.
 type ScannerInfo struct {
@@ -36,6 +40,7 @@ type WinUtils interface {
 	CopyFile(src, dst string) error
 	CopyDir(src, dst string) error
 	MoveDir(src, dst string) error
+	ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error)
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.

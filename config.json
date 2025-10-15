@@ -32,7 +32,7 @@
 			"id": "Regime"
 		},
 		{
-			"id": "DTO"
+			"id": "FiscalDrivers"
 		},
 		{
 			"id": "UTM"
@@ -125,10 +125,26 @@
 		],
 		"7zipAssetID": "7zip_installer"
 	},
-	"dto_config": {
-		"asset_id": "DTO_Installer",
-		"install_args": "/S /AcceptLicense /WithAssistant /WithEOU"
-	},
+	"fiscal_drivers_config": [
+		{
+			"id": "atol",
+			"menu_text": "Драйверы АТОЛ",
+			"asset_id": "DTO_Installer",
+			"install_args": "/S /AcceptLicense /WithAssistant /WithEOU"
+		},
+		{
+			"id": "poscenter",
+			"menu_text": "Драйверы Ритейл-* (poscenter)",
+			"asset_id": "Poscenter_Driver_x32",
+			"install_args": "/COMPONENTS=\"usbdrv,kktproxy\" /VERYSILENT /TASKS=\"desktopicon\""
+		},
+		{
+			"id": "kktlab",
+			"menu_text": "Драйверы Штрих/Элвес-* (kktlab)",
+			"asset_id": "KKTlab_Driver_x32",
+			"install_args": "/COMPONENTS=\"main,usbdrivers,kktproxy\" /VERYSILENT /TASKS=\"desktopicon\""
+		}
+	],
 	"utm_config": {
 		"asset_id": "UTM_Installer",
 		"install_args": ""
@@ -171,6 +187,18 @@
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "FTP"
+		},
+		"Poscenter_Driver_x32": {
+			"url": "https://f.serty.top/poscenter_x32.exe",
+			"type": "file",
+			"destination": "_assets",
+			"download_method": "HTTP"
+		},
+		"KKTlab_Driver_x32": {
+			"url": "https://f.serty.top/kktlab_x32.exe",
+			"type": "file",
+			"destination": "_assets",
+			"download_method": "HTTP"
 		},
 		"UTM_Installer": {
 			"url": "https://f.serty.top/silent-setup-4.2.0-b2644.exe",

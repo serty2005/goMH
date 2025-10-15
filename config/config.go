@@ -59,11 +59,12 @@ type MaintenanceConfig struct {
 	SevenZipAssetID   string   `json:"7zipAssetID"`
 }
 
-// DTOConfig содержит настройки для установщика драйверов АТОЛ
-type DTOConfig struct {
-	MenuText    string `json:"menu_text"`
-	AssetID     string `json:"asset_id"`
-	InstallArgs string `json:"install_args"`
+// FiscalDriver описывает один драйвер в модуле fiscal-drivers
+type FiscalDriver struct {
+	ID          string `json:"id"`           // Например "atol", "poscenter", "kktlab"
+	MenuText    string `json:"menu_text"`    // Текст для отображения в меню
+	AssetID     string `json:"asset_id"`     // ID ассета для скачивания
+	InstallArgs string `json:"install_args"` // Аргументы для тихой установки
 }
 
 // UTMConfig содержит настройки для установщика УТМ
@@ -74,17 +75,17 @@ type UTMConfig struct {
 }
 
 type Config struct {
-	RootPath          string               `json:"root_path"`
-	AssetsCachePath   string               `json:"assets_cache_path"`
-	FTP               FTPConfig            `json:"ftp_config"`
-	Modules           []ModuleDef          `json:"modules"`
-	FrpcConfig        FrpcConfig           `json:"frpc_config"`
-	IikoConfig        IikoConfig           `json:"iiko_config"`
-	AssetCatalog      map[string]AssetInfo `json:"asset_catalog"`
-	TeamViewerConfig  TeamViewerConfig     `json:"TeamViewerConfig"`
-	MaintenanceConfig MaintenanceConfig    `json:"MaintenanceConfig"`
-	DTOConfig         DTOConfig            `json:"dto_config"`
-	UTMConfig         UTMConfig            `json:"utm_config"`
+	RootPath            string               `json:"root_path"`
+	AssetsCachePath     string               `json:"assets_cache_path"`
+	FTP                 FTPConfig            `json:"ftp_config"`
+	Modules             []ModuleDef          `json:"modules"`
+	FrpcConfig          FrpcConfig           `json:"frpc_config"`
+	IikoConfig          IikoConfig           `json:"iiko_config"`
+	AssetCatalog        map[string]AssetInfo `json:"asset_catalog"`
+	TeamViewerConfig    TeamViewerConfig     `json:"TeamViewerConfig"`
+	MaintenanceConfig   MaintenanceConfig    `json:"MaintenanceConfig"`
+	FiscalDriversConfig []FiscalDriver       `json:"fiscal_drivers_config"`
+	UTMConfig           UTMConfig            `json:"utm_config"`
 }
 
 type FTPConfig struct {

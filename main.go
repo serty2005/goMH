@@ -6,7 +6,7 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
-	"goMH/modules/dto"
+	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/frpc"
 	"goMH/modules/iiko"
 	iikoplugins "goMH/modules/iiko-plugins"
@@ -24,6 +24,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 type RealWinUtils struct{}
@@ -111,6 +113,9 @@ func (rw *RealWinUtils) CopyDir(src, dst string) error {
 }
 func (rw *RealWinUtils) MoveDir(src, dst string) error {
 	return winutils.MoveDir(src, dst)
+}
+func (rw *RealWinUtils) ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error) {
+	return winutils.ReadRegistryKey(rootKey, path, valueName)
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
@@ -242,15 +247,15 @@ func main() {
 	// 5. Регистрация всех доступных модулей
 	// map хранит core.Installer
 	registeredModules := map[string]core.Installer{
-		"VComCaster":   &vcomcaster.Module{},
-		"iiko":         &iiko.Module{},
-		"iiko-plugins": &iikoplugins.Module{},
-		"FRPC":         &frpc.Module{},
-		"Regime":       &regime.Module{},
-		"RemoteAccess": &remoteaccess.Module{},
-		"ServiceUtils": &serviceutils.Module{},
-		"DTO":          &dto.Module{},
-		"UTM":          &utm.Module{},
+		"VComCaster":    &vcomcaster.Module{},
+		"iiko":          &iiko.Module{},
+		"iiko-plugins":  &iikoplugins.Module{},
+		"FRPC":          &frpc.Module{},
+		"Regime":        &regime.Module{},
+		"RemoteAccess":  &remoteaccess.Module{},
+		"ServiceUtils":  &serviceutils.Module{},
+		"FiscalDrivers": &fiscaldrivers.Module{},
+		"UTM":           &utm.Module{},
 	}
 
 	// 6. Основной цикл меню
