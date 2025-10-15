@@ -8,7 +8,6 @@ on:
 
 jobs:
   # ЗАДАЧА 1: Определяем, является ли коммит релизным, и извлекаем версию.
-  # Эта задача - единственный источник правды для всего пайплайна.
   determine-version:
     name: Determine release version
     runs-on: ubuntu-latest
@@ -19,18 +18,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Нужна полная история для лога
+          fetch-depth: 0 
 
       - name: Check commit message for version
         id: check_commit
         shell: bash
         run: |
-          # Получаем сообщение самого последнего коммита
           COMMIT_MSG=$(git log -1 --pretty=%B)
           echo "Commit message: $COMMIT_MSG"
-
-          # Ищем сообщение, которое начинается с 'v' и версии до знака тире или конца строки
-          # Например: v1.2.3 или v1.2.3-some-fix
+          
           if [[ $COMMIT_MSG =~ ^(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
             VERSION_TAG="${BASH_REMATCH[1]}"
             echo "✅ Version found: $VERSION_TAG"
@@ -42,7 +38,7 @@ jobs:
             echo "tag=" >> $GITHUB_OUTPUT
           fi
 
-  # ЗАДАЧА 2: Сборка под Windows. Запускается ТОЛЬКО если первая задача нашла версию.
+  # ЗАДАЧА 2: Сборка под Windows.
   build-windows:
     name: Build Windows
     runs-on: windows-latest
@@ -78,7 +74,7 @@ jobs:
         name: goMH-windows
         path: goMH.exe
 
-  # ЗАДАЧA 3: Публикация релиза. Запускается ТОЛЬКО если первая задача нашла версию.
+  # ЗАДАЧA 3: Публикация релиза.
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
@@ -91,17 +87,18 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0 # Нужна полная история для лога
+        fetch-depth: 0
 
     - name: Download Windows build
       uses: actions/download-artifact@v4
       with:
-        name: goMH-windows # Имя артефакта теперь без номера сборки для простоты
+        name: goMH-windows
         path: ./release-assets/
 
     - name: Generate Release Notes from Commit
       id: generate_notes
       shell: bash
+      # ИСПОЛЬЗУЕМ `|` ДЛЯ МНОГОСТРОЧНОГО СКРИПТА
       run: |
         # --- 1. Формируем заголовок релиза ---
         RELEASE_TAG=${{ needs.determine-version.outputs.tag }}
@@ -146,17 +143,17 @@ jobs:
         fi
 
         # --- 6. Добавляем статический футер ---
+        # Здесь `cat <<'EOF'` корректно обработает блок текста внутри bash
         FOOTER=$(cat <<'EOF'
-### Важно:
-- Это приложение предназначено только для Windows-систем (10+)
-- Требуются права администратора для работы
-- Антивирусы могут ругаться из-за характера ПО (вот такая вот темпераментная утилита, хочет качать всякое)
-EOF
+        ### Важно:
+        - Это приложение предназначено только для Windows-систем (10+)
+        - Требуются права администратора для работы
+        - Антивирусы могут ругаться из-за характера ПО (вот такая вот темпераментная утилита, хочет качать всякое)
+        EOF
         )
         RELEASE_BODY+="$FOOTER"
 
-        # --- 7. Сохраняем итоговое тело релиза в файл ---
-        # Используем разделитель, чтобы не было проблем с многострочным текстом
+        # --- 7. Сохраняем итоговое тело релиза в файл для передачи на следующий шаг ---
         {
           echo 'release_body<<EOF'
           echo -e "$RELEASE_BODY"
@@ -166,7 +163,6 @@ EOF
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
-        # Используем данные, сгенерированные на предыдущем шаге
         tag_name: ${{ needs.determine-version.outputs.tag }}
         name: ${{ steps.generate_notes.outputs.release_title }}
         body: ${{ steps.generate_notes.outputs.release_body }}
