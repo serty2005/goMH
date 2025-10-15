@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"goMH/core"
+	"goMH/dependencies"
 	"goMH/tui"
 	"io"
 	"net/http"
@@ -263,9 +264,9 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 	}
 
 	// Получить путь к 7z.exe
-	sevenZipPath, err := wu.FindAndInstall7z(am, wu)
+	sevenZip, err := dependencies.NewClient(am, wu)
 	if err != nil {
-		return fmt.Errorf("не удалось найти или установить 7z.exe: %w", err)
+		return fmt.Errorf("не удалось инициализировать клиент 7-Zip: %w", err)
 	}
 
 	// Распаковать
@@ -276,9 +277,8 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 	}
 
 	// Использовать 7z для распаковки
-	_, err = wu.RunCommand(sevenZipPath, "x", zipPath, "-o"+extractDir, "-y")
-	if err != nil {
-		return fmt.Errorf("не удалось распаковать архив с помощью 7z: %w", err)
+	if err := sevenZip.Extract(zipPath, extractDir, true); err != nil {
+		return fmt.Errorf("не удалось распаковать архив: %w", err)
 	}
 
 	// Обработать содержимое распакованной папки
@@ -359,10 +359,9 @@ func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootP
 		return fmt.Errorf("не удалось скачать плагин: %w", err)
 	}
 
-	// Получить путь к 7z.exe
-	sevenZipPath, err := wu.FindAndInstall7z(am, wu)
+	sevenZip, err := dependencies.NewClient(am, wu)
 	if err != nil {
-		return fmt.Errorf("не удалось найти или установить 7z.exe: %w", err)
+		return fmt.Errorf("не удалось инициализировать клиент 7-Zip: %w", err)
 	}
 
 	// Распаковать
@@ -373,9 +372,8 @@ func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootP
 	}
 
 	// Использовать 7z для распаковки
-	_, err = wu.RunCommand(sevenZipPath, "x", zipPath, "-o"+extractDir, "-y")
-	if err != nil {
-		return fmt.Errorf("не удалось распаковать архив с помощью 7z: %w", err)
+	if err := sevenZip.Extract(zipPath, extractDir, true); err != nil {
+		return fmt.Errorf("не удалось распаковать архив: %w", err)
 	}
 
 	// Обработать содержимое распакованной папки

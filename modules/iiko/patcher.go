@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"goMH/core"
+	"goMH/dependencies"
 	"goMH/tui"
 	"io"
 	"io/fs"
@@ -138,11 +139,11 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 	tui.Title(fmt.Sprintf("\n--- Применение патча: %s ---", patch.ShortName))
 
 	// 0. Проверяем наличие 7z.exe
-	sevenZipPath, err := wu.FindAndInstall7z(am, wu)
+	sevenZip, err := dependencies.NewClient(am, wu)
 	if err != nil {
-		return err
+		return fmt.Errorf("не удалось инициализировать клиент 7-Zip: %w", err)
 	}
-	tui.InfoF("Используется 7-Zip: %s", sevenZipPath)
+	tui.Info("Клиент 7-Zip успешно инициализирован.")
 
 	// 1. Восстанавливаем файлы из предыдущего бэкапа, если он есть
 	if err := restoreFromBackup(wu, installDir, backupBaseDir); err != nil {
@@ -169,8 +170,7 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 	defer os.RemoveAll(tempAnalysisDir)
 
 	// Распаковываем архив во временную папку для поиска вложенного архива
-	_, err = wu.RunCommand(sevenZipPath, "e", patchCachePath, fmt.Sprintf("-o%s", tempAnalysisDir), "-y")
-	if err != nil {
+	if err := sevenZip.Extract(patchCachePath, tempAnalysisDir, false); err != nil {
 		return fmt.Errorf("не удалось выполнить первичную распаковку для анализа: %w", err)
 	}
 
@@ -185,13 +185,9 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 
 	// 4. Собираем список файлов для бэкапа
 	tui.Info("Получение списка файлов из исходного архива...")
-	filesOutput, err := wu.RunCommand(sevenZipPath, "l", "-slt", sourceArchive)
+	filesToBackup, err := sevenZip.List(sourceArchive)
 	if err != nil {
-		return fmt.Errorf("не удалось получить список файлов из архива '%s': %w", sourceArchive, err)
-	}
-	filesToBackup := parse7zFileList(filesOutput)
-	if len(filesToBackup) == 0 {
-		return errors.New("не удалось найти файлы для установки внутри архива")
+		return err // Ошибка уже содержит осмысленное сообщение
 	}
 	tui.SuccessF("Найдено %d файлов для установки.", len(filesToBackup))
 
@@ -202,9 +198,8 @@ func applyPatch(am core.AssetManager, wu core.WinUtils, patch IikoPatch, install
 
 	// 6. Извлекаем файлы из архива напрямую в папку установки iiko
 	tui.InfoF("Извлечение файлов из '%s' напрямую в '%s'...", filepath.Base(sourceArchive), installDir)
-	_, err = wu.RunCommand(sevenZipPath, "x", sourceArchive, fmt.Sprintf("-o%s", installDir), "-y")
-	if err != nil {
-		return fmt.Errorf("7-Zip завершился с ошибкой при извлечении файлов: %w", err)
+	if err := sevenZip.Extract(sourceArchive, installDir, true); err != nil {
+		return err // Ошибка уже содержит осмысленное сообщение
 	}
 
 	tui.Success("Патч успешно применен.")
@@ -364,25 +359,4 @@ func findNestedFrontArchive(dir string) (string, error) {
 		return "", os.ErrNotExist
 	}
 	return foundPath, nil
-}
-
-// parse7zFileList парсит вывод команды `7z l -slt` и возвращает список путей файлов.
-func parse7zFileList(output string) []string {
-	var files []string
-	var currentPath string
-	lines := strings.Split(output, "\n")
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Path = ") {
-			currentPath = strings.TrimPrefix(line, "Path = ")
-		} else if strings.HasPrefix(line, "Size = ") && currentPath != "" {
-			// Это запись о файле, а не о папке
-			files = append(files, currentPath)
-			currentPath = "" // Сбрасываем, чтобы не добавить папку
-		} else if line == "" {
-			currentPath = "" // Сбрасываем на пустой строке
-		}
-	}
-	return files
 }
