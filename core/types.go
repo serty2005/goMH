@@ -39,6 +39,7 @@ type WinUtils interface {
 	IsAdmin() bool
 	CopyFile(src, dst string) error
 	CopyDir(src, dst string) error
+	MoveFile(src, dst string) error
 	MoveDir(src, dst string) error
 	ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error)
 	ExtractArchive(archivePath, destDir string, fullPaths bool) error

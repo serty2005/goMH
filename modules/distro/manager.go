@@ -38,6 +38,9 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 // selectBrand - первый шаг, выбор между iiko и Syrve.
 func (dm *DistroManager) selectBrand() error {
+	tui.DisableConsoleBeep()
+	defer tui.RestoreConsoleBeep()
+
 	prompt := promptui.Select{
 		Label: "Выберите продукт для установки",
 		Items: []string{"iiko", "Syrve", "Назад"},
@@ -184,6 +187,9 @@ func (dm *DistroManager) runIikoFrontInstall(h brandHandler, component config.Di
 
 // promptUpdateOrPortable - диалог выбора действия.
 func (dm *DistroManager) promptUpdateOrPortable(installedVer string) (string, error) {
+	tui.DisableConsoleBeep()
+	defer tui.RestoreConsoleBeep()
+
 	prompt := promptui.Select{
 		Label: fmt.Sprintf("Уже установлена версия %s. Что вы хотите сделать?", installedVer),
 		Items: []string{"Обновить (полная установка)", "Установить портативную версию 'рядом'", "Отмена"},
@@ -204,6 +210,9 @@ func (dm *DistroManager) promptUpdateOrPortable(installedVer string) (string, er
 
 // selectVersionMenu - общий UI для выбора версии.
 func (dm *DistroManager) selectVersionMenu(versions []string, label string) (string, error) {
+	tui.DisableConsoleBeep()
+	defer tui.RestoreConsoleBeep()
+
 	searcher := func(input string, index int) bool {
 		return strings.HasPrefix(strings.ReplaceAll(versions[index], ".", ""), input)
 	}

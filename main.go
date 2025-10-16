@@ -111,6 +111,9 @@ func (rw *RealWinUtils) CopyFile(src, dst string) error {
 func (rw *RealWinUtils) CopyDir(src, dst string) error {
 	return winutils.CopyDir(src, dst)
 }
+func (rw *RealWinUtils) MoveFile(src, dst string) error {
+	return winutils.MoveFile(src, dst)
+}
 func (rw *RealWinUtils) MoveDir(src, dst string) error {
 	return winutils.MoveDir(src, dst)
 }

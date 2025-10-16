@@ -582,6 +582,37 @@ func CopyFile(src, dst string) error {
 	return err
 }
 
+// MoveFile перемещает файл из src в dst с использованием системного вызова Windows (атомарно)
+func MoveFile(src, dst string) error {
+	// Создаем целевую директорию, если она не существует
+	destDir := filepath.Dir(dst)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("не удалось создать целевую директорию %s: %w", destDir, err)
+	}
+
+	// Пытаемся использовать системное перемещение
+	err := os.Rename(src, dst)
+	if err == nil {
+		return nil
+	}
+
+	// Если ошибка — возможно, попытка переноса между разными томами NTFS
+	// В этом случае используем MoveFileEx с флагом MOVEFILE_COPY_ALLOWED
+	srcPtr, _ := windows.UTF16PtrFromString(src)
+	dstPtr, _ := windows.UTF16PtrFromString(dst)
+
+	const MOVEFILE_REPLACE_EXISTING = 0x1
+	const MOVEFILE_COPY_ALLOWED = 0x2
+	const MOVEFILE_WRITE_THROUGH = 0x8
+
+	if e := windows.MoveFileEx(srcPtr, dstPtr,
+		MOVEFILE_REPLACE_EXISTING|MOVEFILE_COPY_ALLOWED|MOVEFILE_WRITE_THROUGH); e != nil {
+		return fmt.Errorf("не удалось переместить файл %s -> %s: %w", src, dst, e)
+	}
+
+	return nil
+}
+
 // CopyDir рекурсивно копирует директорию из src в dst с сохранением атрибутов
 func CopyDir(src, dst string) error {
 	// Используем robocopy для копирования директорий с сохранением всех атрибутов

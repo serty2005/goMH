@@ -6,17 +6,62 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 
+	"github.com/chzyer/readline"
 	"github.com/manifoldco/promptui"
 )
 
 // ErrExitToMainMenu специальная ошибка для обозначения выхода в главное меню по вводу "00"
 var ErrExitToMainMenu = errors.New("exit_to_main_menu")
+
+// noBellWriter фильтрует bell символ (ASCII 7) для отключения системных звуков
+type noBellWriter struct {
+	writer io.Writer
+}
+
+func (n *noBellWriter) Write(b []byte) (int, error) {
+	// Фильтруем bell символ (ASCII 7) который вызывает системные звуки
+	filtered := make([]byte, 0, len(b))
+	for _, ch := range b {
+		if ch != 7 { // ASCII 7 = bell
+			filtered = append(filtered, ch)
+		}
+	}
+	if len(filtered) == 0 {
+		return len(b), nil // Возвращаем оригинальную длину для корректного учета
+	}
+	return n.writer.Write(filtered)
+}
+
+func (n *noBellWriter) Close() error {
+	if closer, ok := n.writer.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+// originalReadlineStdout сохраняет оригинальный readline.Stdout для восстановления
+var originalReadlineStdout io.WriteCloser
+
+// DisableConsoleBeep отключает системные звуки в консоли
+func DisableConsoleBeep() {
+	originalReadlineStdout = readline.Stdout
+	readline.Stdout = &noBellWriter{writer: readline.Stdout}
+}
+
+// RestoreConsoleBeep восстанавливает оригинальный readline.Stdout
+func RestoreConsoleBeep() {
+	if originalReadlineStdout != nil {
+		readline.Stdout = originalReadlineStdout
+		originalReadlineStdout = nil
+	}
+}
 
 // Installer - локальный интерфейс, чтобы не импортировать main
 type Installer core.Installer
@@ -83,6 +128,9 @@ func SelectWithSearch(items []string, label string) (string, error) {
 		return strings.Contains(strings.ToLower(items[index]), strings.ToLower(input))
 	}
 
+	DisableConsoleBeep()
+	defer RestoreConsoleBeep()
+
 	prompt := promptui.Select{
 		Label:             label + " (Ctrl+C для выхода в главное меню)",
 		Items:             items,
@@ -107,6 +155,9 @@ func SelectSimple(items []string, label string) (string, error) {
 	if len(items) == 0 {
 		return "", errors.New("список элементов пуст")
 	}
+
+	DisableConsoleBeep()
+	defer RestoreConsoleBeep()
 
 	prompt := promptui.Select{
 		Label: label + " (Ctrl+C для выхода в главное меню)",
@@ -161,6 +212,9 @@ func SelectComponent(components []config.DistroComponent, label string) (config.
 			strings.Contains(strings.ToLower(comp.ID), strings.ToLower(input))
 	}
 
+	DisableConsoleBeep()
+	defer RestoreConsoleBeep()
+
 	prompt := promptui.Select{
 		Label:             label + " (Ctrl+C для выхода в главное меню)",
 		Items:             itemStrings,
@@ -211,6 +265,9 @@ func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error)
 			strings.Contains(strings.ToLower(patch.Description), inputLower) ||
 			strings.Contains(strings.ToLower(patchInfos[index].DisplayText), inputLower)
 	}
+
+	DisableConsoleBeep()
+	defer RestoreConsoleBeep()
 
 	prompt := promptui.Select{
 		Label:             label + " (Ctrl+C для выхода в главное меню)",

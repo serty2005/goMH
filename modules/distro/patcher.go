@@ -126,28 +126,47 @@ func ApplyPatch(am core.AssetManager, wu core.WinUtils, patch core.PatchInfo, in
 	if _, err := am.DownloadHTTPWithProgress(patch.FullURL, patchCachePath); err != nil {
 		return err
 	}
-	tempAnalysisDir, err := os.MkdirTemp(filepath.Join(am.Cfg().RootPath, "temp"), "patch-analysis-*")
+
+	// Создаем временную директорию для анализа архива
+	tempRootPath := filepath.Join(am.Cfg().RootPath, "temp")
+	if err := os.MkdirAll(tempRootPath, 0755); err != nil {
+		return fmt.Errorf("не удалось создать временную директорию %s: %w", tempRootPath, err)
+	}
+
+	tempAnalysisDir, err := os.MkdirTemp(tempRootPath, "patch-analysis-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("не удалось создать временную директорию для анализа: %w", err)
 	}
 	defer os.RemoveAll(tempAnalysisDir)
+
+	// Извлекаем архив для анализа структуры
 	if err := sevenZip.Extract(patchCachePath, tempAnalysisDir, false); err != nil {
-		return err
+		return fmt.Errorf("не удалось извлечь архив для анализа: %w", err)
 	}
+
+	// Определяем, какой архив использовать для извлечения
 	sourceArchive := patchCachePath
 	if nestedArchive, err := findNestedFrontArchive(tempAnalysisDir); err == nil {
+		tui.InfoF("Найден вложенный архив: %s", filepath.Base(nestedArchive))
 		sourceArchive = nestedArchive
 	}
+
+	// Получаем список файлов из правильного архива
 	filesToBackup, err := sevenZip.List(sourceArchive)
 	if err != nil {
-		return err
+		return fmt.Errorf("не удалось получить список файлов из архива: %w", err)
 	}
+
+	// Создаем бэкап перед извлечением
 	if err := createBackup(wu, installDir, filesToBackup, backupBaseDir, patch.BuildNumber); err != nil {
-		return err
+		return fmt.Errorf("не удалось создать бэкап: %w", err)
 	}
+
+	// Извлекаем файлы из правильного архива
 	if err := sevenZip.Extract(sourceArchive, installDir, true); err != nil {
-		return err
+		return fmt.Errorf("не удалось извлечь архив: %w", err)
 	}
+
 	tui.Success("Патч успешно применен.")
 	return nil
 }
@@ -184,10 +203,8 @@ func createBackup(wu core.WinUtils, installDir string, filesToReplace []string, 
 		destPath := filepath.Join(backupDir, fileRelPath)
 		if _, err := os.Stat(sourcePath); err == nil {
 			_ = os.MkdirAll(filepath.Dir(destPath), 0755)
-			if err := wu.CopyFile(sourcePath, destPath); err != nil {
-				continue
-			}
-			if err := wu.DeleteFile(sourcePath); err != nil {
+			if err := wu.MoveFile(sourcePath, destPath); err != nil {
+				tui.Warn(fmt.Sprintf("Не удалось переместить файл %s в бэкап: %v", sourcePath, err))
 				continue
 			}
 			movedCount++
