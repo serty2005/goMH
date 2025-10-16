@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
-	"goMH/modules/iiko"
+	"goMH/modules/distro"
 	"goMH/tui"
 	"io"
 	"io/fs"
@@ -703,18 +703,26 @@ func (m *Module) updateIikoPatches(am core.AssetManager, wu core.WinUtils) error
 	}
 	tui.SuccessF("Найдена версия: %s", fullVersion)
 
-	// Конвертируем полную версию в короткий формат "927"
-	parts := strings.Split(fullVersion, ".")
-	if len(parts) < 3 {
-		return fmt.Errorf("некорректный формат версии: %s", fullVersion)
+	backupDir := filepath.Join(am.Cfg().RootPath, fullVersion)
+
+	// Находим и применяем актуальный патч для версии
+	patch, patchFound, err := distro.FindAndSelectPatch(am, fullVersion)
+	if err != nil {
+		tui.Warn(fmt.Sprintf("Ошибка при поиске патча: %v", err))
+		return nil // Продолжаем без патча
 	}
-	// Собираем из 9.2.7... -> 927
-	shortVersion := parts[0] + parts[1] + parts[2][0:1]
 
-	backupDir := filepath.Join(am.Cfg().RootPath, shortVersion)
+	if patchFound {
+		tui.InfoF("Найден актуальный патч: %s", patch.ShortName)
+		if err := distro.ApplyPatch(am, wu, patch, iikoFrontDir, backupDir); err != nil {
+			return fmt.Errorf("ошибка при применении патча: %w", err)
+		}
+		tui.Success("Патч успешно применен")
+	} else {
+		tui.Info("Актуальные патчи не найдены")
+	}
 
-	// Вызываем общий воркфлоу из модуля iiko
-	return iiko.RunPatchWorkflow(am, wu, shortVersion, iikoFrontDir, backupDir)
+	return nil
 }
 
 // downloadOrderCheck скачивает утилиту OrderCheck через менеджер ассетов

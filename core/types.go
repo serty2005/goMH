@@ -41,15 +41,17 @@ type WinUtils interface {
 	CopyDir(src, dst string) error
 	MoveDir(src, dst string) error
 	ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error)
+	ExtractArchive(archivePath, destDir string, fullPaths bool) error
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.
 type AssetManager interface {
 	Get(assetName string) (string, error)
 	DownloadHTTPWithProgress(httpURL, localPath string) (bool, error)
-	DownloadFTPWithProgress(ftpPath, localPath string) (bool, error)
+	DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error)
+	GetFastestFTP(ftpConfigs []config.FTPConfig, testFilePath string) (config.FTPConfig, error)
 	ExtractFile(zipPath, pathInZip, destPath string) error
-	ListFTP(path string) ([]FTPEntry, error)
+	ListFTP(ftpCfg config.FTPConfig, path string) ([]FTPEntry, error) // <-- Сигнатура изменена
 	DownloadToCache(assetName string) (string, error)
 	ProcessFromCache(assetName, cachePath string) error
 	PurgeAsset(assetName string) error
@@ -69,4 +71,12 @@ type Installer interface {
 type FTPEntry struct {
 	Name string
 	Type uint
+}
+
+// PatchInfo представляет информацию о патче для отображения в интерфейсе
+type PatchInfo struct {
+	ShortName   string
+	Description string
+	FullURL     string
+	BuildNumber int
 }

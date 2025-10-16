@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"goMH/dependencies"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -621,4 +622,17 @@ func ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, erro
 		return "", err
 	}
 	return s, nil
+}
+
+// ExtractArchive распаковывает архив в указанную директорию с помощью 7-Zip.
+// fullPaths: true использует флаг 'x' (сохранение структуры папок), false - флаг 'e' (плоская распаковка).
+func ExtractArchive(archivePath, destDir string, fullPaths bool) error {
+	// Создаем клиент 7-Zip
+	client, err := dependencies.NewClient(nil, nil)
+	if err != nil {
+		return fmt.Errorf("не удалось создать клиент 7-Zip: %w", err)
+	}
+
+	// Распаковываем архив
+	return client.Extract(archivePath, destDir, fullPaths)
 }

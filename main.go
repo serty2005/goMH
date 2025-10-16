@@ -6,9 +6,9 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
+	"goMH/modules/distro"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/frpc"
-	"goMH/modules/iiko"
 	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
@@ -116,6 +116,9 @@ func (rw *RealWinUtils) MoveDir(src, dst string) error {
 }
 func (rw *RealWinUtils) ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error) {
 	return winutils.ReadRegistryKey(rootKey, path, valueName)
+}
+func (rw *RealWinUtils) ExtractArchive(archivePath, destDir string, fullPaths bool) error {
+	return winutils.ExtractArchive(archivePath, destDir, fullPaths)
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
@@ -248,7 +251,7 @@ func main() {
 	// map хранит core.Installer
 	registeredModules := map[string]core.Installer{
 		"VComCaster":    &vcomcaster.Module{},
-		"iiko":          &iiko.Module{},
+		"iiko":          &distro.Module{},
 		"iiko-plugins":  &iikoplugins.Module{},
 		"FRPC":          &frpc.Module{},
 		"Regime":        &regime.Module{},
@@ -279,6 +282,9 @@ func main() {
 
 		selectedModule := selected.(core.Installer)
 
+		// Очищаем консоль перед переходом в подменю модуля
+		tui.ClearScreen()
+
 		err = selectedModule.Run(assetManager, RealWinUtils)
 		if err != nil {
 			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", err))
@@ -286,6 +292,8 @@ func main() {
 			tui.Success("\n--- Операция завершена успешно. ---")
 		}
 
+		// Очищаем консоль перед сообщением о возврате в меню
+		tui.ClearScreen()
 		fmt.Println("\nНажмите Enter, чтобы вернуться в главное меню...")
 		fmt.Scanln()
 	}

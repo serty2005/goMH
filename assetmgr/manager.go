@@ -2,9 +2,12 @@ package assetmgr
 
 import (
 	"archive/zip"
+	"context"
+	"errors"
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"goMH/tui"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/jlaffaye/ftp"
 	"github.com/schollz/progressbar/v3"
+	"golang.org/x/sync/errgroup"
 )
 
 type Manager struct {
@@ -55,7 +59,7 @@ func (m *Manager) DownloadToCache(assetName string) (string, error) {
 		_, err = m.DownloadHTTPWithProgress(assetInfo.URL, localCachePath)
 	} else if downloadMethod == "FTP" {
 		parsedURL, _ := url.Parse(assetInfo.URL)
-		_, err = m.DownloadFTPWithProgress(parsedURL.Path, localCachePath)
+		_, err = m.DownloadFTPWithProgress(m.cfg.FTP[0], parsedURL.Path, localCachePath)
 	} else {
 		return "", fmt.Errorf("неизвестный метод загрузки: %s", downloadMethod)
 	}
@@ -112,23 +116,28 @@ func (m *Manager) Get(assetName string) (string, error) {
 }
 
 // DownloadFTPWithProgress скачивает файл по FTP с проверкой размера и прогресс-баром.
+// ftpCfg - конфигурация конкретного FTP-сервера для подключения.
 // ftpPath - это путь на сервере, например /distr/iiko/Setup.Front.exe
-func (m *Manager) DownloadFTPWithProgress(ftpPath, localPath string) (bool, error) {
+func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error) {
 	fileName := filepath.Base(ftpPath)
 
-	// Убедимся, что директория для сохранения файла существует
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
 	}
 
-	c, err := ftp.Dial(m.cfg.FTP.Host, ftp.DialWithTimeout(10*time.Second))
+	hostWithPort := ftpCfg.Host
+	if ftpCfg.Port != 0 && !strings.Contains(hostWithPort, ":") {
+		hostWithPort = fmt.Sprintf("%s:%d", ftpCfg.Host, ftpCfg.Port)
+	}
+
+	c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(10*time.Second))
 	if err != nil {
-		return false, fmt.Errorf("не удалось подключиться к FTP: %w", err)
+		return false, fmt.Errorf("не удалось подключиться к FTP %s: %w", hostWithPort, err)
 	}
 	defer c.Quit()
 
-	if err := c.Login(m.cfg.FTP.User, m.cfg.FTP.Pass); err != nil {
-		return false, fmt.Errorf("ошибка входа на FTP: %w", err)
+	if err := c.Login(ftpCfg.User, ftpCfg.Pass); err != nil {
+		return false, fmt.Errorf("ошибка входа на FTP %s: %w", hostWithPort, err)
 	}
 
 	remoteSize, err := c.FileSize(ftpPath)
@@ -215,33 +224,6 @@ func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, err
 	return false, nil
 }
 
-func (m *Manager) ListFTP(path string) ([]core.FTPEntry, error) {
-	c, err := ftp.Dial(m.cfg.FTP.Host, ftp.DialWithTimeout(10*time.Second))
-	if err != nil {
-		return nil, err
-	}
-	defer c.Quit()
-
-	if err := c.Login(m.cfg.FTP.User, m.cfg.FTP.Pass); err != nil {
-		return nil, err
-	}
-
-	entries, err := c.List(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Конвертируем []*ftp.Entry в []core.FTPEntry
-	result := make([]core.FTPEntry, len(entries))
-	for i, e := range entries {
-		result[i] = core.FTPEntry{
-			Name: e.Name,
-			Type: uint(e.Type),
-		}
-	}
-	return result, nil
-}
-
 // UnpackToFlatDir распаковывает архив в указанную директорию,
 // обрабатывая случай, когда все файлы в архиве находятся в одной корневой папке.
 func (m *Manager) UnpackToFlatDir(assetName, cachePath, destDir string) error {
@@ -290,6 +272,109 @@ func CreateProgressBar(totalSize int64, description string) *progressbar.Progres
 		progressbar.OptionFullWidth(),
 		progressbar.OptionClearOnFinish(),
 	)
+}
+
+func (m *Manager) ListFTP(ftpCfg config.FTPConfig, path string) ([]core.FTPEntry, error) {
+	hostWithPort := ftpCfg.Host
+	if ftpCfg.Port != 0 && !strings.Contains(hostWithPort, ":") {
+		hostWithPort = fmt.Sprintf("%s:%d", ftpCfg.Host, ftpCfg.Port)
+	}
+
+	c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(10*time.Second))
+	if err != nil {
+		return nil, err
+	}
+	defer c.Quit()
+
+	if err := c.Login(ftpCfg.User, ftpCfg.Pass); err != nil {
+		return nil, err
+	}
+
+	entries, err := c.List(path)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]core.FTPEntry, len(entries))
+	for i, e := range entries {
+		result[i] = core.FTPEntry{Name: e.Name, Type: uint(e.Type)}
+	}
+	return result, nil
+}
+
+// GetFastestFTP определяет самый быстрый FTP-сервер из списка, скачивая тестовый файл.
+func (m *Manager) GetFastestFTP(ftpConfigs []config.FTPConfig, testFilePath string) (config.FTPConfig, error) {
+	if len(ftpConfigs) == 0 {
+		return config.FTPConfig{}, errors.New("список FTP-конфигураций для проверки пуст")
+	}
+	if len(ftpConfigs) == 1 {
+		return ftpConfigs[0], nil // Если сервер один, он и есть самый быстрый
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // Общий таймаут на всю операцию
+	defer cancel()
+
+	resultChan := make(chan config.FTPConfig, 1) // Буферизованный канал, чтобы горутина не блокировалась
+	g, gCtx := errgroup.WithContext(ctx)
+
+	tui.Info("Запуск проверки скорости FTP-серверов...")
+	for _, ftpCfg := range ftpConfigs {
+		currentCfg := ftpCfg // Захватываем переменную для горутины
+		g.Go(func() error {
+			hostWithPort := currentCfg.Host
+			if currentCfg.Port != 0 && !strings.Contains(hostWithPort, ":") {
+				hostWithPort = fmt.Sprintf("%s:%d", currentCfg.Host, currentCfg.Port)
+			}
+
+			start := time.Now()
+			c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(5*time.Second))
+			if err != nil {
+				return nil // Просто игнорируем недоступные серверы
+			}
+			defer c.Quit()
+
+			if err := c.Login(currentCfg.User, currentCfg.Pass); err != nil {
+				return nil
+			}
+
+			resp, err := c.Retr(testFilePath)
+			if err != nil {
+				return nil
+			}
+			defer resp.Close()
+
+			_, err = io.Copy(io.Discard, resp)
+			if err != nil {
+				return nil
+			}
+
+			elapsed := time.Since(start)
+			tui.InfoF(" - Сервер %s: успешно (%.2f сек)", currentCfg.Host, elapsed.Seconds())
+
+			select {
+			case resultChan <- currentCfg:
+			case <-gCtx.Done():
+			}
+			return nil
+		})
+	}
+
+	select {
+	case fastest := <-resultChan:
+		cancel()
+		_ = g.Wait()
+		tui.SuccessF("Самый быстрый сервер: %s", fastest.Host)
+		return fastest, nil
+	case <-ctx.Done():
+		_ = g.Wait()
+		select {
+		case fastest := <-resultChan:
+			tui.SuccessF("Самый быстрый сервер (определен по таймауту): %s", fastest.Host)
+			return fastest, nil
+		default:
+			return config.FTPConfig{}, errors.New("не удалось определить самый быстрый FTP-сервер (все недоступны или слишком медленные)")
+		}
+	}
 }
 
 // unzip распаковывает zip-архив.

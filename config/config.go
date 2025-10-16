@@ -11,25 +11,44 @@ import (
 	"strings"
 )
 
-// DistroInfo описывает компонент для установки.
-// Используется и для версионных продуктов (с UrlTemplate), и для iikoCard (с FileName).
-type DistroInfo struct {
-	ID          string `json:"id"`
-	MenuText    string `json:"menu_text"`
-	FileName    string `json:"file_name,omitempty"` // Для iikoCard
-	InstallArgs string `json:"install_args"`
-	RunAfter    string `json:"run_after"`
-	URLTemplate string `json:"url_template,omitempty"` // Для версионных
+// DistroComponent описывает компонент для установки (Front, BackOffice и т.д.).
+type DistroComponent struct {
+	ID                 string `json:"id"`
+	MenuText           string `json:"menu_text"`
+	InstallArgs        string `json:"install_args"`
+	RunAfter           string `json:"run_after"`
+	URLTemplate        string `json:"url_template,omitempty"` // Для полных дистрибутивов
+	PortableArchiveKey string `json:"portable_archive_key"`   // Ключ для поиска имени архива в источниках
 }
 
-type IikoConfig struct {
-	DistroURLTemplates []DistroInfo `json:"distro_url_templates"` // Для Front, RMS, Chain
-	CardPOS            DistroInfo   `json:"card_pos"`             // Для iikoCard
-	PatchesBaseURL     string       `json:"patches_base_url"`
-	ExcludedPlugins    []string     `json:"excluded_plugins"`
-	AutoUpdatePlugins  []string     `json:"auto_update_plugins"`
-	// Это поле больше не нужно в новой логике, но оставим для совместимости.
-	BaseFTPPath string `json:"base_ftp_path,omitempty"`
+// BrandConfig содержит специфичные настройки для бренда (iiko или Syrve).
+type BrandConfig struct {
+	Components     []DistroComponent `json:"components"`
+	PatchesBaseURL string            `json:"patches_base_url,omitempty"` // Для iiko
+}
+
+// BrandPortableSource описывает источники портативных версий для одного бренда.
+type BrandPortableSource struct {
+	HttpSource struct {
+		Enabled      bool              `json:"enabled"`
+		URL          string            `json:"url"`
+		ArchiveNames map[string]string `json:"archive_names"` // Ключ -> Шаблон имени архива
+	} `json:"http_source"`
+	FtpSource struct {
+		Enabled      bool              `json:"enabled"`
+		Directory    string            `json:"directory"`
+		ArchiveNames map[string]string `json:"archive_names"` // Ключ -> Шаблон имени архива
+	} `json:"ftp_source"`
+}
+
+// DistroConfig содержит все настройки, связанные с установкой дистрибутивов iiko и Syrve.
+type DistroConfig struct {
+	Iiko              BrandConfig         `json:"iiko"`
+	Syrve             BrandConfig         `json:"syrve"`
+	IikoPortable      BrandPortableSource `json:"iiko_portable_sources"`
+	SyrvePortable     BrandPortableSource `json:"syrve_portable_sources"`
+	ExcludedPlugins   []string            `json:"excluded_plugins"`
+	AutoUpdatePlugins []string            `json:"auto_update_plugins"`
 }
 
 type FrpcConfig struct {
@@ -76,10 +95,10 @@ type UTMConfig struct {
 type Config struct {
 	RootPath            string               `json:"root_path"`
 	AssetsCachePath     string               `json:"assets_cache_path"`
-	FTP                 FTPConfig            `json:"ftp_config"`
+	FTP                 []FTPConfig          `json:"ftp_config"` // Массив для нескольких серверов
 	Modules             []ModuleDef          `json:"modules"`
 	FrpcConfig          FrpcConfig           `json:"frpc_config"`
-	IikoConfig          IikoConfig           `json:"iiko_config"`
+	DistroConfig        DistroConfig         `json:"distro_config"`
 	AssetCatalog        map[string]AssetInfo `json:"asset_catalog"`
 	TeamViewerConfig    TeamViewerConfig     `json:"TeamViewerConfig"`
 	MaintenanceConfig   MaintenanceConfig    `json:"MaintenanceConfig"`
@@ -91,6 +110,7 @@ type FTPConfig struct {
 	Host string `json:"host"`
 	User string `json:"user"`
 	Pass string `json:"pass"`
+	Port int    `json:"port,omitempty"`
 }
 
 type ModuleDef struct {
@@ -128,6 +148,12 @@ func LoadConfig(pathOrURL string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("ошибка парсинга JSON конфигурации: %w", err)
+	}
+
+	for i := range cfg.FTP {
+		if cfg.FTP[i].Port == 0 {
+			cfg.FTP[i].Port = 21
+		}
 	}
 
 	return &cfg, nil

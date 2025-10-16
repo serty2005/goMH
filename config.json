@@ -1,11 +1,20 @@
 {
 	"root_path": "C:\\MH",
 	"assets_cache_path": "C:\\MH\\_assets",
-	"ftp_config": {
-		"host": "ftp.serty.top:21",
-		"user": "ftpuser",
-		"pass": "11"
-	},
+	"ftp_config": [
+		{
+			"host": "ftp.serty.top",
+			"port": 21,
+			"user": "ftpuser",
+			"pass": "11"
+		},
+		{
+			"host": "176.98.191.43",
+			"port": 21,
+			"user": "ftpuser",
+			"pass": "11"
+		}
+	],
 	"self_update_config": {
 		"enabled": true,
 		"reference_url": "https://f.serty.top/distr/installer/goMH.exe",
@@ -55,51 +64,128 @@
 			"pass": "strongpass"
 		}
 	},
-	"iiko_config": {
-    "base_ftp_path": "/distr/iiko",
-    "patches_base_url": "https://rapid.iiko.ru/versionPatches",
-    "distro_url_templates": [
-        {
-            "id": "front",
-            "menu_text": "Front",
-            "url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/RMS/Front/Setup.Front.exe",
-            "install_args": "/install /passive",
-            "run_after": "C:\\Program Files\\iiko\\iikoRMS\\Front.Net\\iikoFront.Net.exe"
-        },
-        {
-            "id": "rms_back",
-            "menu_text": "RMS-BackOffice",
-            "url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/RMS/BackOffice/Setup.RMS.BackOffice.exe",
-            "install_args": "/install /passive",
-            "run_after": "C:\\Program Files\\iiko\\iikoRMS\\Office\\BackOffice.exe"
-        },
-        {
-            "id": "chain_back",
-            "menu_text": "Chain-BackOffice",
-            "url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/Chain/BackOffice/Setup.Chain.BackOffice.exe",
-            "install_args": "/install /passive",
-            "run_after": "C:\\Program Files\\iiko\\iikoChain\\Office\\BackOffice.exe"
-        }
-    ],
-    "card_pos": {
-        "id": "iikoCard",
-        "menu_text": "iikoCard 5 POS",
-        "file_name": "Setup.iikoCard5.POS.exe",
-        "install_args": "/install /passive",
-        "run_after": ""
-    },
-    "excluded_plugins": [
-        "Updater",
-        "UpdaterAssistant",
-        "WebServer",
-        "Delivery",
-        "iikoTransport"
-    ],
-    "auto_update_plugins": [
-        "DualConnector",
-        "SberbankPlugin"
-    ]
-},
+	"distro_config": {
+		"iiko": {
+			"components": [
+				{
+					"id": "iiko_rms_back",
+					"menu_text": "iikoRMS BackOffice",
+					"install_args": "/install /passive",
+					"run_after": "C:\\Program Files\\iiko\\iikoRMS\\Office\\BackOffice.exe",
+					"url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/RMS/BackOffice/Setup.RMS.BackOffice.exe",
+					"portable_archive_key": "iiko_rms"
+				},
+				{
+					"id": "iiko_chain_back",
+					"menu_text": "iikoChain BackOffice",
+					"install_args": "/install /passive",
+					"run_after": "C:\\Program Files\\iiko\\iikoChain\\BackOffice\\BackOffice.exe",
+					"url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/Chain/BackOffice/Setup.Chain.BackOffice.exe",
+					"portable_archive_key": "iiko_chain"
+				},
+				{
+					"id": "iiko_front",
+					"menu_text": "iikoFront",
+					"install_args": "/install /passive",
+					"run_after": "C:\\Program Files\\iiko\\iikoRMS\\Front.Net\\iikoFront.Net.exe",
+					"url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/RMS/Front/Setup.Front.exe",
+					"portable_archive_key": ""
+				},
+				{
+					"id": "iiko_card",
+					"menu_text": "iikoCard",
+					"install_args": "/install /passive",
+					"run_after": "",
+					"url_template": "https://f.serty.top/distr/iiko/Setup.iikoCard5.POS.exe",
+					"portable_archive_key": ""
+				}
+			],
+			"patches_base_url": "https://rapid.iiko.ru/versionPatches"
+		},
+		"syrve": {
+			"components": [
+				{
+					"id": "syrve_rms_back",
+					"menu_text": "Syrve RMS BackOffice",
+					"install_args": "/install /passive",
+					"run_after": "C:\\Program Files\\Syrve\\RMS\\Office\\BackOffice.exe",
+					"url_template": "https://downloads.syrve.online/{{VERSION}}/Syrve/RMS/BackOffice/Setup.RMS.BackOffice.exe",
+					"portable_archive_key": "syrve_rms"
+				},
+				{
+					"id": "syrve_chain_back",
+					"menu_text": "Syrve Chain BackOffice",
+					"install_args": "/install /passive",
+					"run_after": "C:\\Program Files\\Syrve\\Chain\\BackOffice\\BackOffice.exe",
+					"url_template": "https://downloads.syrve.online/{{VERSION}}/Syrve/Chain/BackOffice/Setup.Chain.BackOffice.exe",
+					"portable_archive_key": "syrve_chain"
+				},
+				{
+					"id": "syrve_front",
+					"menu_text": "Syrve Front",
+					"install_args": "/install /passive",
+					"run_after": "C:\\Program Files\\Syrve\\SyrveRMS\\Front.Net\\iikoFront.Net.exe",
+					"url_template": "https://downloads.syrve.online/{{VERSION}}/Syrve/RMS/Front/Setup.Front.exe",
+					"portable_archive_key": ""
+				},
+				{
+					"id": "syrve_loyalty",
+					"menu_text": "Syrve Loyalty (Card)",
+					"install_args": "/install /passive",
+					"run_after": "",
+					"url_template": "http://176.98.191.43/Syrve/installers/Setup.SyrveLoyalty.POS.exe",
+					"portable_archive_key": ""
+				}
+			]
+		},
+		"iiko_portable_sources": {
+			"http_source": {
+				"enabled": true,
+				"url": "https://f.serty.top/iikoBacks",
+				"archive_names": {
+					"iiko_rms": "RMSOffice{{version}}.zip",
+					"iiko_chain": "ChainOffice{{version}}.zip"
+				}
+			},
+			"ftp_source": {
+				"enabled": true,
+				"directory": "/iikoBacks",
+				"archive_names": {
+					"iiko_rms": "RMSOffice{{version}}.zip",
+					"iiko_chain": "ChainOffice{{version}}.zip"
+				}
+			}
+		},
+		"syrve_portable_sources": {
+			"http_source": {
+				"enabled": false,
+				"url": "176.98.191.43/Syrve",
+				"archive_names": {
+					"syrve_rms": "RMSSOffice{{version}}.zip",
+					"syrve_chain": "ChainSOffice{{version}}.zip"
+				}
+			},
+			"ftp_source": {
+				"enabled": true,
+				"directory": "/Syrve",
+				"archive_names": {
+					"syrve_rms": "RMSSOffice{{version}}.zip",
+					"syrve_chain": "ChainSOffice{{version}}.zip"
+				}
+			}
+		},
+		"excluded_plugins": [
+			"Updater",
+			"UpdaterAssistant",
+			"WebServer",
+			"Delivery",
+			"iikoTransport"
+		],
+		"auto_update_plugins": [
+			"DualConnector",
+			"SberbankPlugin"
+		]
+	},
 	"TeamViewerConfig": {
 		"ShortURL": "http://get.teamviewer.com/myhoreca",
 		"ApiURL": "https://get.teamviewer.com/api/CustomDesign"

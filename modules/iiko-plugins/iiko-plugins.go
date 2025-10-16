@@ -28,6 +28,20 @@ type Plugin struct {
 	DownloadUrl   string `json:"download_url"`
 }
 
+// PluginDisplayInfo представляет информацию о плагине для отображения в интерфейсе
+type PluginDisplayInfo struct {
+	Plugin      Plugin
+	DisplayText string
+}
+
+// UniquePluginDisplayInfo представляет информацию об уникальном плагине для отображения в интерфейсе
+type UniquePluginDisplayInfo struct {
+	Name        string
+	Versions    []Plugin
+	DisplayText string
+	IsInstalled bool
+}
+
 // ApiCompat представляет совместимость API версии
 type ApiCompat struct {
 	ApiVersion      string `json:"api_version"`
@@ -95,7 +109,7 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 	}
 
 	// Отфильтровать по excludedPlugins
-	filteredPlugins := FilterPlugins(availablePlugins, cfg.IikoConfig.ExcludedPlugins)
+	filteredPlugins := FilterPlugins(availablePlugins, cfg.DistroConfig.ExcludedPlugins)
 
 	// Сгруппировать плагины по имени
 	pluginGroups := make(map[string][]Plugin)
@@ -110,9 +124,13 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 		installed = []string{} // пустой список, если ошибка
 	}
 
-	// Отобразить меню выбора плагинов
-	selectedPlugin, err := showPluginSelectionMenu(pluginGroups, installed)
+	// Отобразить меню выбора плагинов с поиском
+	selectedPlugin, err := selectPluginWithSearch(pluginGroups, installed)
 	if err != nil {
+		// Проверяем, является ли ошибка выходом в главное меню
+		if err == tui.ErrExitToMainMenu {
+			return err
+		}
 		return err
 	}
 	if selectedPlugin == nil {
@@ -185,7 +203,7 @@ func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error
 	tui.Info(fmt.Sprintf("Установлено плагинов: %d", len(installed)))
 
 	// Фильтровать установленные плагины по excludedPlugins и autoUpdatePlugins
-	filteredInstalled := FilterAutoUpdatePlugins(manifest, installed, cfg.IikoConfig.ExcludedPlugins, cfg.IikoConfig.AutoUpdatePlugins, compatibleApiVersions)
+	filteredInstalled := FilterAutoUpdatePlugins(manifest, installed, cfg.DistroConfig.ExcludedPlugins, cfg.DistroConfig.AutoUpdatePlugins, compatibleApiVersions)
 	tui.Info(fmt.Sprintf("Плагинов для автообновления после фильтрации: %d", len(filteredInstalled)))
 
 	var updated []string
@@ -427,65 +445,192 @@ func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootP
 	return nil
 }
 
-// showPluginSelectionMenu отображает меню выбора плагина
-func showPluginSelectionMenu(pluginGroups map[string][]Plugin, installed []string) (*Plugin, error) {
-	reader := bufio.NewReader(os.Stdin)
+// buildPluginDisplayText создает форматированную строку для отображения плагина
+func buildPluginDisplayText(plugin Plugin, isInstalled bool) string {
+	var parts []string
 
-	for {
-		clearScreen()
-		fmt.Println(tui.ColorYellow + "==================================================" + tui.ColorReset)
-		fmt.Println(tui.ColorYellow + "         ВЫБОР ПЛАГИНА ДЛЯ УСТАНОВКИ              " + tui.ColorReset)
-		fmt.Println(tui.ColorYellow + "==================================================" + tui.ColorReset)
-		fmt.Println()
+	// Название плагина
+	parts = append(parts, plugin.Name)
 
-		// Собрать список уникальных имен плагинов
-		var pluginNames []string
-		for name := range pluginGroups {
-			pluginNames = append(pluginNames, name)
-		}
-
-		// Отсортировать имена плагинов по алфавиту
-		sort.Strings(pluginNames)
-
-		for i, name := range pluginNames {
-			versions := pluginGroups[name]
-			status := ""
-			for _, inst := range installed {
-				if strings.Contains(strings.ToLower(inst), strings.ToLower(name)) {
-					status = " [УСТАНОВЛЕН]"
-					break
-				}
-			}
-			if len(versions) > 1 {
-				fmt.Printf(tui.ColorYellow+" %d. %s (%d версий)%s"+tui.ColorReset+"\n", i+1, name, len(versions), status)
-			} else {
-				fmt.Printf(" %d. %s%s\n", i+1, name, status)
-			}
-		}
-		fmt.Println()
-		fmt.Println(" Q. Назад")
-		fmt.Println()
-		fmt.Print("Введите номер пункта и нажмите Enter: ")
-
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
-
-		if strings.EqualFold(choiceStr, "q") {
-			return nil, nil // отмена
-		}
-
-		choiceInt, err := strconv.Atoi(choiceStr)
-		if err != nil || choiceInt < 1 || choiceInt > len(pluginNames) {
-			tui.Error("\nНеверный выбор. Нажмите Enter, чтобы попробовать снова.")
-			_, _ = reader.ReadString('\n')
-			continue
-		}
-
-		selectedName := pluginNames[choiceInt-1]
-		versions := pluginGroups[selectedName]
-		// Возвращаем первый плагин из группы (если одна версия) или nil для дальнейшей обработки
-		return &versions[0], nil
+	// Версия плагина
+	if plugin.PluginVersion != "" {
+		parts = append(parts, fmt.Sprintf("v%s", plugin.PluginVersion))
 	}
+
+	// API версия
+	if plugin.ApiVersion != "" {
+		parts = append(parts, fmt.Sprintf("API:%s", plugin.ApiVersion))
+	}
+
+	// Статус установки
+	if isInstalled {
+		parts = append(parts, "[УСТАНОВЛЕН]")
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// buildUniquePluginDisplayText создает форматированную строку для отображения уникального плагина
+func buildUniquePluginDisplayText(name string, versions []Plugin, isInstalled bool) string {
+	var parts []string
+
+	// Название плагина
+	parts = append(parts, name)
+
+	// Количество доступных версий
+	if len(versions) > 0 {
+		parts = append(parts, fmt.Sprintf("(%d версий)", len(versions)))
+	}
+
+	// Диапазон API версий
+	apiVersions := make(map[string]bool)
+	for _, plugin := range versions {
+		if plugin.ApiVersion != "" {
+			apiVersions[plugin.ApiVersion] = true
+		}
+	}
+	if len(apiVersions) > 0 {
+		var apiList []string
+		for api := range apiVersions {
+			apiList = append(apiList, api)
+		}
+		parts = append(parts, fmt.Sprintf("API: %s", strings.Join(apiList, ", ")))
+	}
+
+	// Статус установки
+	if isInstalled {
+		parts = append(parts, "[УСТАНОВЛЕН]")
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// selectBestPluginVersion выбирает наиболее подходящую версию плагина
+func selectBestPluginVersion(versions []Plugin) *Plugin {
+	if len(versions) == 0 {
+		return nil
+	}
+
+	// Найти стабильную версию: среди версий без "Preview" в api_version, сначала найти максимальный api_version, затем среди версий с этим api_version выбрать максимальную plugin_version
+	var stable *Plugin
+	var stableVersions []Plugin
+	for _, v := range versions {
+		if !strings.Contains(strings.ToLower(v.ApiVersion), "preview") {
+			stableVersions = append(stableVersions, v)
+		}
+	}
+	if len(stableVersions) > 0 {
+		// Найти максимальный api_version среди стабильных
+		maxApiVer := stableVersions[0].ApiVersion
+		for _, v := range stableVersions {
+			if compareApiVersions(v.ApiVersion, maxApiVer) > 0 {
+				maxApiVer = v.ApiVersion
+			}
+		}
+		// Среди версий с максимальным api_version найти максимальную plugin_version
+		var candidates []Plugin
+		for _, v := range stableVersions {
+			if v.ApiVersion == maxApiVer {
+				candidates = append(candidates, v)
+			}
+		}
+		stable = &candidates[0]
+		maxPluginVer := candidates[0].PluginVersion
+		for _, v := range candidates {
+			if compareSemanticVersions(v.PluginVersion, maxPluginVer) > 0 {
+				maxPluginVer = v.PluginVersion
+				stable = &v
+			}
+		}
+	}
+
+	// Найти последнюю версию: самая большая plugin_version среди всех версий
+	latest := versions[0]
+	for _, v := range versions {
+		if compareSemanticVersions(v.PluginVersion, latest.PluginVersion) > 0 {
+			latest = v
+		}
+	}
+
+	// Если нет стабильной версии, использовать последнюю как стабильную
+	if stable == nil {
+		stable = &latest
+	}
+
+	return stable
+}
+
+// selectPluginWithSearch создает интерфейс с поиском для выбора уникального плагина
+func selectPluginWithSearch(pluginGroups map[string][]Plugin, installed []string) (*Plugin, error) {
+	// Создаем информацию об уникальных плагинах для отображения
+	var uniquePlugins []UniquePluginDisplayInfo
+	for name, versions := range pluginGroups {
+		// Проверяем статус установки для группы плагинов
+		isInstalled := false
+		for _, inst := range installed {
+			if strings.Contains(strings.ToLower(inst), strings.ToLower(name)) {
+				isInstalled = true
+				break
+			}
+		}
+
+		// Создаем отображаемый текст для уникального плагина
+		displayText := buildUniquePluginDisplayText(name, versions, isInstalled)
+
+		uniquePlugin := UniquePluginDisplayInfo{
+			Name:        name,
+			Versions:    versions,
+			DisplayText: displayText,
+			IsInstalled: isInstalled,
+		}
+		uniquePlugins = append(uniquePlugins, uniquePlugin)
+	}
+
+	// Сортируем список уникальных плагинов по алфавиту по имени плагина
+	sort.Slice(uniquePlugins, func(i, j int) bool {
+		return strings.ToLower(uniquePlugins[i].Name) < strings.ToLower(uniquePlugins[j].Name)
+	})
+
+	// Создаем список строк для отображения (только уникальные имена плагинов)
+	itemStrings := make([]string, len(uniquePlugins))
+	for i, uniquePlugin := range uniquePlugins {
+		itemStrings[i] = uniquePlugin.DisplayText
+	}
+
+	// Используем tui.SelectWithSearch для поиска по именам плагинов
+	selectedText, err := tui.SelectWithSearch(itemStrings, "Выберите плагин для установки/обновления (введите текст для поиска):")
+	if err != nil {
+		// Проверяем, является ли ошибка выходом в главное меню
+		if err == tui.ErrExitToMainMenu {
+			return nil, err
+		}
+		return nil, err
+	}
+
+	// Находим выбранный плагин по отображаемому тексту
+	var selectedUniquePlugin *UniquePluginDisplayInfo
+	for i, uniquePlugin := range uniquePlugins {
+		if uniquePlugin.DisplayText == selectedText {
+			selectedUniquePlugin = &uniquePlugins[i]
+			break
+		}
+	}
+
+	if selectedUniquePlugin == nil {
+		return nil, fmt.Errorf("не удалось найти выбранный плагин")
+	}
+
+	// Если несколько версий, выбираем наиболее подходящую версию
+	var selectedPlugin *Plugin
+	if len(selectedUniquePlugin.Versions) == 1 {
+		// Только одна версия - выбираем её
+		selectedPlugin = &selectedUniquePlugin.Versions[0]
+	} else {
+		// Несколько версий - выбираем наиболее подходящую
+		selectedPlugin = selectBestPluginVersion(selectedUniquePlugin.Versions)
+	}
+
+	return selectedPlugin, nil
 }
 
 // selectPluginVersion позволяет выбрать версию плагина
