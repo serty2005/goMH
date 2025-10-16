@@ -56,51 +56,50 @@
 		}
 	},
 	"iiko_config": {
-		"base_ftp_path": "/distr/iiko",
-		"patches_base_url": "https://rapid.iiko.ru/versionPatches",
-		"components_to_find": [
-			{
-				"id": "Front",
-				"menu_text": "Front",
-				"file_name": "Setup.Front.exe",
-				"install_args": "/install /passive",
-				"run_after": "C:\\Program Files\\iiko\\iikoRMS\\Front.Net\\iikoFront.Net.exe"
-			},
-			{
-				"id": "ChainBack",
-				"menu_text": "Chain BackOffice",
-				"file_name": "Setup.Chain.BackOffice.exe",
-				"install_args": "/install /passive",
-				"run_after": "C:\\Program Files\\iiko\\iikoChain\\Office\\BackOffice.exe"
-			},
-			{
-				"id": "RMSBack",
-				"menu_text": "RMS BackOffice",
-				"file_name": "Setup.RMS.BackOffice.exe",
-				"install_args": "/install /passive",
-				"run_after": "C:\\Program Files\\iiko\\iikoRMS\\Office\\BackOffice.exe"
-			}
-		],
-		"card_pos": {
-			"id": "iikoCard",
-			"menu_text": "iikoCard 5 POS",
-			"file_name": "Setup.iikoCard5.POS.exe",
-			"install_args": "/install /passive",
-			"run_after": "",
-			"target_subdir": "iikoCardPOS"
-		},
-		"excluded_plugins": [
-			"Updater",
-			"UpdaterAssistant",
-			"WebServer",
-			"Delivery",
-			"iikoTransport"
-		],
-		"auto_update_plugins": [
-			"DualConnector",
-			"SberbankPlugin"
-		]
-	},
+    "base_ftp_path": "/distr/iiko",
+    "patches_base_url": "https://rapid.iiko.ru/versionPatches",
+    "distro_url_templates": [
+        {
+            "id": "front",
+            "menu_text": "Front",
+            "url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/RMS/Front/Setup.Front.exe",
+            "install_args": "/install /passive",
+            "run_after": "C:\\Program Files\\iiko\\iikoRMS\\Front.Net\\iikoFront.Net.exe"
+        },
+        {
+            "id": "rms_back",
+            "menu_text": "RMS-BackOffice",
+            "url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/RMS/BackOffice/Setup.RMS.BackOffice.exe",
+            "install_args": "/install /passive",
+            "run_after": "C:\\Program Files\\iiko\\iikoRMS\\Office\\BackOffice.exe"
+        },
+        {
+            "id": "chain_back",
+            "menu_text": "Chain-BackOffice",
+            "url_template": "https://downloads.iiko.online/{{VERSION}}/iiko/Chain/BackOffice/Setup.Chain.BackOffice.exe",
+            "install_args": "/install /passive",
+            "run_after": "C:\\Program Files\\iiko\\iikoChain\\Office\\BackOffice.exe"
+        }
+    ],
+    "card_pos": {
+        "id": "iikoCard",
+        "menu_text": "iikoCard 5 POS",
+        "file_name": "Setup.iikoCard5.POS.exe",
+        "install_args": "/install /passive",
+        "run_after": ""
+    },
+    "excluded_plugins": [
+        "Updater",
+        "UpdaterAssistant",
+        "WebServer",
+        "Delivery",
+        "iikoTransport"
+    ],
+    "auto_update_plugins": [
+        "DualConnector",
+        "SberbankPlugin"
+    ]
+},
 	"TeamViewerConfig": {
 		"ShortURL": "http://get.teamviewer.com/myhoreca",
 		"ApiURL": "https://get.teamviewer.com/api/CustomDesign"

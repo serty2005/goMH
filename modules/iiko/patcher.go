@@ -54,9 +54,21 @@ func RunPatchWorkflow(am core.AssetManager, wu core.WinUtils, version, installDi
 
 // findLatestPatches сканирует веб-страницу и возвращает 4 самых свежих патча.
 func findLatestPatches(baseURL, version string) ([]IikoPatch, error) {
-	fullVersion, err := getFullVersionString(version)
-	if err != nil {
-		return nil, fmt.Errorf("не удалось определить полную версию для '%s': %w", version, err)
+	var fullVersion string
+	var err error
+
+	// Проверяем, передана ли уже полная версия (например, "9.2.8035.0")
+	isFullVersion := regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`).MatchString(version)
+
+	if isFullVersion {
+		// Если да, используем ее напрямую
+		fullVersion = version
+	} else {
+		// Если нет (например, передана "928"), преобразуем ее в полную
+		fullVersion, err = getFullVersionString(version)
+		if err != nil {
+			return nil, fmt.Errorf("не удалось определить полную версию для '%s': %w", version, err)
+		}
 	}
 	targetURL := getPatchesPath(baseURL, fullVersion)
 	tui.InfoF("Поиск патчей по адресу: %s", targetURL)
@@ -300,11 +312,11 @@ func getFullVersionString(shortVersion string) (string, error) {
 }
 
 // getPatchesPath определяет путь к патчам в зависимости от версии.
-func getPatchesPath(baseURL, fullVersion string) string {
-	if fullVersion == "9.2.8035.0" {
-		return fmt.Sprintf("%s/%s", baseURL, fullVersion)
+func getPatchesPath(baseURL, version string) string {
+	if version == "9.2.8035.0" {
+		return fmt.Sprintf("%s/%s", baseURL, version)
 	}
-	return fmt.Sprintf("%s/%s/Patches", baseURL, fullVersion)
+	return fmt.Sprintf("%s/%s/Patches", baseURL, version)
 }
 
 // FindAndSelectPatch выполняет поиск и предлагает пользователю выбрать патч.

@@ -5,6 +5,7 @@ go 1.25.1
 require (
 	github.com/beevik/etree v1.5.1
 	github.com/jlaffaye/ftp v0.2.0
+	github.com/manifoldco/promptui v0.9.0
 	github.com/mholt/archives v0.1.3
 	github.com/schollz/progressbar/v3 v3.18.0
 	go.bug.st/serial v1.6.4
@@ -18,6 +19,7 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
+	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
 	github.com/creack/goselect v0.1.2 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect

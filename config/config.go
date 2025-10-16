@@ -1,3 +1,5 @@
+// config/config.go
+
 package config
 
 import (
@@ -9,26 +11,25 @@ import (
 	"strings"
 )
 
-type IikoConfig struct {
-	BaseFTPPath      string          `json:"base_ftp_path"`
-	PatchesBaseURL   string          `json:"patches_base_url"`
-	ComponentsToFind []IikoComponent `json:"components_to_find"`
-	CardPOS          IikoComponent   `json:"card_pos"`
-	// ExcludedPlugins список плагинов для исключения из всех операций (например: ["plugin1", "plugin2"])
-	ExcludedPlugins []string `json:"excluded_plugins"`
-	// AutoUpdatePlugins список плагинов для автообновления после установки iikoFront (например: ["plugin3", "plugin4"])
-	AutoUpdatePlugins []string `json:"auto_update_plugins"`
-}
-
-type IikoComponent struct {
+// DistroInfo описывает компонент для установки.
+// Используется и для версионных продуктов (с UrlTemplate), и для iikoCard (с FileName).
+type DistroInfo struct {
 	ID          string `json:"id"`
 	MenuText    string `json:"menu_text"`
-	FileName    string `json:"file_name"`
+	FileName    string `json:"file_name,omitempty"` // Для iikoCard
 	InstallArgs string `json:"install_args"`
 	RunAfter    string `json:"run_after"`
-	// Поля ниже не из JSON, а будут заполняться в рантайме
-	Version string `json:"-"`
-	FTPPath string `json:"-"`
+	URLTemplate string `json:"url_template,omitempty"` // Для версионных
+}
+
+type IikoConfig struct {
+	DistroURLTemplates []DistroInfo `json:"distro_url_templates"` // Для Front, RMS, Chain
+	CardPOS            DistroInfo   `json:"card_pos"`             // Для iikoCard
+	PatchesBaseURL     string       `json:"patches_base_url"`
+	ExcludedPlugins    []string     `json:"excluded_plugins"`
+	AutoUpdatePlugins  []string     `json:"auto_update_plugins"`
+	// Это поле больше не нужно в новой логике, но оставим для совместимости.
+	BaseFTPPath string `json:"base_ftp_path,omitempty"`
 }
 
 type FrpcConfig struct {
@@ -59,15 +60,13 @@ type MaintenanceConfig struct {
 	SevenZipAssetID   string   `json:"7zipAssetID"`
 }
 
-// FiscalDriver описывает один драйвер в модуле fiscal-drivers
 type FiscalDriver struct {
-	ID          string `json:"id"`           // Например "atol", "poscenter", "kktlab"
-	MenuText    string `json:"menu_text"`    // Текст для отображения в меню
-	AssetID     string `json:"asset_id"`     // ID ассета для скачивания
-	InstallArgs string `json:"install_args"` // Аргументы для тихой установки
+	ID          string `json:"id"`
+	MenuText    string `json:"menu_text"`
+	AssetID     string `json:"asset_id"`
+	InstallArgs string `json:"install_args"`
 }
 
-// UTMConfig содержит настройки для установщика УТМ
 type UTMConfig struct {
 	MenuText    string `json:"menu_text"`
 	AssetID     string `json:"asset_id"`
@@ -105,12 +104,10 @@ type AssetInfo struct {
 	DownloadMethod string `json:"download_method"`
 }
 
-// LoadConfig загружает конфигурацию из файла или по URL
 func LoadConfig(pathOrURL string) (*Config, error) {
 	var data []byte
 	var err error
 
-	// Проверяем, является ли строка URL-адресом
 	if strings.HasPrefix(pathOrURL, "http://") || strings.HasPrefix(pathOrURL, "https://") {
 		fmt.Printf("Загрузка конфигурации с URL: %s\n", pathOrURL)
 		resp, errHttp := http.Get(pathOrURL)

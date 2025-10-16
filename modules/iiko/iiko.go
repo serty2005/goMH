@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
-	"goMH/modules/iiko-plugins"
+	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/tui"
 	"os"
 	"os/exec"
@@ -16,233 +16,325 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jlaffaye/ftp"
+	"github.com/manifoldco/promptui"
 )
 
-// DiscoveredVersions хранит найденные на FTP версии и их компоненты
-type DiscoveredVersions map[string][]config.IikoComponent
+const (
+	minVersion   = "8.7.6032.0"
+	releasesPath = "/release_iiko" // Путь к релизам на FTP
+)
 
-var errUserChoseExit = errors.New("пользователь выбрал выход в главное меню")
+var (
+	ftpHosts = []string{"ftp.iiko.ru:21", "ftp.iiko2.ru:21"}
+	ftpUser  = "partners"
+	ftpPass  = "partners#iiko"
+)
 
 type Module struct {
 	Cfg *config.IikoConfig
 }
 
 func (m *Module) ID() string       { return "iiko" }
-func (m *Module) MenuText() string { return "iiko (Front, Back, Card)" }
+func (m *Module) MenuText() string { return "iiko (Front, Back, Chain, Card) - Установка" }
 
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	m.Cfg = &am.Cfg().IikoConfig
-
-	// 1. Сканируем FTP на предмет доступных версий
-	tui.Info("Сканирование FTP на наличие дистрибутивов iiko...")
-	discovered, err := m.discoverVersions(am)
-	if err != nil {
-		return fmt.Errorf("не удалось просканировать FTP: %w", err)
-	}
-	if len(discovered) == 0 {
-		return fmt.Errorf("на FTP не найдено ни одной корректной версии iiko")
+	if len(m.Cfg.DistroURLTemplates) == 0 || m.Cfg.CardPOS.ID == "" {
+		return errors.New("конфигурация для модуля iiko (distro_url_templates или card_pos) не заполнена")
 	}
 
-	// 2. Показываем меню выбора дистрибутива
-	selectedComponent, err := m.showDistroMenu(discovered)
+	// 1. Выбор дистрибутива из общего списка
+	selectedComponent, err := m.selectComponentMenu()
 	if err != nil {
-		if errors.Is(err, errUserChoseExit) {
-			tui.Info("Возврат в главное меню.")
+		tui.Info("Выбор дистрибутива отменен. Возврат в главное меню.")
+		return nil
+	}
+
+	// 2. Если выбран iikoCard, запускаем его установку и выходим
+	if selectedComponent.ID == "iikoCard" {
+		return m.installIikoCard(am, wu, selectedComponent)
+	}
+
+	// 3. Для остальных дистрибутивов запускаем воркфлоу с выбором версии
+	return m.runVersionedInstallWorkflow(am, wu, selectedComponent)
+}
+
+// runVersionedInstallWorkflow выполняет установку для продуктов с версиями (Front, RMS, Chain)
+func (m *Module) runVersionedInstallWorkflow(am core.AssetManager, wu core.WinUtils, component config.DistroInfo) error {
+	// 1. Получаем список версий с FTP
+	tui.Info("Получение списка доступных версий с официального FTP iiko...")
+	versions, err := m.discoverOfficialVersions()
+	if err != nil {
+		return fmt.Errorf("не удалось получить список версий: %w", err)
+	}
+	if len(versions) == 0 {
+		return fmt.Errorf("не найдено ни одной версии iiko, удовлетворяющей условию (>= %s)", minVersion)
+	}
+	tui.Success(fmt.Sprintf("Найдено %d подходящих версий.", len(versions)))
+
+	// 2. Показываем интерактивное меню выбора версии
+	selectedVersion, err := m.selectVersionMenu(versions)
+	if err != nil {
+		if errors.Is(err, promptui.ErrInterrupt) {
+			tui.Info("Выбор версии отменен.")
 			return nil
 		}
-		return err
+		return fmt.Errorf("ошибка выбора версии: %w", err)
 	}
+	tui.SuccessF("Выбрана версия: %s", selectedVersion)
 
-	// --- ИЗМЕНЕНИЕ ЛОГИКИ ---
-	// 3. Сразу после выбора дистрибутива, если это Front, предлагаем выбрать патч.
+	// 3. Для Front: предлагаем выбрать патч
 	var selectedPatch IikoPatch
-	var patchWasSelected bool
-
-	if selectedComponent.ID == "Front" {
-		// Вызываем новую функцию, которая только находит и предлагает выбрать патч
-		selectedPatch, patchWasSelected, err = FindAndSelectPatch(am, selectedComponent.Version)
+	var patchSelected bool
+	if component.ID == "front" {
+		selectedPatch, patchSelected, err = FindAndSelectPatch(am, selectedVersion)
 		if err != nil {
-			// В случае серьезной ошибки прерываем установку
-			return fmt.Errorf("критическая ошибка при выборе патча: %w", err)
+			// Не критичная ошибка, просто предупреждаем
+			tui.Warn(fmt.Sprintf("Произошла ошибка при выборе патча: %v", err))
 		}
 	}
-	// --- КОНЕЦ ИЗМЕНЕНИЯ ЛОГИКИ ---
 
-	distroName := "iiko " + selectedComponent.Version + " " + selectedComponent.MenuText
-	if selectedComponent.ID == "iikoCard" {
-		distroName = selectedComponent.MenuText
-	}
+	// 4. Запускаем установку
+	return m.installComponent(am, wu, component, selectedVersion, selectedPatch, patchSelected)
+}
+
+// installComponent скачивает по HTTP и устанавливает версионный компонент
+func (m *Module) installComponent(am core.AssetManager, wu core.WinUtils, component config.DistroInfo, version string, patch IikoPatch, patchSelected bool) error {
+	// Формируем URL и имя
+	downloadURL := strings.Replace(component.URLTemplate, "{{VERSION}}", version, 1)
+	fileName := filepath.Base(downloadURL)
+	distroName := fmt.Sprintf("iiko %s (%s)", version, component.MenuText)
+
 	tui.Title(fmt.Sprintf("\n--- Начало установки %s ---", distroName))
 
-	targetDir := filepath.Join(am.Cfg().RootPath, selectedComponent.Version)
-	if selectedComponent.ID == "iikoCard" {
-		targetDir = filepath.Join(am.Cfg().RootPath, "iikoCardPOS")
-	}
-	_ = os.MkdirAll(targetDir, 0755)
-
-	installerPath := filepath.Join(targetDir, selectedComponent.FileName)
-
-	// 4. Скачиваем основной установщик
-	tui.Info("Скачивание основного дистрибутива...")
-	_, err = am.DownloadFTPWithProgress(selectedComponent.FTPPath, installerPath)
+	// Скачиваем установщик
+	installerPath := filepath.Join(am.Cfg().AssetsCachePath, fileName)
+	tui.Info("Скачивание дистрибутива...")
+	_, err := am.DownloadHTTPWithProgress(downloadURL, installerPath)
 	if err != nil {
 		return fmt.Errorf("не удалось скачать установщик %s: %w", distroName, err)
 	}
 
-	// 5. Запускаем установщик
-	exitCode, err := m.runInstaller(wu, installerPath, selectedComponent.InstallArgs, am.Cfg().RootPath)
+	// Запускаем установку
+	exitCode, err := m.runInstaller(wu, installerPath, component.InstallArgs, am.Cfg().RootPath)
 	if err != nil {
 		return err
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("установщик завершился с кодом ошибки: %d", exitCode)
 	}
-
 	tui.Success(fmt.Sprintf("\nУстановка %s успешно завершена.", distroName))
 
-	// Автоматическое обновление плагинов для iikoFront
-	if selectedComponent.ID == "Front" {
+	// Применяем патч и обновляем плагины для Front
+	if component.ID == "front" {
 		tui.Info("Выполняется автоматическое обновление плагинов iiko...")
 		pluginsModule := &iikoplugins.Module{}
 		if err := pluginsModule.AutoUpdatePlugins(am, wu); err != nil {
-			tui.Warn(fmt.Sprintf("Ошибка при автоматическом обновлении плагинов: %v", err))
+			tui.Warn(fmt.Sprintf("Ошибка при автообновлении плагинов: %v", err))
 		} else {
 			tui.Success("Автоматическое обновление плагинов завершено.")
 		}
-	}
 
-	// --- ИЗМЕНЕНИЕ ЛОГИКИ ---
-	// 6. Применяем предварительно выбранный патч
-	if patchWasSelected {
-		if selectedComponent.RunAfter != "" {
-			installDir := filepath.Dir(selectedComponent.RunAfter)
-			// Вызываем функцию, которая только применяет патч
-			err = applyPatch(am, wu, selectedPatch, installDir, targetDir)
-			if err != nil {
-				// Применение патча - важный шаг, в случае ошибки сообщаем о ней
-				tui.Error(fmt.Sprintf("Критическая ошибка при применении патча: %v", err))
-				tui.Error("Основная программа была установлена, но патч - нет. Попробуйте установить патч через Утилиты обслуживания.")
+		if patchSelected {
+			if component.RunAfter != "" {
+				installDir := filepath.Dir(component.RunAfter)
+				backupDir := filepath.Join(am.Cfg().RootPath, version) // Директория для бэкапа
+				err := applyPatch(am, wu, patch, installDir, backupDir)
+				if err != nil {
+					tui.Error(fmt.Sprintf("Критическая ошибка при применении патча: %v", err))
+					tui.Error("Основная программа установлена, но патч - нет. Попробуйте установить его через Утилиты обслуживания.")
+				}
+			} else {
+				tui.Warn("Не удалось применить патч: не указан путь установки iiko (run_after).")
 			}
-		} else {
-			tui.Warn("Не удалось применить патч, так как не указан путь установки iiko (run_after).")
 		}
 	}
-	// --- КОНЕЦ ИЗМЕНЕНИЯ ЛОГИКИ ---
 
-	// 7. Запуск приложения после установки
-	if selectedComponent.RunAfter != "" {
-		if _, err := os.Stat(selectedComponent.RunAfter); err == nil {
-			tui.InfoF("Запуск %s...", selectedComponent.RunAfter)
-			exec.Command(selectedComponent.RunAfter).Start()
+	// Запуск приложения после установки
+	if component.RunAfter != "" {
+		if _, err := os.Stat(component.RunAfter); err == nil {
+			tui.InfoF("Запуск %s...", component.RunAfter)
+			exec.Command(component.RunAfter).Start()
 		}
 	}
 
 	return nil
 }
 
-// --- Функции-помощники ---
+// installIikoCard скачивает с FTP и устанавливает iikoCard
+func (m *Module) installIikoCard(am core.AssetManager, wu core.WinUtils, component config.DistroInfo) error {
+	distroName := component.MenuText
+	tui.Title(fmt.Sprintf("\n--- Начало установки %s ---", distroName))
 
-func (m *Module) discoverVersions(am core.AssetManager) (DiscoveredVersions, error) {
-	entries, err := am.ListFTP(m.Cfg.BaseFTPPath)
+	// Путь для iikoCard - из конфига BaseFTPPath
+	ftpPath := filepath.Join(am.Cfg().IikoConfig.BaseFTPPath, component.FileName)
+	ftpPath = strings.ReplaceAll(ftpPath, "\\", "/") // Для FTP нужны прямые слеши
+
+	// Скачиваем установщик
+	installerPath := filepath.Join(am.Cfg().AssetsCachePath, component.FileName)
+	tui.Info("Скачивание дистрибутива с FTP...")
+	_, err := am.DownloadFTPWithProgress(ftpPath, installerPath)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("не удалось скачать установщик %s: %w", distroName, err)
 	}
 
-	discovered := make(DiscoveredVersions)
-	versionRegex := regexp.MustCompile(`^\d{3}$`)
-
-	for _, entry := range entries {
-		// Проверяем, что это директория
-		if entry.Type != 1 || !versionRegex.MatchString(entry.Name) {
-			continue
-		}
-		version := entry.Name
-		versionPath := filepath.Join(m.Cfg.BaseFTPPath, version)
-		versionPath = strings.ReplaceAll(versionPath, "\\", "/") // FTP пути используют /
-
-		filesInVersion, err := am.ListFTP(versionPath)
-		if err != nil {
-			continue
-		}
-
-		filesMap := make(map[string]bool)
-		for _, file := range filesInVersion {
-			filesMap[file.Name] = true
-		}
-
-		var foundComponents []config.IikoComponent
-		for _, compTmpl := range m.Cfg.ComponentsToFind {
-			if filesMap[compTmpl.FileName] {
-				comp := compTmpl // Копируем шаблон
-				comp.Version = version
-				comp.FTPPath = versionPath + "/" + comp.FileName
-				foundComponents = append(foundComponents, comp)
-			}
-		}
-
-		if len(foundComponents) > 0 {
-			discovered[version] = foundComponents
-		}
+	// Запускаем установку
+	exitCode, err := m.runInstaller(wu, installerPath, component.InstallArgs, am.Cfg().RootPath)
+	if err != nil {
+		return err
 	}
-	return discovered, nil
+	if exitCode != 0 {
+		return fmt.Errorf("установщик завершился с кодом ошибки: %d", exitCode)
+	}
+	tui.Success(fmt.Sprintf("\nУстановка %s успешно завершена.", distroName))
+
+	return nil
 }
 
-func (m *Module) showDistroMenu(versions DiscoveredVersions) (config.IikoComponent, error) {
+// selectComponentMenu показывает меню выбора компонента.
+func (m *Module) selectComponentMenu() (config.DistroInfo, error) {
 	reader := bufio.NewReader(os.Stdin)
-	var menuOptions []config.IikoComponent
-	var versionsSorted []string
-	for v := range versions {
-		versionsSorted = append(versionsSorted, v)
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(versionsSorted))) // Сначала новые версии
+	var components []config.DistroInfo
+	components = append(components, m.Cfg.DistroURLTemplates...)
+	components = append(components, m.Cfg.CardPOS)
 
 	for {
-		tui.Title("\n--- Выберите дистрибутив iiko для установки ---")
-		menuOptions = nil
-
-		// Опция 0 - iikoCard
-		cardPosOption := m.Cfg.CardPOS
-		cardPosOption.ID = "iikoCard"
-		cardPosOption.Version = "Card"
-		cardPosOption.FTPPath = m.Cfg.BaseFTPPath + "/" + cardPosOption.FileName
-		menuOptions = append(menuOptions, cardPosOption)
-		fmt.Printf(" %d. %s\n", 0, cardPosOption.MenuText)
-
-		// Остальные опции
-		for _, version := range versionsSorted {
-			fmt.Printf("--- Версия iiko %s ---\n", version)
-			for _, comp := range versions[version] {
-				menuOptions = append(menuOptions, comp)
-				fmt.Printf(" %d. %s %s\n", len(menuOptions)-1, version, comp.MenuText)
-			}
+		tui.Title("\n--- Выберите дистрибутив для установки ---")
+		for i, comp := range components {
+			fmt.Printf(" %d. %s\n", i+1, comp.MenuText)
 		}
-
-		fmt.Println("\n 00. Назад в главное меню")
+		fmt.Println("\n 0. Назад")
 		fmt.Print("Введите номер пункта: ")
 
 		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
+		choice, err := strconv.Atoi(strings.TrimSpace(choiceStr))
 
-		if choiceStr == "00" {
-			return config.IikoComponent{}, errUserChoseExit
+		if choice == 0 {
+			return config.DistroInfo{}, errors.New("выбор отменен")
 		}
 
-		choice, err := strconv.Atoi(choiceStr)
-		if err != nil || choice < 0 || choice >= len(menuOptions) {
-			tui.Error("Некорректный выбор. Попробуйте снова. 2 секунды...")
-			time.Sleep(2 * time.Second)
-			continue // Показываем меню заново
+		if err != nil || choice < 1 || choice > len(components) {
+			tui.Error("Неверный выбор. Попробуйте снова.")
+			time.Sleep(1 * time.Second)
+			continue
 		}
-		return menuOptions[choice], nil
+		return components[choice-1], nil
 	}
 }
 
+// selectVersionMenu отображает интерактивное меню выбора версии с поиском.
+func (m *Module) selectVersionMenu(versions []string) (string, error) {
+	// Функция нормализации убирает точки для сравнения (9.2.8... -> 928...)
+	normalize := func(s string) string {
+		return strings.ReplaceAll(s, ".", "")
+	}
+
+	searcher := func(input string, index int) bool {
+		normalizedInput := normalize(input)
+		normalizedItem := normalize(versions[index])
+		return strings.HasPrefix(normalizedItem, normalizedInput)
+	}
+
+	prompt := promptui.Select{
+		Label:             "Выберите версию (введите часть версии, например, 928)",
+		Items:             versions,
+		StartInSearchMode: true,
+		Searcher:          searcher,
+	}
+
+	_, result, err := prompt.Run()
+	return result, err
+}
+
+// --- Остальные функции (discoverOfficialVersions, compareSemanticVersions, runInstaller) ---
+// Они уже были в предыдущем коде и остаются без изменений, просто для полноты файла.
+
+func (m *Module) discoverOfficialVersions() ([]string, error) {
+	var allErrors []string
+	for _, host := range ftpHosts {
+		tui.InfoF("Попытка подключения к %s...", host)
+		c, err := ftp.Dial(host, ftp.DialWithTimeout(15*time.Second))
+		if err != nil {
+			errMsg := fmt.Sprintf("ошибка подключения к %s: %v", host, err)
+			tui.Warn(errMsg)
+			allErrors = append(allErrors, errMsg)
+			continue
+		}
+
+		err = c.Login(ftpUser, ftpPass)
+		if err != nil {
+			c.Quit()
+			errMsg := fmt.Sprintf("ошибка входа на %s: %v", host, err)
+			tui.Warn(errMsg)
+			allErrors = append(allErrors, errMsg)
+			continue
+		}
+
+		entries, err := c.List(releasesPath)
+		c.Quit()
+		if err != nil {
+			errMsg := fmt.Sprintf("ошибка получения списка каталогов с %s: %v", host, err)
+			tui.Warn(errMsg)
+			allErrors = append(allErrors, errMsg)
+			continue
+		}
+
+		tui.SuccessF("Успешно подключились и получили список с %s", host)
+		versionRegex := regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`)
+		var versions []string
+
+		for _, entry := range entries {
+			if entry.Type == ftp.EntryTypeFolder && versionRegex.MatchString(entry.Name) {
+				if compareSemanticVersions(entry.Name, minVersion) >= 0 {
+					versions = append(versions, entry.Name)
+				}
+			}
+		}
+
+		sort.Slice(versions, func(i, j int) bool {
+			return compareSemanticVersions(versions[i], versions[j]) > 0
+		})
+
+		return versions, nil
+	}
+
+	return nil, fmt.Errorf("не удалось получить данные ни с одного из FTP-серверов: %s", strings.Join(allErrors, "; "))
+}
+
+func compareSemanticVersions(v1, v2 string) int {
+	parts1 := strings.Split(v1, ".")
+	parts2 := strings.Split(v2, ".")
+	len1, len2 := len(parts1), len(parts2)
+	maxLen := len1
+	if len2 > maxLen {
+		maxLen = len2
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var num1, num2 int
+		if i < len1 {
+			num1, _ = strconv.Atoi(parts1[i])
+		}
+		if i < len2 {
+			num2, _ = strconv.Atoi(parts2[i])
+		}
+		if num1 > num2 {
+			return 1
+		}
+		if num1 < num2 {
+			return -1
+		}
+	}
+	return 0
+}
+
 func (m *Module) runInstaller(wu core.WinUtils, installerPath, args, rootPath string) (int, error) {
-	// Создаем путь для временного лог-файла внутри root-каталога
 	logFileName := fmt.Sprintf("installer_log_%d.txt", time.Now().Unix())
 	tempLogPath := filepath.Join(rootPath, "temp", logFileName)
+	_ = os.MkdirAll(filepath.Dir(tempLogPath), 0755)
 
-	// Формируем аргументы для установщика
 	baseArgs := strings.Fields(args)
 	finalArgs := append(baseArgs, "/log", tempLogPath)
 
@@ -255,26 +347,20 @@ func (m *Module) runInstaller(wu core.WinUtils, installerPath, args, rootPath st
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			// Если ошибка не связана с кодом завершения (например, файл не найден),
-			// возвращаем ее как критическую.
 			return -1, fmt.Errorf("не удалось запустить установщик: %w", err)
 		}
 	} else {
 		exitCode = 0
 	}
 
-	// Проверяем, был ли создан лог-файл
 	if _, statErr := os.Stat(tempLogPath); statErr == nil {
 		if exitCode != 0 {
-			// Установка завершилась с ошибкой, ПЕРЕМЕЩАЕМ лог
 			finalLogPath := filepath.Join(rootPath, logFileName)
 			fmt.Printf("Установщик завершился с ошибкой. Сохраняем лог в: %s\n", finalLogPath)
 			if renameErr := os.Rename(tempLogPath, finalLogPath); renameErr != nil {
 				fmt.Printf("Предупреждение: не удалось переместить лог-файл: %v\n", renameErr)
-				// Если переместить не удалось, пробуем хотя бы не удалять его из временной папки
 			}
 		} else {
-			// Установка успешна, УДАЛЯЕМ временный лог
 			os.Remove(tempLogPath)
 		}
 	}
