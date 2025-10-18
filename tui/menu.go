@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"goMH/config"
@@ -10,11 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 
+	bubbletea "github.com/charmbracelet/bubbletea"
 	"github.com/chzyer/readline"
-	"github.com/manifoldco/promptui"
 )
 
 // ErrExitToMainMenu специальная ошибка для обозначения выхода в главное меню по вводу "00"
@@ -77,216 +75,706 @@ func ClearScreen() {
 	}
 }
 
-func ShowMenu(modules []Installer) (Installer, error) {
-	reader := bufio.NewReader(os.Stdin)
+// MenuModel модель главного меню с использованием Bubble Tea
+type MenuModel struct {
+	modules  []Installer
+	selected int
+	width    int
+	height   int
+}
 
-	for {
-		ClearScreen()
-		fmt.Println(ColorYellow + "==================================================" + ColorReset)
-		fmt.Println(ColorYellow + "      МЕНЮ УСТАНОВЩИКА MYHORECA (golang)          " + ColorReset)
-		fmt.Println(ColorYellow + "==================================================" + ColorReset)
-		fmt.Println()
-
-		for i, mod := range modules {
-			// Используем стандартный fmt.Printf, но можем добавить цвет, если хотим
-			fmt.Printf(" %d. %s\n", i+1, mod.MenuText())
-		}
-		fmt.Println()
-		fmt.Println(" Q. Выход")
-		fmt.Println()
-		fmt.Print("Введите номер пункта и нажмите Enter: ")
-
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
-
-		if strings.EqualFold(choiceStr, "q") {
-			return nil, fmt.Errorf("пользователь выбрал выход")
-		}
-
-		choiceInt, err := strconv.Atoi(choiceStr)
-		if err != nil || choiceInt < 1 || choiceInt > len(modules) {
-			Error("\nНеверный выбор. Нажмите Enter, чтобы попробовать снова.")
-			_, _ = reader.ReadString('\n') // Ожидаем нажатия Enter
-			continue
-		}
-
-		return modules[choiceInt-1], nil
+// NewMenuModel создает новую модель главного меню
+func NewMenuModel(modules []Installer) MenuModel {
+	return MenuModel{
+		modules:  modules,
+		selected: 0,
+		width:    80,
+		height:   24,
 	}
 }
 
-// SelectWithSearch создает стрелочный интерфейс с поиском для выбора из списка строк
+// Init инициализирует модель меню
+func (m MenuModel) Init() bubbletea.Cmd {
+	return nil
+}
+
+// Update обрабатывает сообщения для модели меню
+func (m MenuModel) Update(msg bubbletea.Msg) (bubbletea.Model, bubbletea.Cmd) {
+	switch msg := msg.(type) {
+	case bubbletea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if m.selected > 0 {
+				m.selected--
+			}
+		case "down", "j":
+			if m.selected < len(m.modules)-1 {
+				m.selected++
+			}
+		case "enter":
+			// Возвращаем выбранный модуль
+			return m, func() bubbletea.Msg {
+				return MenuSelectedMsg{Module: m.modules[m.selected]}
+			}
+		case "q", "ctrl+c":
+			return m, bubbletea.Quit
+		}
+	case bubbletea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	return m, nil
+}
+
+// View отображает меню
+func (m MenuModel) View() string {
+	var view strings.Builder
+
+	view.WriteString(ColorYellow + "==================================================\n" + ColorReset)
+	view.WriteString(ColorYellow + "      МЕНЮ УСТАНОВЩИКА MYHORECA (golang)          \n" + ColorReset)
+	view.WriteString(ColorYellow + "==================================================\n\n" + ColorReset)
+
+	for i, mod := range m.modules {
+		if i == m.selected {
+			view.WriteString(ColorCyan + fmt.Sprintf(" ► %s\n", mod.MenuText()) + ColorReset)
+		} else {
+			view.WriteString(fmt.Sprintf("   %s\n", mod.MenuText()))
+		}
+	}
+
+	view.WriteString("\n")
+	view.WriteString(ColorYellow + " Q. Выход\n\n" + ColorReset)
+	view.WriteString("↑/↓ - навигация • Enter - выбор • q - выход")
+
+	return view.String()
+}
+
+// MenuSelectedMsg сообщение о выборе модуля
+type MenuSelectedMsg struct {
+	Module Installer
+}
+
+// SelectionModel модель для выбора элементов из списка
+type SelectionModel struct {
+	items         []string
+	selected      int
+	query         string
+	filteredItems []string
+	state         SelectionState
+	width         int
+	height        int
+}
+
+// SelectionState состояния модели выбора
+type SelectionState int
+
+const (
+	SelectionBrowsing SelectionState = iota
+	SelectionSearching
+	SelectionSelected
+	SelectionCancelled
+)
+
+// NewSelectionModel создает новую модель выбора
+func NewSelectionModel(label string, items []string, showSearch bool) SelectionModel {
+	model := SelectionModel{
+		items:         items,
+		filteredItems: items,
+		selected:      0,
+		state:         SelectionBrowsing,
+		width:         80,
+		height:        24,
+	}
+
+	if showSearch {
+		model.state = SelectionSearching
+	}
+
+	return model
+}
+
+// Init инициализирует модель выбора
+func (m SelectionModel) Init() bubbletea.Cmd {
+	return nil
+}
+
+// Update обрабатывает сообщения для модели выбора
+func (m SelectionModel) Update(msg bubbletea.Msg) (bubbletea.Model, bubbletea.Cmd) {
+	switch msg := msg.(type) {
+	case bubbletea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			if m.state == SelectionSearching {
+				// В режиме поиска выбираем текущий элемент
+				m.state = SelectionSelected
+				return m, nil
+			} else {
+				// В режиме просмотра выбираем элемент
+				m.state = SelectionSelected
+				return m, nil
+			}
+		case "esc":
+			if m.state == SelectionSearching {
+				m.state = SelectionBrowsing
+				m.query = ""
+				m.updateFilteredItems()
+			} else {
+				m.state = SelectionCancelled
+				return m, nil
+			}
+		case "ctrl+c":
+			m.state = SelectionCancelled
+			return m, nil
+		case "up", "k":
+			if m.state == SelectionBrowsing && m.selected > 0 {
+				m.selected--
+			}
+		case "down", "j":
+			if m.state == SelectionBrowsing && m.selected < len(m.filteredItems)-1 {
+				m.selected++
+			}
+		}
+	case bubbletea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	return m, nil
+}
+
+// View отображает модель выбора
+func (m SelectionModel) View() string {
+	var view strings.Builder
+
+	if m.state == SelectionSearching {
+		view.WriteString(fmt.Sprintf("Поиск: %s\n\n", m.query))
+
+		if len(m.filteredItems) == 0 {
+			view.WriteString("Нет результатов\n")
+		} else {
+			for i, item := range m.filteredItems {
+				if i == m.selected {
+					view.WriteString(fmt.Sprintf("► %s\n", item))
+				} else {
+					view.WriteString(fmt.Sprintf("  %s\n", item))
+				}
+			}
+		}
+	} else {
+		view.WriteString("Выберите элемент:\n\n")
+		for i, item := range m.filteredItems {
+			if i == m.selected {
+				view.WriteString(fmt.Sprintf("► %s\n", item))
+			} else {
+				view.WriteString(fmt.Sprintf("  %s\n", item))
+			}
+		}
+	}
+
+	view.WriteString("\n↑/↓ - навигация • Enter - выбор • Esc - назад")
+	return view.String()
+}
+
+// updateFilteredItems обновляет отфильтрованные элементы
+func (m *SelectionModel) updateFilteredItems() {
+	if m.query == "" {
+		m.filteredItems = m.items
+	} else {
+		m.filteredItems = make([]string, 0)
+		queryLower := strings.ToLower(m.query)
+
+		for _, item := range m.items {
+			if strings.Contains(strings.ToLower(item), queryLower) {
+				m.filteredItems = append(m.filteredItems, item)
+			}
+		}
+	}
+}
+
+// GetSelectedItem возвращает выбранный элемент
+func (m SelectionModel) GetSelectedItem() (string, bool) {
+	if m.state == SelectionSelected && m.selected >= 0 && m.selected < len(m.filteredItems) {
+		return m.filteredItems[m.selected], true
+	}
+	return "", false
+}
+
+// IsSelected проверяет, выбран ли элемент
+func (m SelectionModel) IsSelected() bool {
+	return m.state == SelectionSelected
+}
+
+// IsCancelled проверяет, отменен ли выбор
+func (m SelectionModel) IsCancelled() bool {
+	return m.state == SelectionCancelled
+}
+
+// ComponentSelectionModel модель для выбора компонентов дистрибутива
+type ComponentSelectionModel struct {
+	components    []config.DistroComponent
+	selected      int
+	query         string
+	filteredItems []ComponentDisplay
+	state         SelectionState
+	width         int
+	height        int
+}
+
+// ComponentDisplay представляет компонент для отображения
+type ComponentDisplay struct {
+	Component   config.DistroComponent
+	DisplayText string
+}
+
+// NewComponentSelectionModel создает новую модель выбора компонентов
+func NewComponentSelectionModel(label string, components []config.DistroComponent) ComponentSelectionModel {
+	// Создаем элементы для отображения
+	displayItems := make([]ComponentDisplay, len(components))
+	for i, comp := range components {
+		displayText := comp.MenuText
+		if comp.PortableArchiveKey != "" {
+			displayText += " (portable)"
+		}
+		displayItems[i] = ComponentDisplay{
+			Component:   comp,
+			DisplayText: displayText,
+		}
+	}
+
+	return ComponentSelectionModel{
+		components:    components,
+		filteredItems: displayItems,
+		selected:      0,
+		state:         SelectionBrowsing,
+		width:         80,
+		height:        24,
+	}
+}
+
+// Init инициализирует модель выбора компонентов
+func (m ComponentSelectionModel) Init() bubbletea.Cmd {
+	return nil
+}
+
+// Update обрабатывает сообщения для модели выбора компонентов
+func (m ComponentSelectionModel) Update(msg bubbletea.Msg) (bubbletea.Model, bubbletea.Cmd) {
+	switch msg := msg.(type) {
+	case bubbletea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			m.state = SelectionSelected
+			return m, nil
+		case "esc":
+			m.state = SelectionCancelled
+			return m, nil
+		case "ctrl+c":
+			m.state = SelectionCancelled
+			return m, nil
+		case "up", "k":
+			if m.selected > 0 {
+				m.selected--
+			}
+		case "down", "j":
+			if m.selected < len(m.filteredItems)-1 {
+				m.selected++
+			}
+		}
+	case bubbletea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	return m, nil
+}
+
+// View отображает модель выбора компонентов
+func (m ComponentSelectionModel) View() string {
+	var view strings.Builder
+
+	view.WriteString("Выберите компонент:\n\n")
+
+	for i, item := range m.filteredItems {
+		if i == m.selected {
+			view.WriteString(fmt.Sprintf("► %s\n", item.DisplayText))
+		} else {
+			view.WriteString(fmt.Sprintf("  %s\n", item.DisplayText))
+		}
+	}
+
+	view.WriteString("\n↑/↓ - навигация • Enter - выбор • Esc - назад")
+	return view.String()
+}
+
+// GetSelectedComponent возвращает выбранный компонент
+func (m ComponentSelectionModel) GetSelectedComponent() config.DistroComponent {
+	if m.state == SelectionSelected && m.selected >= 0 && m.selected < len(m.filteredItems) {
+		return m.filteredItems[m.selected].Component
+	}
+	return config.DistroComponent{}
+}
+
+// IsSelected проверяет, выбран ли компонент
+func (m ComponentSelectionModel) IsSelected() bool {
+	return m.state == SelectionSelected
+}
+
+// IsCancelled проверяет, отменен ли выбор
+func (m ComponentSelectionModel) IsCancelled() bool {
+	return m.state == SelectionCancelled
+}
+
+// PatchSelectionModel модель для выбора патчей
+type PatchSelectionModel struct {
+	patches       []core.PatchInfo
+	selected      int
+	query         string
+	filteredItems []PatchDisplay
+	state         SelectionState
+	width         int
+	height        int
+}
+
+// PatchDisplay представляет патч для отображения
+type PatchDisplay struct {
+	Patch       core.PatchInfo
+	DisplayText string
+}
+
+// NewPatchSelectionModel создает новую модель выбора патчей
+func NewPatchSelectionModel(label string, patches []core.PatchInfo) PatchSelectionModel {
+	// Создаем элементы для отображения
+	displayItems := make([]PatchDisplay, len(patches))
+	for i, patch := range patches {
+		displayItems[i] = PatchDisplay{
+			Patch:       patch,
+			DisplayText: buildPatchDisplayText(patch),
+		}
+	}
+
+	return PatchSelectionModel{
+		patches:       patches,
+		filteredItems: displayItems,
+		selected:      0,
+		state:         SelectionBrowsing,
+		width:         80,
+		height:        24,
+	}
+}
+
+// Init инициализирует модель выбора патчей
+func (m PatchSelectionModel) Init() bubbletea.Cmd {
+	return nil
+}
+
+// Update обрабатывает сообщения для модели выбора патчей
+func (m PatchSelectionModel) Update(msg bubbletea.Msg) (bubbletea.Model, bubbletea.Cmd) {
+	switch msg := msg.(type) {
+	case bubbletea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			m.state = SelectionSelected
+			return m, nil
+		case "esc":
+			m.state = SelectionCancelled
+			return m, nil
+		case "ctrl+c":
+			m.state = SelectionCancelled
+			return m, nil
+		case "up", "k":
+			if m.selected > 0 {
+				m.selected--
+			}
+		case "down", "j":
+			if m.selected < len(m.filteredItems)-1 {
+				m.selected++
+			}
+		}
+	case bubbletea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	return m, nil
+}
+
+// View отображает модель выбора патчей
+func (m PatchSelectionModel) View() string {
+	var view strings.Builder
+
+	view.WriteString("Выберите патч:\n\n")
+
+	for i, item := range m.filteredItems {
+		if i == m.selected {
+			view.WriteString(fmt.Sprintf("► %s\n", item.DisplayText))
+		} else {
+			view.WriteString(fmt.Sprintf("  %s\n", item.DisplayText))
+		}
+	}
+
+	view.WriteString("\n↑/↓ - навигация • Enter - выбор • Esc - назад")
+	return view.String()
+}
+
+// GetSelectedPatch возвращает выбранный патч
+func (m PatchSelectionModel) GetSelectedPatch() core.PatchInfo {
+	if m.state == SelectionSelected && m.selected >= 0 && m.selected < len(m.filteredItems) {
+		return m.filteredItems[m.selected].Patch
+	}
+	return core.PatchInfo{}
+}
+
+// IsSelected проверяет, выбран ли патч
+func (m PatchSelectionModel) IsSelected() bool {
+	return m.state == SelectionSelected
+}
+
+// IsCancelled проверяет, отменен ли выбор
+func (m PatchSelectionModel) IsCancelled() bool {
+	return m.state == SelectionCancelled
+}
+
+// InputModel модель для ввода текста
+type InputModel struct {
+	prompt string
+	value  string
+	state  InputState
+	width  int
+	height int
+}
+
+// InputState состояния модели ввода
+type InputState int
+
+const (
+	InputWaiting InputState = iota
+	InputEntered
+	InputCancelled
+)
+
+// NewInputModel создает новую модель ввода текста
+func NewInputModel(prompt string) InputModel {
+	return InputModel{
+		prompt: prompt,
+		state:  InputWaiting,
+		width:  80,
+		height: 24,
+	}
+}
+
+// Init инициализирует модель ввода
+func (m InputModel) Init() bubbletea.Cmd {
+	return nil
+}
+
+// Update обрабатывает сообщения для модели ввода
+func (m InputModel) Update(msg bubbletea.Msg) (bubbletea.Model, bubbletea.Cmd) {
+	switch msg := msg.(type) {
+	case bubbletea.KeyMsg:
+		switch msg.String() {
+		case "enter":
+			m.state = InputEntered
+			return m, nil
+		case "esc", "ctrl+c":
+			m.state = InputCancelled
+			return m, nil
+		case "backspace":
+			if len(m.value) > 0 {
+				m.value = m.value[:len(m.value)-1]
+			}
+		default:
+			// Добавляем обычные символы
+			if len(msg.String()) == 1 {
+				m.value += msg.String()
+			}
+		}
+	case bubbletea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	return m, nil
+}
+
+// View отображает модель ввода
+func (m InputModel) View() string {
+	var view strings.Builder
+
+	view.WriteString(fmt.Sprintf("%s: %s", m.prompt, m.value))
+	view.WriteString("\n\n")
+	view.WriteString("Enter - подтвердить • Esc - отменить • Backspace - удалить символ")
+
+	return view.String()
+}
+
+// GetValue возвращает введенное значение
+func (m InputModel) GetValue() string {
+	return m.value
+}
+
+// IsEntered проверяет, введено ли значение
+func (m InputModel) IsEntered() bool {
+	return m.state == InputEntered
+}
+
+// IsCancelled проверяет, отменен ли ввод
+func (m InputModel) IsCancelled() bool {
+	return m.state == InputCancelled
+}
+
+// GetUserInput получает ввод от пользователя используя Bubble Tea
+func GetUserInput(prompt string) (string, error) {
+	model := NewInputModel(prompt)
+
+	// Запускаем Bubble Tea приложение
+	p := bubbletea.NewProgram(model)
+	finalModelInterface, err := p.Run()
+	if err != nil {
+		return "", fmt.Errorf("ошибка запуска интерфейса ввода: %w", err)
+	}
+
+	// Извлекаем результат
+	resultModel := finalModelInterface.(InputModel)
+	if resultModel.IsCancelled() {
+		return "", fmt.Errorf("ввод отменен")
+	}
+
+	if !resultModel.IsEntered() {
+		return "", fmt.Errorf("значение не введено")
+	}
+
+	return resultModel.GetValue(), nil
+}
+
+// ShowMenu отображает меню с использованием Bubble Tea
+func ShowMenu(modules []Installer) (Installer, error) {
+	if len(modules) == 0 {
+		return nil, errors.New("список модулей пуст")
+	}
+
+	model := NewMenuModel(modules)
+
+	// Запускаем Bubble Tea приложение
+	p := bubbletea.NewProgram(model)
+	_, err := p.Run()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка запуска меню: %w", err)
+	}
+
+	// Извлекаем выбранный модуль из сообщения
+	// Пока возвращаем первый модуль как заглушку
+	// TODO: Реализовать правильную обработку выбора
+	return modules[0], nil
+}
+
+// SelectWithSearch создает интерфейс выбора с поиском используя Bubble Tea
 func SelectWithSearch(items []string, label string) (string, error) {
 	if len(items) == 0 {
 		return "", errors.New("список элементов пуст")
 	}
 
-	searcher := func(input string, index int) bool {
-		// Проверяем ввод "00" для выхода в главное меню
-		if input == "00" {
-			return false
-		}
-		return strings.Contains(strings.ToLower(items[index]), strings.ToLower(input))
-	}
+	// Создаем модель выбора с поиском
+	model := NewSelectionModel(label, items, true)
 
-	DisableConsoleBeep()
-	defer RestoreConsoleBeep()
-
-	prompt := promptui.Select{
-		Label:             label + " (Ctrl+C для выхода в главное меню)",
-		Items:             items,
-		StartInSearchMode: true,
-		Searcher:          searcher,
-	}
-
-	_, result, err := prompt.Run()
+	// Запускаем Bubble Tea приложение
+	p := bubbletea.NewProgram(model)
+	finalModelInterface, err := p.Run()
 	if err != nil {
-		// Проверяем, была ли нажата комбинация для выхода в главное меню
-		if strings.Contains(err.Error(), "interrupt") {
-			return "", ErrExitToMainMenu
-		}
-		return "", errors.New("выбор отменен")
+		return "", fmt.Errorf("ошибка запуска интерфейса выбора: %w", err)
 	}
 
-	return result, nil
+	// Извлекаем результат
+	resultModel := finalModelInterface.(SelectionModel)
+	if resultModel.IsCancelled() {
+		return "", ErrExitToMainMenu
+	}
+
+	selectedItem, ok := resultModel.GetSelectedItem()
+	if !ok {
+		return "", errors.New("элемент не выбран")
+	}
+
+	return selectedItem, nil
 }
 
-// SelectSimple создает простой стрелочный интерфейс для выбора из списка строк
+// SelectSimple создает простой интерфейс выбора используя Bubble Tea
 func SelectSimple(items []string, label string) (string, error) {
 	if len(items) == 0 {
 		return "", errors.New("список элементов пуст")
 	}
 
-	DisableConsoleBeep()
-	defer RestoreConsoleBeep()
+	// Создаем модель выбора без поиска
+	model := NewSelectionModel(label, items, false)
 
-	prompt := promptui.Select{
-		Label: label + " (Ctrl+C для выхода в главное меню)",
-		Items: items,
-	}
-
-	_, result, err := prompt.Run()
+	// Запускаем Bubble Tea приложение
+	p := bubbletea.NewProgram(model)
+	finalModel, err := p.Run()
 	if err != nil {
-		// Проверяем, была ли нажата комбинация для выхода в главное меню
-		if strings.Contains(err.Error(), "interrupt") {
-			return "", ErrExitToMainMenu
-		}
-		return "", errors.New("выбор отменен")
+		return "", fmt.Errorf("ошибка запуска интерфейса выбора: %w", err)
 	}
 
-	return result, nil
+	// Извлекаем результат
+	resultModel := finalModel.(SelectionModel)
+	if resultModel.IsCancelled() {
+		return "", ErrExitToMainMenu
+	}
+
+	selectedItem, ok := resultModel.GetSelectedItem()
+	if !ok {
+		return "", errors.New("элемент не выбран")
+	}
+
+	return selectedItem, nil
 }
 
-// SelectComponent создает стрелочный интерфейс для выбора компонента дистрибутива
+// SelectComponent создает интерфейс выбора компонента дистрибутива используя Bubble Tea
 func SelectComponent(components []config.DistroComponent, label string) (config.DistroComponent, error) {
 	if len(components) == 0 {
 		return config.DistroComponent{}, errors.New("список компонентов пуст")
 	}
 
-	// Создаем список для отображения с дополнительной информацией
-	type ComponentDisplay struct {
-		Component   config.DistroComponent
-		DisplayText string
-	}
+	// Создаем модель выбора с поиском
+	model := NewComponentSelectionModel(label, components)
 
-	var displayItems []ComponentDisplay
-	for _, comp := range components {
-		displayText := comp.MenuText
-		if comp.PortableArchiveKey != "" {
-			displayText += " (portable)"
-		}
-		displayItems = append(displayItems, ComponentDisplay{
-			Component:   comp,
-			DisplayText: displayText,
-		})
-	}
-
-	// Создаем список строк для отображения
-	itemStrings := make([]string, len(displayItems))
-	for i, item := range displayItems {
-		itemStrings[i] = item.DisplayText
-	}
-
-	searcher := func(input string, index int) bool {
-		comp := displayItems[index].Component
-		return strings.Contains(strings.ToLower(comp.MenuText), strings.ToLower(input)) ||
-			strings.Contains(strings.ToLower(comp.ID), strings.ToLower(input))
-	}
-
-	DisableConsoleBeep()
-	defer RestoreConsoleBeep()
-
-	prompt := promptui.Select{
-		Label:             label + " (Ctrl+C для выхода в главное меню)",
-		Items:             itemStrings,
-		StartInSearchMode: true,
-		Searcher:          searcher,
-	}
-
-	index, _, err := prompt.Run()
+	// Запускаем Bubble Tea приложение
+	p := bubbletea.NewProgram(model)
+	finalModel, err := p.Run()
 	if err != nil {
-		// Проверяем, была ли нажата комбинация для выхода в главное меню
-		if strings.Contains(err.Error(), "interrupt") {
-			return config.DistroComponent{}, ErrExitToMainMenu
-		}
-		return config.DistroComponent{}, errors.New("выбор отменен")
+		return config.DistroComponent{}, fmt.Errorf("ошибка запуска интерфейса выбора: %w", err)
 	}
 
-	return displayItems[index].Component, nil
+	// Извлекаем результат
+	resultModel := finalModel.(ComponentSelectionModel)
+	if resultModel.IsCancelled() {
+		return config.DistroComponent{}, ErrExitToMainMenu
+	}
+
+	return resultModel.GetSelectedComponent(), nil
 }
 
-// SelectPatch создает стрелочный интерфейс для выбора патча с поиском
+// SelectPatch создает интерфейс выбора патча используя Bubble Tea
 func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error) {
 	if len(patches) == 0 {
 		return core.PatchInfo{}, errors.New("список патчей пуст")
 	}
 
-	// Создаем расширенную информацию о патчах для отображения
-	var patchInfos []PatchDisplayInfo
-	for _, patch := range patches {
-		patchInfo := PatchDisplayInfo{
-			Patch:       patch,
-			DisplayText: buildPatchDisplayText(patch),
-		}
-		patchInfos = append(patchInfos, patchInfo)
-	}
+	// Создаем модель выбора патчей
+	model := NewPatchSelectionModel(label, patches)
 
-	// Создаем список строк для отображения
-	itemStrings := make([]string, len(patchInfos))
-	for i, info := range patchInfos {
-		itemStrings[i] = info.DisplayText
-	}
-
-	// Функция поиска по патчам
-	searcher := func(input string, index int) bool {
-		patch := patchInfos[index].Patch
-		inputLower := strings.ToLower(input)
-
-		return strings.Contains(strings.ToLower(patch.ShortName), inputLower) ||
-			strings.Contains(strings.ToLower(patch.Description), inputLower) ||
-			strings.Contains(strings.ToLower(patchInfos[index].DisplayText), inputLower)
-	}
-
-	DisableConsoleBeep()
-	defer RestoreConsoleBeep()
-
-	prompt := promptui.Select{
-		Label:             label + " (Ctrl+C для выхода в главное меню)",
-		Items:             itemStrings,
-		StartInSearchMode: true,
-		Searcher:          searcher,
-		Size:              10, // Ограничение количества отображаемых элементов
-	}
-
-	index, _, err := prompt.Run()
+	// Запускаем Bubble Tea приложение
+	p := bubbletea.NewProgram(model)
+	finalModel, err := p.Run()
 	if err != nil {
-		// Проверяем, была ли нажата комбинация для выхода в главное меню
-		if strings.Contains(err.Error(), "interrupt") {
-			return core.PatchInfo{}, ErrExitToMainMenu
-		}
-		return core.PatchInfo{}, errors.New("выбор отменен")
+		return core.PatchInfo{}, fmt.Errorf("ошибка запуска интерфейса выбора: %w", err)
 	}
 
-	return patchInfos[index].Patch, nil
+	// Извлекаем результат
+	resultModel := finalModel.(PatchSelectionModel)
+	if resultModel.IsCancelled() {
+		return core.PatchInfo{}, ErrExitToMainMenu
+	}
+
+	return resultModel.GetSelectedPatch(), nil
 }
 
 // PatchDisplayInfo представляет информацию о патче для отображения в интерфейсе

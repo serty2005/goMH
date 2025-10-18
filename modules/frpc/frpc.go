@@ -2,11 +2,11 @@ package frpc
 
 import (
 	"archive/zip"
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"goMH/tui"
 	"io"
 	"net/http"
 	"os"
@@ -49,10 +49,11 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 }
 func (m *Module) runDiagnosticsWorkflow(am core.AssetManager, wu core.WinUtils) error {
 	fmt.Println("\nОбнаружена существующая установка FRPC.")
-	fmt.Print("Введите 'R' для добавления порта, 'C' для полной переустановки или 'U' для удаления (R/C/U): ")
-	reader := bufio.NewReader(os.Stdin)
-	choice, _ := reader.ReadString('\n')
-	choice = strings.TrimSpace(strings.ToUpper(choice))
+	choiceStr, err := tui.GetUserInput("Введите 'R' для добавления порта, 'C' для полной переустановки или 'U' для удаления (R/C/U)")
+	if err != nil {
+		return fmt.Errorf("ошибка получения ввода: %w", err)
+	}
+	choice := strings.TrimSpace(strings.ToUpper(choiceStr))
 	switch choice {
 	case "R":
 		return m.runAddPortWorkflow(wu, true)
@@ -60,9 +61,11 @@ func (m *Module) runDiagnosticsWorkflow(am core.AssetManager, wu core.WinUtils) 
 		fmt.Println("Выполняем полную переустановку...")
 		return m.runFullInstallWorkflow(am, wu, true)
 	case "U":
-		fmt.Print("ВНИМАНИЕ: Это полностью удалит FRPC. Вы уверены? (y/n): ")
-		confirm, _ := reader.ReadString('\n')
-		if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+		confirmStr, err := tui.GetUserInput("ВНИМАНИЕ: Это полностью удалит FRPC. Вы уверены? (y/n)")
+		if err != nil {
+			return fmt.Errorf("ошибка получения подтверждения: %w", err)
+		}
+		if strings.TrimSpace(strings.ToLower(confirmStr)) != "y" {
 			fmt.Println("Удаление отменено.")
 			return nil
 		}
@@ -84,15 +87,19 @@ func (m *Module) runFullInstallWorkflow(am core.AssetManager, wu core.WinUtils, 
 	return m.runAddPortWorkflow(wu, false)
 }
 func (m *Module) runAddPortWorkflow(wu core.WinUtils, isAddingToExisting bool) error {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Введите локальный порт для туннеля (например, 5985 для WinRM): ")
-	localPortStr, _ := reader.ReadString('\n')
+	localPortStr, err := tui.GetUserInput("Введите локальный порт для туннеля (например, 5985 для WinRM)")
+	if err != nil {
+		return fmt.Errorf("ошибка получения порта: %w", err)
+	}
 	localPortStr = strings.TrimSpace(localPortStr)
 	if localPortStr == "" {
 		localPortStr = "5985"
 	}
-	fmt.Print("Введите имя этого узла (например, SRV-BACKOFFICE-01): ")
-	alias, _ := reader.ReadString('\n')
+
+	alias, err := tui.GetUserInput("Введите имя этого узла (например, SRV-BACKOFFICE-01)")
+	if err != nil {
+		return fmt.Errorf("ошибка получения имени узла: %w", err)
+	}
 	alias = strings.TrimSpace(alias)
 	freePort, err := m.findFreePort()
 	if err != nil {
@@ -223,10 +230,11 @@ func (m *Module) findFreePort() (int, error) {
 	}
 	if hasOfflineProxy {
 		fmt.Println("\nВНИМАНИЕ: Обнаружены оффлайн-прокси. Автоматический выбор порта рискован.")
-		reader := bufio.NewReader(os.Stdin)
 		for {
-			fmt.Print("Пожалуйста, введите желаемый удаленный порт вручную: ")
-			portStr, _ := reader.ReadString('\n')
+			portStr, err := tui.GetUserInput("Пожалуйста, введите желаемый удаленный порт вручную")
+			if err != nil {
+				return 0, fmt.Errorf("ошибка получения порта: %w", err)
+			}
 			port, err := strconv.Atoi(strings.TrimSpace(portStr))
 			if err != nil {
 				fmt.Println("Неверный ввод. Пожалуйста, введите число.")

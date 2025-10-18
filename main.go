@@ -16,15 +16,15 @@ import (
 	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
 	"goMH/tui"
+	"goMH/tui/bubbletea"
 	"goMH/winutils"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -183,38 +183,7 @@ func getConfigPath(configFlag *string) (string, error) {
 	return tempFile.Name(), nil
 }
 
-func cleanupTempDir() {
-	tempDir := filepath.Join(".", "temp")
-	if _, err := os.Stat(tempDir); err == nil {
-		if err := os.RemoveAll(tempDir); err != nil {
-			fmt.Printf("Предупреждение: не удалось удалить временную директорию %s: %v\n", tempDir, err)
-		} else {
-			fmt.Println("Временная директория temp успешно очищена.")
-		}
-	}
-}
-
-func setupSignalHandler() {
-	// Канал для получения сигналов завершения
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-
-	// Горутина для обработки сигналов
-	go func() {
-		sig := <-sigChan
-		fmt.Printf("\nПолучен сигнал %v. Выполняется очистка временных файлов...\n", sig)
-		cleanupTempDir()
-		os.Exit(0)
-	}()
-}
-
 func main() {
-	// Устанавливаем обработчик сигналов для принудительного завершения
-	setupSignalHandler()
-
-	// Добавляем очистку временной папки при нормальном завершении приложения
-	defer cleanupTempDir()
-
 	// 0. Обработка аргументов командной строки
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
 	flag.Parse()
@@ -223,13 +192,11 @@ func main() {
 	if !winutils.IsAdmin() {
 		tui.Error("Ошибка: Для выполнения требуются права администратора.")
 		tui.Error("Пожалуйста, запустите эту программу от имени Администратора.")
-		fmt.Println("\nНажмите Enter для выхода...")
-		fmt.Scanln()
 		os.Exit(1)
 	}
 	tui.Success("Приложение запущено с правами администратора.")
 
-	// 2. Получение пути к конфигурации (новая логика)
+	// 2. Получение пути к конфигурации
 	finalConfigPath, err := getConfigPath(configPathFlag)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось определить источник конфигурации: %v", err)
@@ -242,16 +209,18 @@ func main() {
 	}
 
 	// 4. Инициализация менеджера ресурсов
+	// Менеджер ресурсов отвечает за скачивание, кэширование и распаковку файлов
 	assetManager, err := assetmgr.New(cfg)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
 	}
 
-	// Создаём реальный объект утилит
+	// Создаём реальный объект утилит для работы с ОС
+	// Реализует интерфейс core.WinUtils для взаимодействия с Windows
 	RealWinUtils := &RealWinUtils{}
 
 	// 5. Регистрация всех доступных модулей
-	// map хранит core.Installer
+	// Карта содержит все модули, реализующие интерфейс core.Installer
 	registeredModules := map[string]core.Installer{
 		"VComCaster":    &vcomcaster.Module{},
 		"iiko":          &distro.Module{},
@@ -264,40 +233,28 @@ func main() {
 		"UTM":           &utm.Module{},
 	}
 
-	// 6. Основной цикл меню
-	for {
-		var availableModules []tui.Installer
-		for _, modDef := range cfg.Modules {
-			if module, ok := registeredModules[modDef.ID]; ok {
-				availableModules = append(availableModules, module)
-			}
+	// 6. Создание списка доступных модулей из конфигурации
+	// Фильтруем модули согласно настройкам в конфигурационном файле
+	var availableModules []core.Installer
+	for _, modDef := range cfg.Modules {
+		if module, ok := registeredModules[modDef.ID]; ok {
+			availableModules = append(availableModules, module)
 		}
+	}
 
-		if len(availableModules) == 0 {
-			log.Fatal("В конфигурации не определено ни одного доступного модуля.")
-		}
+	if len(availableModules) == 0 {
+		log.Fatal("В конфигурации не определено ни одного доступного модуля.")
+	}
 
-		selected, err := tui.ShowMenu(availableModules)
-		if err != nil {
-			tui.Info("Выход из программы.")
-			os.Exit(0)
-		}
+	// 7. Создание основной модели Bubble Tea с доступными модулями и зависимостями
+	// Модель будет управлять интерфейсом и состоянием приложения
+	initialModel := bubbletea.NewMainModel(availableModules, assetManager, RealWinUtils)
 
-		selectedModule := selected.(core.Installer)
+	// 8. Запуск программы Bubble Tea
+	// Инициализация и запуск интерактивного интерфейса
+	program := tea.NewProgram(initialModel)
 
-		// Очищаем консоль перед переходом в подменю модуля
-		tui.ClearScreen()
-
-		err = selectedModule.Run(assetManager, RealWinUtils)
-		if err != nil {
-			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", err))
-		} else {
-			tui.Success("\n--- Операция завершена успешно. ---")
-		}
-
-		// Очищаем консоль перед сообщением о возврате в меню
-		tui.ClearScreen()
-		fmt.Println("\nНажмите Enter, чтобы вернуться в главное меню...")
-		fmt.Scanln()
+	if _, err := program.Run(); err != nil {
+		log.Fatalf("Критическая ошибка: не удалось запустить приложение Bubble Tea: %v", err)
 	}
 }

@@ -1,7 +1,6 @@
 package regime
 
 import (
-	"bufio"
 	"fmt"
 	"goMH/core"
 	"goMH/tui"
@@ -17,24 +16,20 @@ type Module struct{}
 
 // getCredentials запрашивает у пользователя логин и пароль для установки Regime
 func getCredentials() (username, password string, err error) {
-	scanner := bufio.NewScanner(os.Stdin)
-
 	// Запрос логина
-	fmt.Print("Введите логин администратора: ")
-	if !scanner.Scan() {
-		return "", "", fmt.Errorf("ошибка чтения логина")
+	username, err = tui.GetUserInput("Введите логин администратора")
+	if err != nil {
+		return "", "", fmt.Errorf("ошибка получения логина: %w", err)
 	}
-	username = strings.TrimSpace(scanner.Text())
 	if username == "" {
 		return "", "", fmt.Errorf("логин не может быть пустым")
 	}
 
 	// Запрос пароля
-	fmt.Print("Введите пароль администратора: ")
-	if !scanner.Scan() {
-		return "", "", fmt.Errorf("ошибка чтения пароля")
+	password, err = tui.GetUserInput("Введите пароль администратора")
+	if err != nil {
+		return "", "", fmt.Errorf("ошибка получения пароля: %w", err)
 	}
-	password = strings.TrimSpace(scanner.Text())
 	if password == "" {
 		return "", "", fmt.Errorf("пароль не может быть пустым")
 	}

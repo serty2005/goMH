@@ -8,20 +8,32 @@ import (
 	"strings"
 )
 
+// Module представляет модуль для установки УТМ
 type Module struct{}
 
+// ID возвращает идентификатор модуля
 func (m *Module) ID() string {
 	return "UTM"
 }
 
+// MenuText возвращает текст для отображения в меню
 func (m *Module) MenuText() string {
 	return "Установить УТМ (ЕГАИС)"
 }
 
+// Run запускает процесс установки УТМ
+// Возвращает ошибку для совместимости с интерфейсом Installer
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
+	// Выполняем установку синхронно для совместимости с интерфейсом
+	return InstallUTMCore(am, wu)
+}
+
+// InstallUTMCore содержит основную логику установки УТМ
+// Выделена в отдельную функцию для удобства тестирования и повторного использования
+func InstallUTMCore(am core.AssetManager, wu core.WinUtils) error {
 	cfg := am.Cfg().UTMConfig
 
-	tui.Title(fmt.Sprintf("\n--- Начало установки: %s ---", m.MenuText()))
+	tui.Title(fmt.Sprintf("\n--- Начало установки: %s ---", "Установить УТМ (ЕГАИС)"))
 
 	if cfg.AssetID == "" {
 		return errors.New("в секции 'utm_config' не указан asset_id")

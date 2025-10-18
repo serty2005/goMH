@@ -3,6 +3,7 @@ package core
 import (
 	"goMH/config"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -48,8 +49,12 @@ type WinUtils interface {
 // AssetManager определяет контракт для менеджера ресурсов.
 type AssetManager interface {
 	Get(assetName string) (string, error)
+	// Устаревшие синхронные методы (оставлены для обратной совместимости)
 	DownloadHTTPWithProgress(httpURL, localPath string) (bool, error)
 	DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error)
+	// Новые асинхронные методы для работы с Bubble Tea
+	DownloadHTTPCmd(taskID, httpURL, localPath string) tea.Cmd
+	DownloadFTPCmd(taskID string, ftpCfg config.FTPConfig, ftpPath, localPath string) tea.Cmd
 	GetFastestFTP(ftpConfigs []config.FTPConfig, testFilePath string) (config.FTPConfig, error)
 	ExtractFile(zipPath, pathInZip, destPath string) error
 	ListFTP(ftpCfg config.FTPConfig, path string) ([]FTPEntry, error) // <-- Сигнатура изменена

@@ -6,13 +6,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"goMH/tui"
-
-	"github.com/jlaffaye/ftp"
 )
 
 const (
@@ -150,66 +146,4 @@ func (h *iikoHandler) installComponent(component config.DistroComponent, version
 
 func (h *iikoHandler) installPortable(component config.DistroComponent, version string) error {
 	return h.dm.installPortable(h, "iiko", component, version)
-}
-
-func discoverIikoOfficialVersions() ([]string, error) {
-	var allErrors []string
-	for _, host := range iikoFtpHosts {
-		c, err := ftp.Dial(host, ftp.DialWithTimeout(15*time.Second))
-		if err != nil {
-			allErrors = append(allErrors, fmt.Sprintf("ошибка подключения к %s: %v", host, err))
-			continue
-		}
-		err = c.Login(iikoFtpUser, iikoFtpPass)
-		if err != nil {
-			_ = c.Quit()
-			allErrors = append(allErrors, fmt.Sprintf("ошибка входа на %s: %v", host, err))
-			continue
-		}
-		entries, err := c.List(iikoReleasesPath)
-		_ = c.Quit()
-		if err != nil {
-			allErrors = append(allErrors, fmt.Sprintf("ошибка получения списка с %s: %v", host, err))
-			continue
-		}
-		versionRegex := regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`)
-		var versions []string
-		for _, entry := range entries {
-			if entry.Type == ftp.EntryTypeFolder && versionRegex.MatchString(entry.Name) {
-				if compareSemanticVersions(entry.Name, iikoMinVersion) >= 0 {
-					versions = append(versions, entry.Name)
-				}
-			}
-		}
-		sort.Slice(versions, func(i, j int) bool {
-			return compareSemanticVersions(versions[i], versions[j]) > 0
-		})
-		return versions, nil
-	}
-	return nil, fmt.Errorf("не удалось получить данные ни с одного из FTP-серверов iiko: %s", strings.Join(allErrors, "; "))
-}
-
-func compareSemanticVersions(v1, v2 string) int {
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
-	maxLen := len(parts1)
-	if len(parts2) > maxLen {
-		maxLen = len(parts2)
-	}
-	for i := 0; i < maxLen; i++ {
-		var num1, num2 int
-		if i < len(parts1) {
-			num1, _ = strconv.Atoi(parts1[i])
-		}
-		if i < len(parts2) {
-			num2, _ = strconv.Atoi(parts2[i])
-		}
-		if num1 > num2 {
-			return 1
-		}
-		if num1 < num2 {
-			return -1
-		}
-	}
-	return 0
 }

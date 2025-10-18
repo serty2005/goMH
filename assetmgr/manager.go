@@ -8,6 +8,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/tui"
+	bubbletea "goMH/tui/bubbletea"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jlaffaye/ftp"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
@@ -40,6 +42,8 @@ func (m *Manager) Cfg() *config.Config {
 	return m.cfg
 }
 
+// DownloadToCache синхронно скачивает ресурс в кэш.
+// Для асинхронного скачивания используйте CreateAssetDownloadCmd.
 func (m *Manager) DownloadToCache(assetName string) (string, error) {
 	assetInfo, ok := m.cfg.AssetCatalog[assetName]
 	if !ok {
@@ -222,6 +226,201 @@ func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, err
 	}
 
 	return false, nil
+}
+
+// DownloadHTTPCmd создает команду Bubble Tea для асинхронного скачивания файла по HTTP.
+// taskID - уникальный идентификатор задачи для отслеживания прогресса.
+// httpURL - URL для скачивания.
+// localPath - локальный путь для сохранения файла.
+func (m *Manager) DownloadHTTPCmd(taskID, httpURL, localPath string) tea.Cmd {
+	return func() tea.Msg {
+		return m.downloadHTTPAsync(taskID, httpURL, localPath)
+	}
+}
+
+// DownloadFTPCmd создает команду Bubble Tea для асинхронного скачивания файла по FTP.
+// taskID - уникальный идентификатор задачи для отслеживания прогресса.
+// ftpCfg - конфигурация FTP-сервера.
+// ftpPath - путь к файлу на FTP-сервере.
+// localPath - локальный путь для сохранения файла.
+func (m *Manager) DownloadFTPCmd(taskID string, ftpCfg config.FTPConfig, ftpPath, localPath string) tea.Cmd {
+	return func() tea.Msg {
+		return m.downloadFTPAsync(taskID, ftpCfg, ftpPath, localPath)
+	}
+}
+
+// downloadHTTPAsync выполняет асинхронное скачивание файла по HTTP с отправкой сообщений прогресса.
+func (m *Manager) downloadHTTPAsync(taskID, httpURL, localPath string) tea.Msg {
+	fileName := filepath.Base(httpURL)
+
+	// Создаем директорию для сохранения файла
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err))
+	}
+
+	// Создаем HTTP-запрос
+	req, err := http.NewRequest("GET", httpURL, nil)
+	if err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, err)
+	}
+
+	// Выполняем запрос
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, err)
+	}
+	defer resp.Body.Close()
+
+	// Проверяем статус ответа
+	if resp.StatusCode != http.StatusOK {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("bad status: %s", resp.Status))
+	}
+
+	remoteSize := resp.ContentLength
+
+	// Проверяем, существует ли файл и совпадает ли размер
+	if fi, err := os.Stat(localPath); err == nil {
+		if remoteSize > 0 && fi.Size() == remoteSize {
+			return bubbletea.NewDownloadCompleteMsg(taskID, localPath, nil)
+		}
+	}
+
+	// Создаем файл для записи
+	destFile, err := os.Create(localPath)
+	if err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, err)
+	}
+	defer destFile.Close()
+
+	// Создаем прогресс-бар
+	bar := CreateProgressBar(remoteSize, fileName)
+
+	// Копируем данные с обновлением прогресса
+	_, err = io.Copy(io.MultiWriter(destFile, bar), resp.Body)
+	if err != nil {
+		os.Remove(localPath)
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, err)
+	}
+
+	return bubbletea.NewDownloadCompleteMsg(taskID, localPath, nil)
+}
+
+// downloadFTPAsync выполняет асинхронное скачивание файла по FTP с отправкой сообщений прогресса.
+func (m *Manager) downloadFTPAsync(taskID string, ftpCfg config.FTPConfig, ftpPath, localPath string) tea.Msg {
+	fileName := filepath.Base(ftpPath)
+
+	// Создаем директорию для сохранения файла
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err))
+	}
+
+	// Формируем адрес сервера
+	hostWithPort := ftpCfg.Host
+	if ftpCfg.Port != 0 && !strings.Contains(hostWithPort, ":") {
+		hostWithPort = fmt.Sprintf("%s:%d", ftpCfg.Host, ftpCfg.Port)
+	}
+
+	// Подключаемся к FTP-серверу
+	c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(10*time.Second))
+	if err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("не удалось подключиться к FTP %s: %w", hostWithPort, err))
+	}
+	defer c.Quit()
+
+	// Авторизуемся
+	if err := c.Login(ftpCfg.User, ftpCfg.Pass); err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("ошибка входа на FTP %s: %w", hostWithPort, err))
+	}
+
+	// Получаем размер файла
+	remoteSize, err := c.FileSize(ftpPath)
+	if err != nil {
+		remoteSize = -1
+	}
+
+	// Проверяем, существует ли файл и совпадает ли размер
+	if fi, err := os.Stat(localPath); err == nil {
+		if remoteSize > 0 && fi.Size() == remoteSize {
+			return bubbletea.NewDownloadCompleteMsg(taskID, localPath, nil)
+		}
+	}
+
+	// Начинаем скачивание
+	resp, err := c.Retr(ftpPath)
+	if err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("не удалось начать скачивание с FTP: %w", err))
+	}
+	defer resp.Close()
+
+	// Создаем файл для записи
+	destFile, err := os.Create(localPath)
+	if err != nil {
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("не удалось создать локальный файл: %w", err))
+	}
+	defer destFile.Close()
+
+	// Создаем прогресс-бар
+	bar := CreateProgressBar(remoteSize, fileName)
+
+	// Копируем данные с обновлением прогресса
+	_, err = io.Copy(io.MultiWriter(destFile, bar), resp)
+	if err != nil {
+		os.Remove(localPath)
+		return bubbletea.NewDownloadCompleteMsg(taskID, localPath, fmt.Errorf("ошибка во время копирования потока: %w", err))
+	}
+
+	return bubbletea.NewDownloadCompleteMsg(taskID, localPath, nil)
+}
+
+// CreateHTTPDownloadCmd создает команду для скачивания файла по HTTP с автоматическим выбором имени задачи.
+// url - URL для скачивания.
+// localPath - локальный путь для сохранения файла.
+// Возвращает команду Bubble Tea и ID задачи.
+func (m *Manager) CreateHTTPDownloadCmd(url, localPath string) (tea.Cmd, string) {
+	taskID := fmt.Sprintf("http_download_%d", time.Now().UnixNano())
+	return m.DownloadHTTPCmd(taskID, url, localPath), taskID
+}
+
+// CreateFTPDownloadCmd создает команду для скачивания файла по FTP с автоматическим выбором имени задачи.
+// ftpCfg - конфигурация FTP-сервера.
+// ftpPath - путь к файлу на FTP-сервере.
+// localPath - локальный путь для сохранения файла.
+// Возвращает команду Bubble Tea и ID задачи.
+func (m *Manager) CreateFTPDownloadCmd(ftpCfg config.FTPConfig, ftpPath, localPath string) (tea.Cmd, string) {
+	taskID := fmt.Sprintf("ftp_download_%d", time.Now().UnixNano())
+	return m.DownloadFTPCmd(taskID, ftpCfg, ftpPath, localPath), taskID
+}
+
+// CreateAssetDownloadCmd создает команду для скачивания ассета из конфигурации с автоматическим выбором имени задачи.
+// assetName - имя ассета из конфигурации.
+// Возвращает команду Bubble Tea, ID задачи и локальный путь к файлу в кэше.
+func (m *Manager) CreateAssetDownloadCmd(assetName string) (tea.Cmd, string, string, error) {
+	assetInfo, ok := m.cfg.AssetCatalog[assetName]
+	if !ok {
+		return nil, "", "", fmt.Errorf("ресурс '%s' не найден в каталоге", assetName)
+	}
+
+	fileName := filepath.Base(assetInfo.URL)
+	localCachePath := filepath.Join(m.cfg.AssetsCachePath, fileName)
+
+	downloadMethod := strings.ToUpper(assetInfo.DownloadMethod)
+	if downloadMethod == "" {
+		downloadMethod = "HTTP"
+	}
+
+	var cmd tea.Cmd
+	taskID := fmt.Sprintf("asset_download_%s_%d", assetName, time.Now().UnixNano())
+
+	if downloadMethod == "HTTP" {
+		cmd = m.DownloadHTTPCmd(taskID, assetInfo.URL, localCachePath)
+	} else if downloadMethod == "FTP" {
+		parsedURL, _ := url.Parse(assetInfo.URL)
+		cmd = m.DownloadFTPCmd(taskID, m.cfg.FTP[0], parsedURL.Path, localCachePath)
+	} else {
+		return nil, "", "", fmt.Errorf("неизвестный метод загрузки: %s", downloadMethod)
+	}
+
+	return cmd, taskID, localCachePath, nil
 }
 
 // UnpackToFlatDir распаковывает архив в указанную директорию,
