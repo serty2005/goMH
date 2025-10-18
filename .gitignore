@@ -5,3 +5,4 @@ go_files_dump.txt
 pipeline*
 .kilocode
 *.pdf
+*.py
