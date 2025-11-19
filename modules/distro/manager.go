@@ -81,7 +81,6 @@ type brandHandler interface {
 func (dm *DistroManager) runWorkflow(h brandHandler) error {
 	component, err := h.selectComponentMenu()
 	if err != nil {
-		slog.Error("Не без ошибок", "error", err)
 		// Проверяем, является ли ошибка выходом в главное меню
 		if err == tui.ErrExitToMainMenu {
 			slog.Debug("Выбор компонента отменен пользователем")
@@ -92,47 +91,52 @@ func (dm *DistroManager) runWorkflow(h brandHandler) error {
 
 	// Для компонентов без версий (iikoCard, Syrve Loyalty) сразу запускаем установку.
 	isVersioned := component.URLTemplate == "" || strings.Contains(component.URLTemplate, "{{VERSION}}")
-	slog.Debug("isVersioned = ", "isVersioned", isVersioned)
 	if !isVersioned {
 		return h.installComponent(component, "")
 	}
 
-	// Проверка существующей установки для версионных компонентов
-	installedVer, err := dm.WU.GetFileVersion(component.RunAfter)
-	slog.Debug("installedVer = ", "installedVer", installedVer)
-	if err == nil && component.PortableArchiveKey != "" {
-		tui.Warn(fmt.Sprintf("Обнаружена установленная версия: %s", installedVer))
-		slog.Info("Обнаружена установленная версия", "version", installedVer)
-		choice, err := dm.promptUpdateOrPortable(installedVer)
-		if err != nil || choice == "cancel" {
-			slog.Info("Выбор действия отменен пользователем")
+	// Меню выбора режима установки (Обычная / Портативная)
+	mode := "install"
+	if component.PortableArchiveKey != "" {
+		tui.DisableConsoleBeep()
+		prompt := promptui.Select{
+			Label: fmt.Sprintf("Выберите режим установки для %s", component.MenuText),
+			Items: []string{"Стандартная установка (в Program Files)", "Портативная версия (распаковка)", "Назад"},
+		}
+		_, result, err := prompt.Run()
+		tui.RestoreConsoleBeep()
+		if err != nil || result == "Назад" {
 			return nil
 		}
 
-		if choice == "portable" {
-			slog.Info("Выбор портативной установки")
-			versions, err := h.getAvailablePortableVersions(component)
-			if err != nil {
-				slog.Error("Не без ошибок", "error", err)
-				return err
-			}
-			if len(versions) == 0 {
-				slog.Error("Не без ошибок", "error", fmt.Errorf("не найдено доступных портативных версий для %s", component.MenuText))
-				return fmt.Errorf("не найдено доступных портативных версий для %s", component.MenuText)
-			}
-			version, err := dm.selectVersionMenu(versions, "Выберите версию для портативной установки")
-			if err != nil {
-				// Проверяем, является ли ошибка выходом в главное меню
-				if err.Error() == "exit_to_main_menu" {
-					return tui.ErrExitToMainMenu
-				}
-				return err
-			}
-			return h.installPortable(component, version)
+		if result == "Портативная версия (распаковка)" {
+			mode = "portable"
 		}
 	}
 
-	// Специальная логика ТОЛЬКО для iikoFront
+	if mode == "portable" {
+		slog.Info("Выбор портативной установки")
+		versions, err := h.getAvailablePortableVersions(component)
+		if err != nil {
+			slog.Error("Не без ошибок", "error", err)
+			return err
+		}
+		if len(versions) == 0 {
+			return fmt.Errorf("не найдено доступных портативных версий для %s", component.MenuText)
+		}
+		version, err := dm.selectVersionMenu(versions, "Выберите версию для портативной установки")
+		if err != nil {
+			if err.Error() == "exit_to_main_menu" {
+				return tui.ErrExitToMainMenu
+			}
+			return err
+		}
+		return h.installPortable(component, version)
+	}
+
+	// Стандартная установка
+
+	// Специальная логика ТОЛЬКО для iikoFront (стандартная установка)
 	if component.ID == "iiko_front" {
 		slog.Info("Выбран компонент iikoFront")
 		return dm.runIikoFrontInstall(h, component)
@@ -149,7 +153,6 @@ func (dm *DistroManager) runWorkflow(h brandHandler) error {
 	}
 	version, err := dm.selectVersionMenu(versions, "Выберите версию для установки")
 	if err != nil {
-		// Проверяем, является ли ошибка выходом в главное меню
 		if err.Error() == "exit_to_main_menu" {
 			return tui.ErrExitToMainMenu
 		}
@@ -161,16 +164,13 @@ func (dm *DistroManager) runWorkflow(h brandHandler) error {
 
 // runIikoFrontInstall - специальная логика ТОЛЬКО для iikoFront.
 func (dm *DistroManager) runIikoFrontInstall(h brandHandler, component config.DistroComponent) error {
-	slog.Info("Выбран компонент iikoFront")
 	versions, err := h.getAvailableVersions()
 	if err != nil {
 		slog.Error("Не без ошибок", "error", err)
 		return err
 	}
-	slog.Debug("versions", "versions", versions)
 	version, err := dm.selectVersionMenu(versions, "Выберите версию iikoFront для установки")
 	if err != nil {
-		// Проверяем, является ли ошибка выходом в главное меню
 		if err.Error() == "exit_to_main_menu" {
 			return tui.ErrExitToMainMenu
 		}
@@ -184,7 +184,6 @@ func (dm *DistroManager) runIikoFrontInstall(h brandHandler, component config.Di
 		tui.Warn(fmt.Sprintf("Ошибка при выборе патча: %v. Установка продолжится без него.", err))
 		slog.Error("Не без ошибок", "error", err)
 	}
-	slog.Debug("selectedPatch", "selectedPatch", selectedPatch)
 
 	if err := h.installComponent(component, version); err != nil {
 		slog.Error("Не без ошибок", "error", err)
@@ -193,9 +192,12 @@ func (dm *DistroManager) runIikoFrontInstall(h brandHandler, component config.Di
 
 	if patchSelected {
 		installDir := filepath.Dir(component.RunAfter)
-		backupDir := filepath.Join(dm.AM.Cfg().RootPath, "patches_backup", version)
-		slog.Debug("Патч выбран, применяем", "installDir", installDir, "backupDir", backupDir)
-		if err := ApplyPatch(dm.AM, dm.WU, selectedPatch, installDir, backupDir); err != nil {
+		// ИСПРАВЛЕНИЕ: Бэкап теперь создается в папке версии дистрибутива, а не в отдельной patches_backup
+		// Пример: C:\MH\iiko_9.2.8035.0\backup_123
+		versionDir := filepath.Join(dm.AM.Cfg().RootPath, fmt.Sprintf("iiko_%s", version))
+		slog.Debug("Патч выбран, применяем", "installDir", installDir, "backupDir", versionDir)
+
+		if err := ApplyPatch(dm.AM, dm.WU, selectedPatch, installDir, versionDir); err != nil {
 			slog.Error("Не без ошибок", "error", err)
 			tui.Error(fmt.Sprintf("Критическая ошибка при применении патча: %v", err))
 		}
@@ -215,7 +217,7 @@ func (dm *DistroManager) runIikoFrontInstall(h brandHandler, component config.Di
 	return nil
 }
 
-// promptUpdateOrPortable - диалог выбора действия.
+// promptUpdateOrPortable - Устаревший метод, оставлен для совместимости, но не используется в новом flow
 func (dm *DistroManager) promptUpdateOrPortable(installedVer string) (string, error) {
 	tui.DisableConsoleBeep()
 	defer tui.RestoreConsoleBeep()
@@ -254,7 +256,6 @@ func (dm *DistroManager) selectVersionMenu(versions []string, label string) (str
 	}
 	_, result, err := prompt.Run()
 	if err != nil {
-		// Проверяем, была ли нажата комбинация для выхода в главное меню
 		if strings.Contains(err.Error(), "interrupt") {
 			return "", fmt.Errorf("exit_to_main_menu")
 		}
@@ -269,7 +270,7 @@ func (dm *DistroManager) runInstaller(installerPath, args string) error {
 	tempLogPath := filepath.Join(dm.AM.Cfg().RootPath, "temp", logFileName)
 	_ = os.MkdirAll(filepath.Dir(tempLogPath), 0755)
 
-	finalArgs := append(strings.Fields(args), "/log", tempLogPath) //Можно убрать, если не нужен лог установщика
+	finalArgs := append(strings.Fields(args), "/log", tempLogPath)
 	slog.Info("Запуск установщика", "path", installerPath, "args", finalArgs)
 	tui.InfoF("Запуск установщика: %s с аргументами %v", installerPath, finalArgs)
 	tui.Info("... ИДЕТ УСТАНОВКА, ПОЖАЛУЙСТА, ОЖИДАЙТЕ ...")
@@ -305,7 +306,6 @@ func (dm *DistroManager) installPortable(h brandHandler, brandName string, compo
 	slog.Info("Начало установки портативной версии", "brand", brandName, "component", component.MenuText, "version", version)
 
 	if component.PortableArchiveKey == "" {
-		slog.Error("Для компонента не задан ключ 'portable_archive_key'", "component", component.MenuText)
 		return fmt.Errorf("для компонента %s не задан ключ 'portable_archive_key'", component.MenuText)
 	}
 
@@ -315,7 +315,6 @@ func (dm *DistroManager) installPortable(h brandHandler, brandName string, compo
 	} else {
 		portableSrc = dm.AM.Cfg().DistroConfig.SyrvePortable
 	}
-	slog.Debug("portableSrc", "portableSrc", portableSrc)
 
 	var archiveName, downloadURL, ftpPath string
 	var useHttp bool
@@ -325,69 +324,51 @@ func (dm *DistroManager) installPortable(h brandHandler, brandName string, compo
 		tpl := portableSrc.HttpSource.ArchiveNames[component.PortableArchiveKey]
 		archiveName = strings.Replace(tpl, "{{version}}", version, 1)
 		downloadURL = fmt.Sprintf("%s/%s", strings.TrimSuffix(portableSrc.HttpSource.URL, "/"), archiveName)
-		slog.Debug("downloadURL", "downloadURL", downloadURL)
 	} else if portableSrc.FtpSource.Enabled {
 		useHttp = false
 		tpl := portableSrc.FtpSource.ArchiveNames[component.PortableArchiveKey]
 		archiveName = strings.Replace(tpl, "{{version}}", version, 1)
 		ftpPath = fmt.Sprintf("%s/%s", strings.TrimSuffix(portableSrc.FtpSource.Directory, "/"), archiveName)
-		slog.Debug("ftpPath", "ftpPath", ftpPath)
 	} else {
-		slog.Error("Не включен ни один источник для портативных версий")
 		return errors.New("не включен ни один источник для портативных версий")
 	}
 
-	// Создаем папку для версии портативного дистрибутива
-	versionDir := filepath.Join(dm.AM.Cfg().RootPath, "portable", brandName, version)
-	if err := os.MkdirAll(versionDir, 0755); err != nil {
-		slog.Error("Не удалось создать папку для портативной версии", "version", version, "error", err)
-		return fmt.Errorf("не удалось создать папку для портативной версии %s: %w", version, err)
+	// Временная директория для скачивания (чтобы не мусорить)
+	tempDir := filepath.Join(dm.AM.Cfg().RootPath, "temp", fmt.Sprintf("portable_dl_%d", time.Now().Unix()))
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return err
 	}
-	slog.Debug("versionDir", "versionDir", versionDir)
+	// Очистка в конце работы функции
+	defer os.RemoveAll(tempDir)
 
-	cachePath := filepath.Join(versionDir, filepath.Base(archiveName))
+	cachePath := filepath.Join(tempDir, filepath.Base(archiveName))
 
 	if useHttp {
 		_, err := dm.AM.DownloadHTTPWithProgress(downloadURL, cachePath)
 		if err != nil {
-			slog.Error("Не удалось скачать портативную версию", "downloadURL", downloadURL, "error", err)
 			return err
 		}
-		slog.Debug("Успешно скачали портативную версию через HTTP", "downloadURL", downloadURL, "cachePath", cachePath)
 	} else {
-		slog.Debug("Попытка скачать портативную версию через FTP", "ftpPath", ftpPath, "cachePath", cachePath)
 		var ftpCfg config.FTPConfig
 		if brandName == "syrve" {
-			slog.Info("Выбран компонент Syrve")
 			var err error
 			ftpCfg, err = dm.AM.GetFastestFTP(dm.AM.Cfg().FTP[1:], "/speedtest.txt")
 			if err != nil {
-				slog.Error("Не удалось определить быстрый FTP-сервер", "error", err)
 				return err
 			}
-			slog.Debug("Выбран быстрый FTP-сервер", "ftpCfg", ftpCfg)
 		} else {
 			ftpCfg = dm.AM.Cfg().FTP[0]
-			slog.Info("Выбран компонент Iiko, используем первый FTP-сервер", "ftpCfg", ftpCfg)
 		}
 
-		// Попытка скачать по FTP
 		_, err := dm.AM.DownloadFTPWithProgress(ftpCfg, ftpPath, cachePath)
 		if err != nil {
-			slog.Error("Не удалось скачать портативную версию через FTP", "ftpPath", ftpPath, "cachePath", cachePath, "error", err)
-			// Если FTP не сработал и HTTP источник включен, используем его как fallback
 			if portableSrc.HttpSource.Enabled {
-				slog.Info("FTP-сервер недоступен, используем HTTP как резервный источник")
-				tui.Warn(fmt.Sprintf("FTP-сервер недоступен, используем HTTP как резервный источник: %v", err))
+				tui.Warn(fmt.Sprintf("FTP недоступен, попытка HTTP: %v", err))
 				_, err := dm.AM.DownloadHTTPWithProgress(downloadURL, cachePath)
 				if err != nil {
-					slog.Error("Не удалось скачать портативную версию через HTTP", "downloadURL", downloadURL, "cachePath", cachePath, "error", err)
-					return fmt.Errorf("ошибка загрузки по FTP: %w, ошибка загрузки по HTTP: %v", err, err)
+					return fmt.Errorf("ошибка загрузки по FTP и HTTP: %v", err)
 				}
-				tui.Success("Файл успешно загружен по HTTP как резервный источник")
-				slog.Info("Успешно скачали портативную версию через HTTP", "downloadURL", downloadURL, "cachePath", cachePath)
 			} else {
-				slog.Error("Не удалось скачать портативную версию через FTP", "ftpPath", ftpPath, "cachePath", cachePath, "error", err)
 				return fmt.Errorf("ошибка загрузки по FTP: %w", err)
 			}
 		}
@@ -399,17 +380,38 @@ func (dm *DistroManager) installPortable(h brandHandler, brandName string, compo
 	slog.Info("Распаковка портативной версии", "cachePath", cachePath, "destDir", destDir)
 	tui.InfoF("Распаковка в: %s", destDir)
 
-	// Используем 7-Zip напрямую вместо встроенной распаковки
+	// Используем 7-Zip для умной распаковки (flattening)
 	sevenZipClient, err := dependencies.NewClient(dm.AM, dm.WU)
 	if err != nil {
-		slog.Error("Не удалось создать клиент 7-Zip", "error", err)
 		return fmt.Errorf("не удалось создать клиент 7-Zip: %w", err)
 	}
 
-	// Распаковываем архив с сохранением структуры папок
-	if err := sevenZipClient.Extract(cachePath, destDir, true); err != nil {
-		slog.Error("Ошибка распаковки архива", "cachePath", cachePath, "destDir", destDir, "error", err)
-		return fmt.Errorf("ошибка распаковки архива: %w", err)
+	// 1. Распаковываем во временную папку для анализа
+	extractTempDir := filepath.Join(tempDir, "extracted")
+	if err := sevenZipClient.Extract(cachePath, extractTempDir, true); err != nil {
+		return fmt.Errorf("ошибка первичной распаковки архива: %w", err)
+	}
+
+	// 2. Анализируем содержимое
+	entries, err := os.ReadDir(extractTempDir)
+	if err != nil {
+		return err
+	}
+
+	sourceDir := extractTempDir
+	// Если внутри только одна папка, спускаемся в неё
+	if len(entries) == 1 && entries[0].IsDir() {
+		sourceDir = filepath.Join(extractTempDir, entries[0].Name())
+		slog.Info("Обнаружена вложенная папка, извлекаем содержимое из неё", "subfolder", entries[0].Name())
+	}
+
+	// 3. Копируем из sourceDir в целевую destDir
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return err
+	}
+
+	if err := dm.WU.CopyDir(sourceDir, destDir); err != nil {
+		return fmt.Errorf("ошибка копирования файлов портативной версии: %w", err)
 	}
 
 	tui.Success("Портативная версия успешно установлена.")

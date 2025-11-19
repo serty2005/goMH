@@ -11,6 +11,13 @@ import (
 	"strings"
 )
 
+type SelfUpdateConfig struct {
+	Enabled      bool   `json:"enabled"`
+	ReferenceURL string `json:"reference_url"`
+	HashURL      string `json:"hash_url"`
+	TempDir      string `json:"temp_dir"`
+}
+
 // DistroComponent описывает компонент для установки (Front, BackOffice и т.д.).
 type DistroComponent struct {
 	ID                 string `json:"id"`
@@ -94,6 +101,7 @@ type UTMConfig struct {
 
 type Config struct {
 	RootPath            string               `json:"root_path"`
+	SelfUpdateConfig    SelfUpdateConfig     `json:"self_update_config"`
 	AssetsCachePath     string               `json:"assets_cache_path"`
 	LogLevel            string               `json:"log_level"`
 	FTP                 []FTPConfig          `json:"ftp_config"`

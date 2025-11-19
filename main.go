@@ -13,6 +13,7 @@ import (
 	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
+	"goMH/modules/selfupdate"
 	"goMH/modules/serviceutils"
 	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
@@ -26,6 +27,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -185,43 +187,84 @@ func getConfigPath(configFlag *string) (string, error) {
 	return tempFile.Name(), nil
 }
 
-func cleanupTempDir() {
-	tempDir := filepath.Join(".", "temp")
-	if _, err := os.Stat(tempDir); err == nil {
-		if err := os.RemoveAll(tempDir); err != nil {
-			fmt.Printf("Предупреждение: не удалось удалить временную директорию %s: %v\n", tempDir, err)
+// cleanupTempDir теперь ищет и удаляет папку temp как в CWD, так и в корне диска C:\MH (если задан)
+// Для упрощения мы жестко привязываемся к соглашению, что весь мусор лежит в ./temp относительно exe
+// или в C:\MH\temp, если конфиг указывает туда.
+func cleanupTempDir(rootPath string) {
+	// 1. Очистка temp рядом с exe (для конфигов и логов установщиков)
+	cwdTemp := filepath.Join(".", "temp")
+	if _, err := os.Stat(cwdTemp); err == nil {
+		slog.Info("Очистка временной директории", "path", cwdTemp)
+		if err := os.RemoveAll(cwdTemp); err != nil {
+			slog.Warn("Не удалось удалить временную директорию", "path", cwdTemp, "error", err)
 		} else {
-			fmt.Println("Временная директория temp успешно очищена.")
+			fmt.Println("Временные файлы приложения очищены.")
+		}
+	}
+
+	// 2. Очистка temp в корне установки (C:\MH\temp), если он отличается
+	if rootPath != "" {
+		rootTemp := filepath.Join(rootPath, "temp")
+		absCwd, _ := filepath.Abs(".")
+		absRoot, _ := filepath.Abs(rootPath)
+
+		// Проверяем, не одно и то же ли это
+		if absCwd != absRoot {
+			if _, err := os.Stat(rootTemp); err == nil {
+				slog.Info("Очистка корневой временной директории", "path", rootTemp)
+				if err := os.RemoveAll(rootTemp); err != nil {
+					slog.Warn("Не удалось удалить корневую временную директорию", "path", rootTemp, "error", err)
+				}
+			}
 		}
 	}
 }
 
-func setupSignalHandler() {
-	// Канал для получения сигналов завершения
+// cleanupOldExecutable проверяет наличие файла .old и удаляет его.
+func cleanupOldExecutable() {
+	exePath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	oldExePath := exePath + ".old"
+
+	if _, err := os.Stat(oldExePath); err == nil {
+		slog.Info("Обнаружен старый исполняемый файл, удаление...", "path", oldExePath)
+		// Даем системе немного времени, чтобы отпустить файл, если перезапуск произошел очень быстро
+		for i := 0; i < 3; i++ {
+			err := os.Remove(oldExePath)
+			if err == nil {
+				slog.Info("Старый файл успешно удален.")
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		slog.Warn("Не удалось удалить старый файл (возможно, он заблокирован)", "path", oldExePath, "error", err)
+	}
+}
+
+// setupSignalHandler принимает функцию очистки с параметрами
+func setupSignalHandler(rootPath string) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-	// Горутина для обработки сигналов
 	go func() {
 		sig := <-sigChan
 		fmt.Printf("\nПолучен сигнал %v. Выполняется очистка временных файлов...\n", sig)
-		cleanupTempDir()
+		cleanupTempDir(rootPath)
 		os.Exit(0)
 	}()
 }
 
 func main() {
-	// Устанавливаем обработчик сигналов для принудительного завершения
-	setupSignalHandler()
+	// 0. Очистка старых версий при запуске
+	cleanupOldExecutable()
 
-	// Добавляем очистку временной папки при нормальном завершении приложения
-	defer cleanupTempDir()
-
-	// 0. Обработка аргументов командной строки
+	// Предварительный парсинг флагов, чтобы понять контекст (но конфиг грузим позже)
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
 	flag.Parse()
 
-	// 1. Проверка прав администратора
+	// Проверка прав администратора
 	if !winutils.IsAdmin() {
 		tui.Error("Ошибка: Для выполнения требуются права администратора.")
 		tui.Error("Пожалуйста, запустите эту программу от имени Администратора.")
@@ -231,35 +274,51 @@ func main() {
 	}
 	tui.Success("Приложение запущено с правами администратора.")
 
-	// 2. Получение пути к конфигурации
+	// Загрузка конфига
 	finalConfigPath, err := getConfigPath(configPathFlag)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось определить источник конфигурации: %v", err)
 	}
 
-	// 3. Загрузка конфигурации
 	cfg, err := config.LoadConfig(finalConfigPath)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось загрузить конфигурацию: %v", err)
 	}
 
-	// 4. Инициализация логгера
+	// Инициализация логгера
 	logging.Init(cfg.LogLevel)
-	slog.Info("Логгер инициализирован с параметром из конфигурации.", "log_level", cfg.LogLevel, "cfg_path", finalConfigPath)
+	slog.Info("Логгер инициализирован", "log_level", cfg.LogLevel)
 
-	// 5. Инициализация менеджера ресурсов
-	assetManager, err := assetmgr.New(cfg)
-	if err != nil {
-		slog.Error("Критическая ошибка: не удалось инициализировать менеджер ресурсов", "error", err)
-		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
-	}
-	slog.Info("Менеджер ресурсов инициализирован")
+	// Настройка очистки
+	// Передаем RootPath из конфига, чтобы знать, где чистить temp
+	setupSignalHandler(cfg.RootPath)
+	defer cleanupTempDir(cfg.RootPath)
 
-	// Создаём реальный объект утилит
+	// Инициализация утилит
 	RealWinUtils := &RealWinUtils{}
 
-	// 6. Регистрация всех доступных модулей
-	// map хранит core.Installer
+	// --- САМООБНОВЛЕНИЕ ---
+	if cfg.SelfUpdateConfig.Enabled {
+		slog.Info("Запуск проверки обновлений...")
+		updater := selfupdate.New(cfg.SelfUpdateConfig, RealWinUtils)
+		updated, err := updater.CheckAndPerformUpdate()
+		if err != nil {
+			slog.Error("Ошибка при самообновлении", "error", err)
+			tui.Warn(fmt.Sprintf("Ошибка проверки обновлений: %v", err))
+		} else if updated {
+			slog.Info("Приложение было обновлено, завершение работы старой версии")
+			return
+		}
+	}
+
+	// Инициализация менеджера ресурсов
+	assetManager, err := assetmgr.New(cfg)
+	if err != nil {
+		slog.Error("Критическая ошибка assetmgr", "error", err)
+		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
+	}
+
+	// Регистрация модулей
 	registeredModules := map[string]core.Installer{
 		"VComCaster":    &vcomcaster.Module{},
 		"iiko":          &distro.Module{},
@@ -272,7 +331,7 @@ func main() {
 		"UTM":           &utm.Module{},
 	}
 
-	// 7. Основной цикл меню
+	// Основной цикл
 	for {
 		var availableModules []tui.Installer
 		for _, modDef := range cfg.Modules {
@@ -287,27 +346,24 @@ func main() {
 
 		selected, err := tui.ShowMenu(availableModules)
 		if err != nil {
-			slog.Info("Пользователь выбрал выход из главного меню")
+			slog.Info("Выход из программы")
 			tui.Info("Выход из программы.")
 			os.Exit(0)
 		}
 
 		selectedModule := selected.(core.Installer)
-		slog.Info("Пользователь выбрал модуль", "module_id", selectedModule.ID(), "menu_text", selectedModule.MenuText())
+		slog.Info("Выбран модуль", "id", selectedModule.ID())
 
-		// Очищаем консоль перед переходом в подменю модуля
 		tui.ClearScreen()
-
 		err = selectedModule.Run(assetManager, RealWinUtils)
 		if err != nil {
-			slog.Error("Модуль завершился с ошибкой", "module_id", selectedModule.ID(), "error", err)
+			slog.Error("Ошибка модуля", "module", selectedModule.ID(), "error", err)
 			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", err))
 		} else {
-			slog.Info("Модуль успешно завершил работу", "module_id", selectedModule.ID())
+			slog.Info("Модуль завершил работу успешно", "module", selectedModule.ID())
 			tui.Success("\n--- Операция завершена успешно. ---")
 		}
 
-		// Очищаем консоль перед сообщением о возврате в меню
 		tui.ClearScreen()
 		fmt.Println("\nНажмите Enter, чтобы вернуться в главное меню...")
 		fmt.Scanln()
