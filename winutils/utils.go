@@ -655,6 +655,93 @@ func ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, erro
 	return s, nil
 }
 
+// UninstallSystemApp ищет приложение в реестре по части имени и запускает его деинсталлятор.
+func UninstallSystemApp(partialName string) error {
+	fmt.Printf("Поиск системного деинсталлятора для: '%s'...\n", partialName)
+
+	// Пути к веткам деинсталляции (x64 и x86)
+	uninstallPaths := []string{
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`,
+		`SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`,
+	}
+
+	var uninstallString string
+	var quietUninstallString string
+	var foundName string
+
+	// Перебор веток реестра
+	for _, basePath := range uninstallPaths {
+		k, err := registry.OpenKey(registry.LOCAL_MACHINE, basePath, registry.READ)
+		if err != nil {
+			continue
+		}
+		defer k.Close()
+
+		subkeys, err := k.ReadSubKeyNames(-1)
+		if err != nil {
+			continue
+		}
+
+		for _, subkeyName := range subkeys {
+			appKeyPath := basePath + "\\" + subkeyName
+			appKey, err := registry.OpenKey(registry.LOCAL_MACHINE, appKeyPath, registry.READ)
+			if err != nil {
+				continue
+			}
+
+			displayName, _, _ := appKey.GetStringValue("DisplayName")
+
+			// Проверка совпадения имени (регистронезависимо)
+			if strings.Contains(strings.ToLower(displayName), strings.ToLower(partialName)) {
+				// Нашли! Читаем строки удаления
+				foundName = displayName
+				uninstallString, _, _ = appKey.GetStringValue("UninstallString")
+				quietUninstallString, _, _ = appKey.GetStringValue("QuietUninstallString")
+				appKey.Close()
+				goto Found
+			}
+			appKey.Close()
+		}
+	}
+
+	return fmt.Errorf("приложение с именем, содержащим '%s', не найдено в установленных программах", partialName)
+
+Found:
+	fmt.Printf("Найдено приложение: %s\n", foundName)
+
+	// Приоритет 1: QuietUninstallString (обычно уже содержит тихие ключи)
+	finalCommand := quietUninstallString
+
+	// Приоритет 2: UninstallString с модификацией
+	if finalCommand == "" {
+		finalCommand = uninstallString
+		// Если это MSI (MsiExec.exe /I{GUID}), меняем на /X и добавляем /qn
+		if strings.Contains(strings.ToLower(finalCommand), "msiexec") {
+			finalCommand = strings.ReplaceAll(strings.ToLower(finalCommand), "/i", "/x")
+			finalCommand += " /qn"
+		} else {
+			// Для обычных exe (InnoSetup, NSIS) пробуем добавить стандартные тихие ключи
+			// iiko инсталляторы (Burn) понимают /uninstall /passive
+			finalCommand += " /uninstall /passive"
+		}
+	}
+
+	if finalCommand == "" {
+		return fmt.Errorf("строка деинсталляции для '%s' пуста", foundName)
+	}
+
+	fmt.Printf("Запуск команды удаления: %s\n", finalCommand)
+
+	// Парсинг команды (простой, разделяем по пробелам, учитывая кавычки)
+	// Для надежности лучше использовать cmd /C, чтобы винда сама разобрала строку
+	output, err := RunCommand("cmd", "/C", finalCommand)
+	if err != nil {
+		return fmt.Errorf("ошибка при выполнении деинсталляции: %v. Вывод: %s", err, output)
+	}
+
+	return nil
+}
+
 // ExtractArchive распаковывает архив в указанную директорию с помощью 7-Zip.
 // fullPaths: true использует флаг 'x' (сохранение структуры папок), false - флаг 'e' (плоская распаковка).
 func ExtractArchive(archivePath, destDir string, fullPaths bool) error {
@@ -666,4 +753,51 @@ func ExtractArchive(archivePath, destDir string, fullPaths bool) error {
 
 	// Распаковываем архив
 	return client.Extract(archivePath, destDir, fullPaths)
+}
+
+// GetDesktopDir возвращает путь к рабочему столу текущего пользователя.
+func GetDesktopDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	// Стандартный путь. Для 100% надежности нужно через SHGetKnownFolderPath,
+	// но os.UserHomeDir + Desktop работает в 99.9% случаев на Windows.
+	return filepath.Join(homeDir, "Desktop"), nil
+}
+
+// CreateShortcut создает ярлык (.lnk) через PowerShell.
+// Мы формируем скрипт целиком внутри Go, чтобы избежать проблем с передачей аргументов с пробелами.
+func CreateShortcut(targetPath, shortcutPath, arguments string) error {
+	fmt.Printf("Создание ярлыка:\n  Цель: %s\n  Путь: %s\n  Аргументы: %s\n", targetPath, shortcutPath, arguments)
+
+	// Экранируем одиночные кавычки (для PowerShell ' заменяется на '')
+	safeTarget := strings.ReplaceAll(targetPath, "'", "''")
+	safeShortcut := strings.ReplaceAll(shortcutPath, "'", "''")
+	safeArgs := strings.ReplaceAll(arguments, "'", "''")
+
+	// Формируем PowerShell скрипт
+	// Используем одинарные кавычки, так как они не интерпретируют содержимое
+	psScript := fmt.Sprintf(`
+	$WshShell = New-Object -comObject WScript.Shell;
+	$Shortcut = $WshShell.CreateShortcut('%s');
+	$Shortcut.TargetPath = '%s';
+	$Shortcut.Arguments = '%s';
+	$Shortcut.WorkingDirectory = Split-Path $Shortcut.TargetPath -Parent;
+	$Shortcut.Save()`, safeShortcut, safeTarget, safeArgs)
+
+	// Запускаем PowerShell.
+	// Важно: не передаем дополнительных аргументов после psScript.
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript)
+
+	// Получаем вывод для диагностики ошибок
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Пытаемся конвертировать вывод из CP866 (стандартная кодировка консоли RU Windows) в UTF-8 для лога,
+		// или просто выводим как есть, если это сложно.
+		// Для простоты выводим как есть, Go обычно справляется, если там не совсем кракозябры.
+		return fmt.Errorf("ошибка создания ярлыка: %v. Вывод PS: %s", err, string(output))
+	}
+
+	return nil
 }

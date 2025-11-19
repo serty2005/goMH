@@ -109,7 +109,7 @@
 					"id": "syrve_rms_back",
 					"menu_text": "Syrve RMS BackOffice",
 					"install_args": "/install /passive",
-					"run_after": "C:\\Program Files\\Syrve\\RMS\\Office\\BackOffice.exe",
+					"run_after": "C:\\Program Files\\Syrve\\SyrveRMS\\Office\\BackOffice.exe",
 					"url_template": "https://downloads.syrve.online/{{VERSION}}/Syrve/RMS/BackOffice/Setup.RMS.BackOffice.exe",
 					"portable_archive_key": "syrve_rms"
 				},
@@ -117,7 +117,7 @@
 					"id": "syrve_chain_back",
 					"menu_text": "Syrve Chain BackOffice",
 					"install_args": "/install /passive",
-					"run_after": "C:\\Program Files\\Syrve\\Chain\\BackOffice\\BackOffice.exe",
+					"run_after": "C:\\Program Files\\Syrve\\SyrveChain\\Office\\BackOffice.exe",
 					"url_template": "https://downloads.syrve.online/{{VERSION}}/Syrve/Chain/BackOffice/Setup.Chain.BackOffice.exe",
 					"portable_archive_key": "syrve_chain"
 				},

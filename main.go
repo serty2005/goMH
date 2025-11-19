@@ -124,8 +124,17 @@ func (rw *RealWinUtils) MoveDir(src, dst string) error {
 func (rw *RealWinUtils) ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error) {
 	return winutils.ReadRegistryKey(rootKey, path, valueName)
 }
+func (rw *RealWinUtils) UninstallSystemApp(partialName string) error {
+	return winutils.UninstallSystemApp(partialName)
+}
 func (rw *RealWinUtils) ExtractArchive(archivePath, destDir string, fullPaths bool) error {
 	return winutils.ExtractArchive(archivePath, destDir, fullPaths)
+}
+func (rw *RealWinUtils) GetDesktopDir() (string, error) {
+	return winutils.GetDesktopDir()
+}
+func (rw *RealWinUtils) CreateShortcut(targetPath, shortcutPath, arguments string) error {
+	return winutils.CreateShortcut(targetPath, shortcutPath, arguments)
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:

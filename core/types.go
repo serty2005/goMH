@@ -42,7 +42,10 @@ type WinUtils interface {
 	MoveFile(src, dst string) error
 	MoveDir(src, dst string) error
 	ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error)
+	UninstallSystemApp(partialName string) error
 	ExtractArchive(archivePath, destDir string, fullPaths bool) error
+	GetDesktopDir() (string, error)
+	CreateShortcut(targetPath, shortcutPath, arguments string) error
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.

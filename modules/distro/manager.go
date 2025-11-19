@@ -1,4 +1,3 @@
-// modules/distro/manager.go
 package distro
 
 import (
@@ -22,7 +21,7 @@ import (
 // Module реализует интерфейс core.Installer.
 type Module struct{}
 
-func (m *Module) ID() string       { return "iiko" } // Оставляем старый ID для совместимости с config.json
+func (m *Module) ID() string       { return "iiko" }
 func (m *Module) MenuText() string { return "iiko / Syrve (Front, Back, Card)" }
 
 // DistroManager управляет всем процессом установки.
@@ -78,18 +77,31 @@ type brandHandler interface {
 }
 
 // runWorkflow - общий сценарий установки.
+// runWorkflow - обновленный общий сценарий установки.
 func (dm *DistroManager) runWorkflow(h brandHandler) error {
 	component, err := h.selectComponentMenu()
 	if err != nil {
-		// Проверяем, является ли ошибка выходом в главное меню
 		if err == tui.ErrExitToMainMenu {
 			slog.Debug("Выбор компонента отменен пользователем")
 			return err
 		}
-		return nil // Отмена
+		return nil
 	}
 
-	// Для компонентов без версий (iikoCard, Syrve Loyalty) сразу запускаем установку.
+	// Определяем установленную версию (если компонент версионный)
+	// Делаем это ВСЕГДА, если указан путь RunAfter
+	var installedVer string
+	if component.RunAfter != "" {
+		ver, err := dm.WU.GetFileVersion(component.RunAfter)
+		if err == nil {
+			installedVer = ver
+			slog.Info("Обнаружена установленная версия", "component", component.ID, "version", installedVer)
+		} else {
+			slog.Debug("Не удалось определить версию (возможно не установлено)", "path", component.RunAfter, "error", err)
+		}
+	}
+
+	// Для компонентов без версий сразу запускаем установку
 	isVersioned := component.URLTemplate == "" || strings.Contains(component.URLTemplate, "{{VERSION}}")
 	if !isVersioned {
 		return h.installComponent(component, "")
@@ -97,11 +109,20 @@ func (dm *DistroManager) runWorkflow(h brandHandler) error {
 
 	// Меню выбора режима установки (Обычная / Портативная)
 	mode := "install"
+	// Показываем выбор портативной версии только если есть ключ и обнаружена установка
+	// ИЛИ просто если есть ключ (чтобы можно было поставить portable даже если ничего нет)
 	if component.PortableArchiveKey != "" {
+		items := []string{"Стандартная установка (в Program Files)", "Портативная версия (распаковка)", "Назад"}
+		label := fmt.Sprintf("Выберите режим установки для %s", component.MenuText)
+
+		if installedVer != "" {
+			label = fmt.Sprintf("%s (Установлено: %s)", label, installedVer)
+		}
+
 		tui.DisableConsoleBeep()
 		prompt := promptui.Select{
-			Label: fmt.Sprintf("Выберите режим установки для %s", component.MenuText),
-			Items: []string{"Стандартная установка (в Program Files)", "Портативная версия (распаковка)", "Назад"},
+			Label: label,
+			Items: items,
 		}
 		_, result, err := prompt.Run()
 		tui.RestoreConsoleBeep()
@@ -118,7 +139,7 @@ func (dm *DistroManager) runWorkflow(h brandHandler) error {
 		slog.Info("Выбор портативной установки")
 		versions, err := h.getAvailablePortableVersions(component)
 		if err != nil {
-			slog.Error("Не без ошибок", "error", err)
+			slog.Error("Ошибка получения версий portable", "error", err)
 			return err
 		}
 		if len(versions) == 0 {
@@ -134,110 +155,210 @@ func (dm *DistroManager) runWorkflow(h brandHandler) error {
 		return h.installPortable(component, version)
 	}
 
-	// Стандартная установка
+	// --- СТАНДАРТНАЯ УСТАНОВКА ---
 
-	// Специальная логика ТОЛЬКО для iikoFront (стандартная установка)
-	if component.ID == "iiko_front" {
-		slog.Info("Выбран компонент iikoFront")
-		return dm.runIikoFrontInstall(h, component)
-	}
-
-	// Стандартная установка для всех остальных версионных компонентов
 	versions, err := h.getAvailableVersions()
 	if err != nil {
-		slog.Error("Не без ошибок", "error", err)
+		slog.Error("Ошибка получения версий", "error", err)
 		return err
 	}
 	if len(versions) == 0 {
 		return fmt.Errorf("не найдено доступных версий для %s", component.MenuText)
 	}
-	version, err := dm.selectVersionMenu(versions, "Выберите версию для установки")
+
+	// Добавляем метку (current) в меню выбора версий, если версия совпадает с установленной
+	versionPrompt := "Выберите версию для установки"
+	if installedVer != "" {
+		versionPrompt = fmt.Sprintf("Выберите версию для установки (Текущая: %s)", installedVer)
+	}
+
+	version, err := dm.selectVersionMenu(versions, versionPrompt)
 	if err != nil {
 		if err.Error() == "exit_to_main_menu" {
 			return tui.ErrExitToMainMenu
 		}
-		slog.Error("Не без ошибок", "error", err)
+		slog.Error("Выбор версии отменен", "error", err)
 		return err
 	}
+
+	// --- ПРОВЕРКА НА ПОНИЖЕНИЕ ВЕРСИИ ---
+	if installedVer != "" {
+		// Используем compareSemanticVersions из iiko.go (он в том же пакете distro, так что доступен)
+		if compareSemanticVersions(version, installedVer) < 0 {
+			tui.Warn(fmt.Sprintf("\nВНИМАНИЕ: Вы пытаетесь установить версию %s, которая ниже установленной %s.", version, installedVer))
+			tui.Warn("Для корректной работы необходимо удалить текущую версию.")
+
+			prompt := promptui.Prompt{
+				Label:     "Вы хотите автоматически удалить текущую версию перед установкой? (Y/N)",
+				IsConfirm: true,
+			}
+			_, err := prompt.Run()
+			if err != nil {
+				slog.Info("Пользователь отказался от даунгрейда")
+				return nil // Отмена
+			}
+
+			// Запуск удаления старой версии
+			if err := dm.uninstallOldVersion(h, component, installedVer); err != nil {
+				slog.Error("Ошибка при удалении старой версии", "error", err)
+				tui.Error(fmt.Sprintf("Не удалось удалить старую версию: %v", err))
+				tui.Info("Попробуйте удалить её вручную через Панель управления.")
+				return err
+			}
+		}
+	}
+
+	// Специальная логика для iikoFront (патчи, плагины)
+	if component.ID == "iiko_front" {
+		slog.Info("Выбран компонент iikoFront, запуск спец. логики")
+		return dm.runIikoFrontInstall(h, component, version) // Передаем версию явно
+	}
+
+	// Обычная установка
 	return h.installComponent(component, version)
 }
 
-// runIikoFrontInstall - специальная логика ТОЛЬКО для iikoFront.
-func (dm *DistroManager) runIikoFrontInstall(h brandHandler, component config.DistroComponent) error {
-	versions, err := h.getAvailableVersions()
-	if err != nil {
-		slog.Error("Не без ошибок", "error", err)
-		return err
+// uninstallOldVersion скачивает установщик старой версии и запускает его удаление
+func (dm *DistroManager) uninstallOldVersion(h brandHandler, component config.DistroComponent, version string) error {
+	tui.InfoF("Подготовка к удалению версии %s...", version)
+	slog.Info("Начало процедуры удаления старой версии", "version", version)
+
+	// --- ПОПЫТКА 1: Системное удаление через реестр ---
+	// Нам нужно сопоставить ID компонента с именем в "Установке и удалении программ"
+	var systemAppName string
+	switch component.ID {
+	case "iiko_front":
+		systemAppName = "iikoRMS Front"
+	case "iiko_rms_back":
+		systemAppName = "iikoRMS BackOffice"
+	case "iiko_chain_back":
+		systemAppName = "iikoChain"
+	case "syrve_front":
+		systemAppName = "SyrveRMS Front"
+	case "syrve_rms_back":
+		systemAppName = "SyrveRMS BackOffice"
+	case "syrve_chain_back":
+		systemAppName = "SyrveChain"
 	}
-	version, err := dm.selectVersionMenu(versions, "Выберите версию iikoFront для установки")
-	if err != nil {
-		if err.Error() == "exit_to_main_menu" {
-			return tui.ErrExitToMainMenu
+
+	if systemAppName != "" {
+		tui.InfoF("Попытка системного удаления через реестр для '%s'...", systemAppName)
+		err := dm.WU.UninstallSystemApp(systemAppName)
+		if err == nil {
+			tui.Success("Системное удаление успешно инициировано.")
+			return nil
 		}
-		slog.Error("Не без ошибок", "error", err)
-		return err
+		slog.Warn("Системное удаление не удалось или приложение не найдено", "app", systemAppName, "error", err)
+		tui.Warn(fmt.Sprintf("Системное удаление не удалось (%v). Переходим к варианту с деинсталлятором.", err))
+	} else {
+		slog.Debug("Системное имя не определено для компонента, пропуск шага реестра", "id", component.ID)
 	}
-	slog.Info("Выбрана версия iikoFront", "version", version)
+
+	// --- ПОПЫТКА 2: Использование установщика (с проверкой кэша) ---
+
+	var downloadURL string
+	if component.URLTemplate != "" {
+		downloadURL = strings.Replace(component.URLTemplate, "{{VERSION}}", version, 1)
+	}
+
+	fileName := filepath.Base(downloadURL)
+
+	// Путь, где должен лежать дистрибутив этой версии
+	// C:\MH\iiko_9.X.X\Setup.Front.exe
+	versionDir := filepath.Join(dm.AM.Cfg().RootPath, fmt.Sprintf("%s_%s", strings.Split(component.ID, "_")[0], version)) // iiko_9.2.0 или syrve_9.2.0 - грубая эвристика, лучше использовать brandName, но он тут недоступен напрямую, используем префикс ID
+
+	// Уточним префикс папки. iikoHandler создает "iiko_%s", syrveHandler создает "syrve_%s"
+	if strings.HasPrefix(component.ID, "iiko") {
+		versionDir = filepath.Join(dm.AM.Cfg().RootPath, fmt.Sprintf("iiko_%s", version))
+	} else if strings.HasPrefix(component.ID, "syrve") {
+		versionDir = filepath.Join(dm.AM.Cfg().RootPath, fmt.Sprintf("syrve_%s", version))
+	}
+
+	localInstallerPath := filepath.Join(versionDir, fileName)
+
+	// Проверяем, есть ли файл локально
+	if _, err := os.Stat(localInstallerPath); err == nil {
+		tui.InfoF("Найден локальный дистрибутив: %s", localInstallerPath)
+		slog.Info("Используем локальный дистрибутив для удаления", "path", localInstallerPath)
+	} else {
+		tui.Info("Локальный дистрибутив не найден. Скачивание...")
+
+		// Создаем директорию, если её нет (например, если удаляем версию, которую ставили не через MH)
+		_ = os.MkdirAll(versionDir, 0755)
+
+		if strings.HasPrefix(downloadURL, "http") {
+			if _, err := dm.AM.DownloadHTTPWithProgress(downloadURL, localInstallerPath); err != nil {
+				return fmt.Errorf("не удалось скачать деинсталлятор: %w", err)
+			}
+		} else {
+			ftpCfg := dm.AM.Cfg().FTP[0]
+			if _, err := dm.AM.DownloadFTPWithProgress(ftpCfg, downloadURL, localInstallerPath); err != nil {
+				return fmt.Errorf("не удалось скачать деинсталлятор по FTP: %w", err)
+			}
+		}
+	}
+
+	tui.Info("Запуск удаления через установщик...")
+
+	// Формируем аргументы удаления.
+	uninstallArgs := strings.ReplaceAll(component.InstallArgs, "/install", "/uninstall")
+	if !strings.Contains(uninstallArgs, "/uninstall") {
+		uninstallArgs = "/uninstall " + uninstallArgs
+	}
+
+	slog.Info("Запуск деинсталлятора", "path", localInstallerPath, "args", uninstallArgs)
+
+	if err := dm.runInstaller(localInstallerPath, uninstallArgs); err != nil {
+		return fmt.Errorf("процесс удаления завершился с ошибкой: %w", err)
+	}
+
+	tui.Success("Старая версия успешно удалена.")
+
+	// Файл установщика НЕ удаляем, он теперь лежит в правильном месте (в папке версии) и может пригодиться.
+
+	return nil
+}
+
+// runIikoFrontInstall обновлен для приема версии аргументом
+func (dm *DistroManager) runIikoFrontInstall(h brandHandler, component config.DistroComponent, version string) error {
+	// Версия уже выбрана в runWorkflow, используем её
+	slog.Info("Установка iikoFront", "version", version)
 
 	selectedPatch, patchSelected, err := FindAndSelectPatch(dm.AM, version)
 	if err != nil {
 		tui.Warn(fmt.Sprintf("Ошибка при выборе патча: %v. Установка продолжится без него.", err))
-		slog.Error("Не без ошибок", "error", err)
+		slog.Error("Ошибка выбора патча", "error", err)
 	}
 
 	if err := h.installComponent(component, version); err != nil {
-		slog.Error("Не без ошибок", "error", err)
+		slog.Error("Ошибка установки компонента", "error", err)
 		return err
 	}
 
 	if patchSelected {
 		installDir := filepath.Dir(component.RunAfter)
-		// ИСПРАВЛЕНИЕ: Бэкап теперь создается в папке версии дистрибутива, а не в отдельной patches_backup
-		// Пример: C:\MH\iiko_9.2.8035.0\backup_123
+		// Бэкап рядом с версией: C:\MH\iiko_9.2.8035.0\backup_...
 		versionDir := filepath.Join(dm.AM.Cfg().RootPath, fmt.Sprintf("iiko_%s", version))
-		slog.Debug("Патч выбран, применяем", "installDir", installDir, "backupDir", versionDir)
+
+		slog.Info("Применение патча", "installDir", installDir, "backupDir", versionDir)
 
 		if err := ApplyPatch(dm.AM, dm.WU, selectedPatch, installDir, versionDir); err != nil {
-			slog.Error("Не без ошибок", "error", err)
+			slog.Error("Критическая ошибка патча", "error", err)
 			tui.Error(fmt.Sprintf("Критическая ошибка при применении патча: %v", err))
 		}
 	}
 
 	tui.Info("Запуск автоматического обновления плагинов iiko...")
-	slog.Info("Запуск автоматического обновления плагинов iiko...")
 	pluginsModule := &iikoplugins.Module{}
 	if err := pluginsModule.AutoUpdatePlugins(dm.AM, dm.WU); err != nil {
-		slog.Error("Не без ошибок", "error", err)
+		slog.Error("Ошибка автообновления плагинов", "error", err)
 		tui.Warn(fmt.Sprintf("Ошибка при автообновлении плагинов: %v", err))
 	} else {
-		slog.Info("Автообновление плагинов завершено.")
+		slog.Info("Автообновление плагинов завершено")
 		tui.Success("Автообновление плагинов завершено.")
 	}
 
 	return nil
-}
-
-// promptUpdateOrPortable - Устаревший метод, оставлен для совместимости, но не используется в новом flow
-func (dm *DistroManager) promptUpdateOrPortable(installedVer string) (string, error) {
-	tui.DisableConsoleBeep()
-	defer tui.RestoreConsoleBeep()
-
-	prompt := promptui.Select{
-		Label: fmt.Sprintf("Уже установлена версия %s. Что вы хотите сделать?", installedVer),
-		Items: []string{"Обновить (полная установка)", "Установить портативную версию 'рядом'", "Отмена"},
-	}
-	_, result, err := prompt.Run()
-	if err != nil {
-		return "cancel", err
-	}
-	switch result {
-	case "Обновить (полная установка)":
-		return "update", nil
-	case "Установить портативную версию 'рядом'":
-		return "portable", nil
-	default:
-		return "cancel", nil
-	}
 }
 
 // selectVersionMenu - общий UI для выбора версии.
@@ -412,6 +533,67 @@ func (dm *DistroManager) installPortable(h brandHandler, brandName string, compo
 
 	if err := dm.WU.CopyDir(sourceDir, destDir); err != nil {
 		return fmt.Errorf("ошибка копирования файлов портативной версии: %w", err)
+	}
+
+	// --- СОЗДАНИЕ ЯРЛЫКА ---
+	tui.Info("Создание ярлыка на рабочем столе...")
+
+	// 1. Определяем имя исполняемого файла.
+	// Берем его из RunAfter конфигурации компонента (например, "BackOffice.exe" из "C:\...\BackOffice.exe")
+	exeName := filepath.Base(component.RunAfter)
+	if exeName == "." || exeName == "" {
+		// Фолбэк на стандартные имена, если конфиг пуст (маловероятно)
+		if strings.Contains(strings.ToLower(component.ID), "front") {
+			exeName = "iikoFront.Net.exe"
+		} else {
+			exeName = "BackOffice.exe"
+		}
+	}
+
+	// 2. Ищем этот файл в целевой директории
+	targetExePath := filepath.Join(destDir, exeName)
+	if _, err := os.Stat(targetExePath); os.IsNotExist(err) {
+		// Если файла нет в корне, ищем рекурсивно (на случай, если структура папок сложнее)
+		foundPath, err := dm.WU.FindFileRecursive(destDir, exeName)
+		if err == nil {
+			targetExePath = foundPath
+		} else {
+			slog.Warn("Исполняемый файл для ярлыка не найден", "name", exeName, "dir", destDir)
+			tui.Warn(fmt.Sprintf("Внимание: файл %s не найден, ярлык может не работать.", exeName))
+			// Все равно пытаемся создать ярлык на предполагаемый путь
+		}
+	}
+
+	// 3. Получаем путь к рабочему столу
+	desktopDir, err := dm.WU.GetDesktopDir()
+	if err != nil {
+		slog.Error("Не удалось получить путь к рабочему столу", "error", err)
+		// Не критичная ошибка, продолжаем
+	} else {
+		// 4. Формируем параметры ярлыка
+		// Название: "iikoRMS BackOffice 9.2.0 (Portable).lnk"
+		shortcutName := fmt.Sprintf("%s %s (Portable).lnk", component.MenuText, version)
+		// Убираем недопустимые символы из имени файла
+		shortcutName = strings.Map(func(r rune) rune {
+			if strings.ContainsRune(`<>:"/\|?*`, r) {
+				return -1
+			}
+			return r
+		}, shortcutName)
+
+		shortcutPath := filepath.Join(desktopDir, shortcutName)
+
+		// Аргументы: /AdditionalTmpFolder="{brand}_{version}"
+		// Например: /AdditionalTmpFolder="iiko_9.2.0"
+		args := fmt.Sprintf(`/AdditionalTmpFolder="%s_%s"`, brandName, version)
+
+		// 5. Создаем ярлык
+		if err := dm.WU.CreateShortcut(targetExePath, shortcutPath, args); err != nil {
+			slog.Error("Ошибка создания ярлыка", "error", err)
+			tui.Warn(fmt.Sprintf("Не удалось создать ярлык: %v", err))
+		} else {
+			tui.SuccessF("Ярлык создан: %s", shortcutName)
+		}
 	}
 
 	tui.Success("Портативная версия успешно установлена.")
