@@ -95,7 +95,8 @@ type UTMConfig struct {
 type Config struct {
 	RootPath            string               `json:"root_path"`
 	AssetsCachePath     string               `json:"assets_cache_path"`
-	FTP                 []FTPConfig          `json:"ftp_config"` // Массив для нескольких серверов
+	LogLevel            string               `json:"log_level"`
+	FTP                 []FTPConfig          `json:"ftp_config"`
 	Modules             []ModuleDef          `json:"modules"`
 	FrpcConfig          FrpcConfig           `json:"frpc_config"`
 	DistroConfig        DistroConfig         `json:"distro_config"`

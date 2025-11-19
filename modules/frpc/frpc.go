@@ -8,6 +8,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"io"
+	"log/slog" // Импорт логгера
 	"net/http"
 	"os"
 	"os/exec"
@@ -40,19 +41,29 @@ func (m *Module) MenuText() string {
 }
 
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Запуск модуля FRPC")
 	m.Cfg = &am.Cfg().FrpcConfig
 	frpcExePath := filepath.Join(m.Cfg.InstallPath, "frpc.exe")
+
 	if _, err := os.Stat(frpcExePath); err == nil {
+		slog.Info("Обнаружена существующая установка FRPC", "path", frpcExePath)
 		return m.runDiagnosticsWorkflow(am, wu)
 	}
+
+	slog.Info("Существующая установка не найдена, запуск полной установки")
 	return m.runFullInstallWorkflow(am, wu, false)
 }
+
 func (m *Module) runDiagnosticsWorkflow(am core.AssetManager, wu core.WinUtils) error {
 	fmt.Println("\nОбнаружена существующая установка FRPC.")
 	fmt.Print("Введите 'R' для добавления порта, 'C' для полной переустановки или 'U' для удаления (R/C/U): ")
+
 	reader := bufio.NewReader(os.Stdin)
 	choice, _ := reader.ReadString('\n')
 	choice = strings.TrimSpace(strings.ToUpper(choice))
+
+	slog.Info("Выбор действия в меню диагностики FRPC", "choice", choice)
+
 	switch choice {
 	case "R":
 		return m.runAddPortWorkflow(wu, true)
@@ -64,6 +75,7 @@ func (m *Module) runDiagnosticsWorkflow(am core.AssetManager, wu core.WinUtils) 
 		confirm, _ := reader.ReadString('\n')
 		if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
 			fmt.Println("Удаление отменено.")
+			slog.Info("Удаление отменено пользователем")
 			return nil
 		}
 		return m.uninstall(wu)
@@ -72,65 +84,100 @@ func (m *Module) runDiagnosticsWorkflow(am core.AssetManager, wu core.WinUtils) 
 		return nil
 	}
 }
+
 func (m *Module) runFullInstallWorkflow(am core.AssetManager, wu core.WinUtils, isReinstall bool) error {
+	slog.Info("Начало workflow полной установки", "isReinstall", isReinstall)
 	if isReinstall {
 		m.uninstall(wu)
 	}
-	_ = os.MkdirAll(m.Cfg.InstallPath, 0755)
+
+	if err := os.MkdirAll(m.Cfg.InstallPath, 0755); err != nil {
+		slog.Error("Не удалось создать директорию установки", "path", m.Cfg.InstallPath, "error", err)
+		return err
+	}
+
+	slog.Debug("Добавление исключения Defender", "path", am.Cfg().RootPath)
 	wu.AddDefenderExclusion(am.Cfg().RootPath)
+
 	if err := m.downloadAndExtractComponents(am, wu); err != nil {
 		return err
 	}
 	return m.runAddPortWorkflow(wu, false)
 }
+
 func (m *Module) runAddPortWorkflow(wu core.WinUtils, isAddingToExisting bool) error {
+	slog.Info("Начало настройки порта", "isAddingToExisting", isAddingToExisting)
 	reader := bufio.NewReader(os.Stdin)
+
 	fmt.Print("Введите локальный порт для туннеля (например, 5985 для WinRM): ")
 	localPortStr, _ := reader.ReadString('\n')
 	localPortStr = strings.TrimSpace(localPortStr)
 	if localPortStr == "" {
 		localPortStr = "5985"
 	}
+
 	fmt.Print("Введите имя этого узла (например, SRV-BACKOFFICE-01): ")
 	alias, _ := reader.ReadString('\n')
 	alias = strings.TrimSpace(alias)
+
+	slog.Info("Введены параметры туннеля", "localPort", localPortStr, "alias", alias)
+
 	freePort, err := m.findFreePort()
 	if err != nil {
+		slog.Error("Не удалось найти свободный порт", "error", err)
 		return err
 	}
+
 	fmt.Printf("Выбран удаленный порт: %d\n", freePort)
+	slog.Info("Автоматически выбран удаленный порт", "remotePort", freePort)
+
 	if err := m.updateFrpcIni(alias, localPortStr, strconv.Itoa(freePort)); err != nil {
+		slog.Error("Ошибка обновления frpc.ini", "error", err)
 		return err
 	}
+
 	if !isAddingToExisting {
 		if err := m.setupNssmService(); err != nil {
+			slog.Error("Ошибка настройки службы NSSM", "error", err)
 			return err
 		}
 	}
+
 	fmt.Println("Перезапускаем службу для применения изменений...")
+	slog.Info("Перезапуск службы FRPC")
 	wu.RunCommand("sc.exe", "stop", m.Cfg.ServiceName)
 	time.Sleep(2 * time.Second)
 	wu.RunCommand("sc.exe", "start", m.Cfg.ServiceName)
+
 	fmt.Println("\n--- Настройка FRPC завершена ---")
+	slog.Info("Настройка FRPC успешно завершена")
 	return nil
 }
+
 func (m *Module) uninstall(wu core.WinUtils) error {
+	slog.Info("Начало удаления FRPC")
 	fmt.Println("Остановка и удаление службы FRPC...")
 	wu.RunCommand("sc.exe", "stop", m.Cfg.ServiceName)
 	time.Sleep(2 * time.Second)
 	wu.RunCommand("sc.exe", "delete", m.Cfg.ServiceName)
+
 	fmt.Println("Удаление директории установки...")
+	slog.Debug("Удаление файлов", "path", m.Cfg.InstallPath)
 	os.RemoveAll(m.Cfg.InstallPath)
+
 	fmt.Println("Очистка завершена.")
 	return nil
 }
 
 func (m *Module) downloadAndExtractComponents(am core.AssetManager, wu core.WinUtils) error {
 	fmt.Println("\n--- Скачивание и распаковка компонентов ---")
+	slog.Info("Скачивание компонентов FRPC")
 
 	// 1. Скачиваем архив FRPC с помощью assetmgr
 	frpcZipPath := filepath.Join(am.Cfg().AssetsCachePath, "frpc.zip")
+	slog.Debug("Скачивание архива FRPC", "url", m.Cfg.FrpcDownloadURL, "dest", frpcZipPath)
 	if _, err := am.DownloadHTTPWithProgress(m.Cfg.FrpcDownloadURL, frpcZipPath); err != nil {
+		slog.Error("Не удалось скачать FRPC", "error", err)
 		return fmt.Errorf("не удалось скачать FRPC: %w", err)
 	}
 
@@ -139,17 +186,21 @@ func (m *Module) downloadAndExtractComponents(am core.AssetManager, wu core.WinU
 	if err != nil {
 		return fmt.Errorf("не найден frpc.exe в архиве: %w", err)
 	}
+	slog.Debug("Найден frpc.exe в архиве", "pathInZip", frpcPathInZip)
 
 	// 3. Извлекаем frpc.exe с помощью assetmgr.ExtractFile
 	frpcDestPath := filepath.Join(m.Cfg.InstallPath, "frpc.exe")
 	if err := am.ExtractFile(frpcZipPath, frpcPathInZip, frpcDestPath); err != nil {
+		slog.Error("Не удалось извлечь frpc.exe", "error", err)
 		return fmt.Errorf("не удалось извлечь frpc.exe: %w", err)
 	}
 	fmt.Println("frpc.exe успешно извлечен.")
 
 	// 4. Скачиваем архив NSSM с помощью assetmgr
 	nssmZipPath := filepath.Join(am.Cfg().AssetsCachePath, "nssm.zip")
+	slog.Debug("Скачивание архива NSSM", "url", m.Cfg.NssmDownloadURL, "dest", nssmZipPath)
 	if _, err := am.DownloadHTTPWithProgress(m.Cfg.NssmDownloadURL, nssmZipPath); err != nil {
+		slog.Error("Не удалось скачать NSSM", "error", err)
 		return fmt.Errorf("не удалось скачать NSSM: %w", err)
 	}
 
@@ -161,6 +212,8 @@ func (m *Module) downloadAndExtractComponents(am core.AssetManager, wu core.WinU
 	} else {
 		fmt.Println("Обнаружена 32-битная система. Ищем nssm.exe в папке win32.")
 	}
+	slog.Debug("Определена архитектура для NSSM", "arch", archDir)
+
 	nssmSubPath := filepath.Join(archDir, "nssm.exe")
 
 	nssmPathInZip, err := findPathInZip(nssmZipPath, nssmSubPath)
@@ -171,6 +224,7 @@ func (m *Module) downloadAndExtractComponents(am core.AssetManager, wu core.WinU
 	// 6. Извлекаем nssm.exe с помощью assetmgr.ExtractFile
 	nssmDestPath := filepath.Join(m.Cfg.InstallPath, "nssm.exe")
 	if err := am.ExtractFile(nssmZipPath, nssmPathInZip, nssmDestPath); err != nil {
+		slog.Error("Не удалось извлечь nssm.exe", "error", err)
 		return fmt.Errorf("не удалось извлечь nssm.exe: %w", err)
 	}
 	fmt.Println("nssm.exe успешно извлечен.")
@@ -202,18 +256,26 @@ func findPathInZip(zipPath, targetSuffix string) (string, error) {
 func (m *Module) findFreePort() (int, error) {
 	fmt.Println("Получение информации о прокси с сервера FRPS...")
 	apiURL := fmt.Sprintf("https://%s/api/proxy/tcp", m.Cfg.ServerConfig.Host)
+	slog.Debug("Запрос к API FRPS", "url", apiURL, "user", m.Cfg.ServerConfig.User)
+
 	req, _ := http.NewRequest("GET", apiURL, nil)
 	req.SetBasicAuth(m.Cfg.ServerConfig.User, m.Cfg.ServerConfig.Pass)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		slog.Error("Ошибка HTTP запроса к FRPS", "error", err)
 		return 0, err
 	}
 	defer resp.Body.Close()
+
+	slog.Debug("Ответ от FRPS", "status", resp.Status)
+
 	body, _ := io.ReadAll(resp.Body)
 	var proxyInfo FrpsProxyInfo
 	if err := json.Unmarshal(body, &proxyInfo); err != nil {
+		slog.Error("Ошибка парсинга JSON от FRPS", "error", err)
 		return 0, fmt.Errorf("ошибка парсинга JSON ответа от FRPS: %w", err)
 	}
+
 	hasOfflineProxy := false
 	for _, p := range proxyInfo.Proxies {
 		if p.Status == "offline" {
@@ -221,7 +283,9 @@ func (m *Module) findFreePort() (int, error) {
 			break
 		}
 	}
+
 	if hasOfflineProxy {
+		slog.Warn("Обнаружены оффлайн-прокси, автоматический выбор небезопасен")
 		fmt.Println("\nВНИМАНИЕ: Обнаружены оффлайн-прокси. Автоматический выбор порта рискован.")
 		reader := bufio.NewReader(os.Stdin)
 		for {
@@ -235,6 +299,7 @@ func (m *Module) findFreePort() (int, error) {
 			return port, nil
 		}
 	}
+
 	fmt.Println("Все прокси онлайн. Выполняем автоматический поиск свободного порта...")
 	usedPorts := make(map[int]bool)
 	for _, p := range proxyInfo.Proxies {
@@ -242,13 +307,18 @@ func (m *Module) findFreePort() (int, error) {
 			usedPorts[p.Conf.RemotePort] = true
 		}
 	}
+
 	localUsedPorts := getLocalUsedPorts(filepath.Join(m.Cfg.InstallPath, "frpc.ini"))
 	for _, p := range localUsedPorts {
 		usedPorts[p] = true
 	}
+
 	parts := strings.Split(m.Cfg.PortRange, "-")
 	startPort, _ := strconv.Atoi(parts[0])
 	endPort, _ := strconv.Atoi(parts[1])
+
+	slog.Debug("Поиск порта в диапазоне", "start", startPort, "end", endPort)
+
 	for port := startPort; port <= endPort; port++ {
 		if !usedPorts[port] {
 			return port, nil
@@ -256,11 +326,15 @@ func (m *Module) findFreePort() (int, error) {
 	}
 	return 0, fmt.Errorf("свободные порты в диапазоне %s не найдены", m.Cfg.PortRange)
 }
-func (m *Module) updateFrpcIni(alias, localPort, remotePort string) error { // ...
+
+func (m *Module) updateFrpcIni(alias, localPort, remotePort string) error {
 	iniPath := filepath.Join(m.Cfg.InstallPath, "frpc.ini")
+	slog.Debug("Обновление frpc.ini", "path", iniPath)
+
 	content, err := os.ReadFile(iniPath)
 	var lines []string
 	if err != nil {
+		slog.Info("Создание нового файла frpc.ini")
 		lines = []string{
 			"[common]",
 			"server_addr = " + m.Cfg.ServerConfig.Host,
@@ -271,6 +345,7 @@ func (m *Module) updateFrpcIni(alias, localPort, remotePort string) error { // .
 	} else {
 		lines = strings.Split(string(content), "\n")
 	}
+
 	newSectionName := fmt.Sprintf("[%s-MH]", alias)
 	sectionExists := false
 	for _, line := range lines {
@@ -279,7 +354,9 @@ func (m *Module) updateFrpcIni(alias, localPort, remotePort string) error { // .
 			break
 		}
 	}
+
 	if !sectionExists {
+		slog.Info("Добавление новой секции в конфиг", "section", newSectionName, "remotePort", remotePort)
 		lines = append(lines, "", newSectionName, "type = tcp", "local_ip = 127.0.0.1", "local_port = "+localPort, "remote_port = "+remotePort)
 		err = os.WriteFile(iniPath, []byte(strings.Join(lines, "\r\n")), 0644)
 		if err != nil {
@@ -287,21 +364,28 @@ func (m *Module) updateFrpcIni(alias, localPort, remotePort string) error { // .
 		}
 		fmt.Println("Новая секция добавлена в frpc.ini")
 	} else {
+		slog.Warn("Секция уже существует", "section", newSectionName)
 		fmt.Printf("Секция '%s' уже существует. Пропускаем.\n", newSectionName)
 	}
 	return nil
 }
-func (m *Module) setupNssmService() error { // ...
+
+func (m *Module) setupNssmService() error {
 	nssmExe := filepath.Join(m.Cfg.InstallPath, "nssm.exe")
 	frpcExe := filepath.Join(m.Cfg.InstallPath, "frpc.exe")
 	frpcIni := filepath.Join(m.Cfg.InstallPath, "frpc.ini")
+
+	slog.Info("Настройка службы NSSM", "service", m.Cfg.ServiceName)
+
 	commands := [][]string{
 		{"install", m.Cfg.ServiceName, frpcExe, "-c", frpcIni},
 		{"set", m.Cfg.ServiceName, "Start", "SERVICE_AUTO_START"},
 		{"set", m.Cfg.ServiceName, "AppDirectory", m.Cfg.InstallPath},
 	}
 	fmt.Printf("Создание и настройка службы '%s' с помощью nssm...\n", m.Cfg.ServiceName)
+
 	for _, args := range commands {
+		slog.Debug("Выполнение команды NSSM", "args", args)
 		cmd := exec.Command(nssmExe, args...)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("ошибка при выполнении nssm %s: %w", args[0], err)
@@ -310,7 +394,8 @@ func (m *Module) setupNssmService() error { // ...
 	fmt.Println("Служба успешно настроена.")
 	return nil
 }
-func getLocalUsedPorts(iniPath string) []int { // ...
+
+func getLocalUsedPorts(iniPath string) []int {
 	content, err := os.ReadFile(iniPath)
 	if err != nil {
 		return nil
@@ -324,5 +409,6 @@ func getLocalUsedPorts(iniPath string) []int { // ...
 			ports = append(ports, port)
 		}
 	}
+	slog.Debug("Найдены использованные порты в локальном конфиге", "ports", ports)
 	return ports
 }

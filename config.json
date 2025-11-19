@@ -1,6 +1,7 @@
 {
 	"root_path": "C:\\MH",
 	"assets_cache_path": "C:\\MH\\_assets",
+	"log_level": "debug",
 	"ftp_config": [
 		{
 			"host": "ftp.serty.top",

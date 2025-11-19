@@ -8,6 +8,7 @@ import (
 	"goMH/dependencies"
 	"goMH/tui"
 	"io"
+	"log/slog" // Импорт логгера
 	"net/http"
 	"net/url"
 	"os"
@@ -70,8 +71,10 @@ func (m *Module) MenuText() string {
 
 // Run выполняет интерактивную установку плагинов через меню
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Запуск модуля iiko-plugins (ручной режим)")
 	// Проверяем права администратора для операций с плагинами
 	if !wu.IsAdmin() {
+		slog.Warn("Попытка запуска без прав администратора")
 		return fmt.Errorf("для установки плагинов требуются права администратора")
 	}
 	return m.MenuInstallPlugins(am, wu)
@@ -84,18 +87,22 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 	// Получить версию iikoFront
 	version, err := GetIikoFrontVersion(wu)
 	if err != nil {
+		slog.Error("Не удалось определить версию iikoFront", "error", err)
 		return fmt.Errorf("не удалось определить версию iikoFront: %w", err)
 	}
 	tui.Info(fmt.Sprintf("Обнаружена версия iikoFront: %s", version))
+	slog.Info("Обнаружена версия iikoFront", "version", version)
 
 	// Загрузить манифест
 	manifest, err := LoadManifest()
 	if err != nil {
+		slog.Error("Не удалось загрузить манифест", "error", err)
 		return fmt.Errorf("не удалось загрузить манифест: %w", err)
 	}
 
 	// Получить совместимые API версии
 	compatibleApiVersions := getCompatibleApiVersions(manifest, version)
+	slog.Debug("Совместимые версии API", "versions", compatibleApiVersions)
 
 	// Собрать доступные плагины по совместимым API версиям
 	var availablePlugins []Plugin
@@ -110,6 +117,7 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 
 	// Отфильтровать по excludedPlugins
 	filteredPlugins := FilterPlugins(availablePlugins, cfg.DistroConfig.ExcludedPlugins)
+	slog.Debug("Доступные плагины после фильтрации", "count", len(filteredPlugins))
 
 	// Сгруппировать плагины по имени
 	pluginGroups := make(map[string][]Plugin)
@@ -121,6 +129,7 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 	installed, err := GetInstalledPlugins()
 	if err != nil {
 		tui.Warn(fmt.Sprintf("Не удалось получить список установленных плагинов: %v", err))
+		slog.Warn("Не удалось получить список установленных плагинов", "error", err)
 		installed = []string{} // пустой список, если ошибка
 	}
 
@@ -134,8 +143,11 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 		return err
 	}
 	if selectedPlugin == nil {
+		slog.Info("Пользователь отменил выбор плагина")
 		return nil // пользователь отменил
 	}
+
+	slog.Info("Пользователь выбрал плагин", "name", selectedPlugin.Name, "default_version", selectedPlugin.PluginVersion)
 
 	// Если несколько версий, спросить выбор
 	if len(pluginGroups[selectedPlugin.Name]) > 1 {
@@ -146,6 +158,7 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 		if selectedPlugin == nil {
 			return nil // отмена
 		}
+		slog.Info("Пользователь выбрал конкретную версию", "version", selectedPlugin.PluginVersion)
 	}
 
 	// Найти folderName если установлен
@@ -160,13 +173,17 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 	// Установить или обновить
 	if folderName != "" {
 		tui.Info(fmt.Sprintf("Плагин %s уже установлен, выполняем обновление", selectedPlugin.Name))
+		slog.Info("Запуск обновления плагина", "name", selectedPlugin.Name)
 		if err := updatePlugin(am, wu, selectedPlugin, cfg.RootPath, folderName); err != nil {
+			slog.Error("Ошибка обновления плагина", "name", selectedPlugin.Name, "error", err)
 			return fmt.Errorf("ошибка обновления плагина %s: %w", selectedPlugin.Name, err)
 		}
 		tui.Success(fmt.Sprintf("Плагин %s успешно обновлен", selectedPlugin.Name))
 	} else {
 		tui.Info(fmt.Sprintf("Устанавливаем новый плагин: %s", selectedPlugin.Name))
+		slog.Info("Запуск установки нового плагина", "name", selectedPlugin.Name)
 		if err := installPlugin(am, wu, selectedPlugin, cfg.RootPath); err != nil {
+			slog.Error("Ошибка установки плагина", "name", selectedPlugin.Name, "error", err)
 			return fmt.Errorf("ошибка установки плагина %s: %w", selectedPlugin.Name, err)
 		}
 		tui.Success(fmt.Sprintf("Плагин %s успешно установлен", selectedPlugin.Name))
@@ -177,11 +194,13 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 
 // AutoUpdatePlugins выполняет автоматическое обновление плагинов
 func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Запуск AutoUpdatePlugins")
 	cfg := am.Cfg()
 
 	// Получить версию iikoFront
 	version, err := GetIikoFrontVersion(wu)
 	if err != nil {
+		slog.Error("Не удалось определить версию iikoFront", "error", err)
 		return fmt.Errorf("не удалось определить версию iikoFront: %w", err)
 	}
 	tui.Info(fmt.Sprintf("Обнаружена версия iikoFront: %s", version))
@@ -194,6 +213,7 @@ func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error
 
 	// Получить совместимые API версии
 	compatibleApiVersions := getCompatibleApiVersions(manifest, version)
+	slog.Debug("Совместимые версии API", "versions", compatibleApiVersions)
 
 	// Получить установленные плагины
 	installed, err := GetInstalledPlugins()
@@ -205,6 +225,7 @@ func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error
 	// Фильтровать установленные плагины по excludedPlugins и autoUpdatePlugins
 	filteredInstalled := FilterAutoUpdatePlugins(manifest, installed, cfg.DistroConfig.ExcludedPlugins, cfg.DistroConfig.AutoUpdatePlugins, compatibleApiVersions)
 	tui.Info(fmt.Sprintf("Плагинов для автообновления после фильтрации: %d", len(filteredInstalled)))
+	slog.Info("Плагины для автообновления", "list", filteredInstalled)
 
 	var updated []string
 
@@ -242,8 +263,10 @@ func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error
 		}
 
 		// Выполнить обновление
+		slog.Info("Обновление плагина", "name", pluginName, "version", plugin.PluginVersion)
 		if err := updatePlugin(am, wu, &plugin, cfg.RootPath, folderName); err != nil {
 			tui.Warn(fmt.Sprintf("Ошибка обновления плагина %s: %v", pluginName, err))
+			slog.Error("Ошибка обновления плагина", "name", pluginName, "error", err)
 			continue
 		}
 
@@ -252,6 +275,7 @@ func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error
 	}
 
 	tui.Info(fmt.Sprintf("Обновлено плагинов: %d", len(updated)))
+	slog.Info("Автообновление завершено", "count", len(updated))
 	return nil
 }
 
@@ -260,6 +284,8 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 	pluginsDir := `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
 	backupDir := filepath.Join(rootPath, "plugins_backup", folderName)
 	tempDir := filepath.Join(rootPath, "temp")
+
+	slog.Debug("Пути обновления", "pluginsDir", pluginsDir, "backupDir", backupDir)
 
 	// Создать директории
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
@@ -271,11 +297,13 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 
 	// Бэкап: переместить старую папку в backupDir
 	srcDir := filepath.Join(pluginsDir, folderName)
+	slog.Debug("Перемещение старой версии в бэкап", "src", srcDir, "dest", backupDir)
 	if err := wu.MoveDir(srcDir, backupDir); err != nil {
 		return fmt.Errorf("не удалось переместить старую папку в бэкап: %w", err)
 	}
 
 	// Скачать
+	slog.Debug("Скачивание плагина", "url", plugin.DownloadUrl)
 	zipPath, err := DownloadFile(am, plugin.DownloadUrl, tempDir)
 	if err != nil {
 		return fmt.Errorf("не удалось скачать плагин: %w", err)
@@ -295,6 +323,7 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 	}
 
 	// Использовать 7z для распаковки
+	slog.Debug("Распаковка архива", "zip", zipPath, "dest", extractDir)
 	if err := sevenZip.Extract(zipPath, extractDir, true); err != nil {
 		return fmt.Errorf("не удалось распаковать архив: %w", err)
 	}
@@ -340,6 +369,7 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 
 	// Скопировать .config из бэкапа
 	if err := CopyConfigIfExists(wu, backupDir, renamedDir); err != nil {
+		slog.Warn("Не удалось перенести конфиг", "error", err)
 		return fmt.Errorf("не удалось скопировать .config: %w", err)
 	}
 
@@ -351,6 +381,7 @@ func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPa
 			return fmt.Errorf("не удалось удалить старую версию: %w", err)
 		}
 	}
+	slog.Debug("Установка плагина в финальную директорию", "dest", destDir)
 	if err := wu.MoveDir(renamedDir, destDir); err != nil {
 		return fmt.Errorf("не удалось переместить обновленный плагин: %w", err)
 	}
@@ -372,6 +403,7 @@ func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootP
 	}
 
 	// Скачать
+	slog.Debug("Скачивание плагина", "url", plugin.DownloadUrl)
 	zipPath, err := DownloadFile(am, plugin.DownloadUrl, tempDir)
 	if err != nil {
 		return fmt.Errorf("не удалось скачать плагин: %w", err)
@@ -390,6 +422,7 @@ func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootP
 	}
 
 	// Использовать 7z для распаковки
+	slog.Debug("Распаковка архива", "zip", zipPath, "dest", extractDir)
 	if err := sevenZip.Extract(zipPath, extractDir, true); err != nil {
 		return fmt.Errorf("не удалось распаковать архив: %w", err)
 	}
@@ -435,6 +468,7 @@ func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootP
 
 	// Переместить в Plugins
 	destDir := filepath.Join(pluginsDir, newName)
+	slog.Debug("Перемещение плагина в целевую директорию", "dest", destDir)
 	if err := wu.MoveDir(renamedDir, destDir); err != nil {
 		return fmt.Errorf("не удалось переместить плагин: %w", err)
 	}
@@ -839,11 +873,18 @@ func GetIikoFrontVersion(wu core.WinUtils) (string, error) {
 // LoadManifest загружает манифест плагинов из URL
 func LoadManifest() (*Manifest, error) {
 	url := "https://f.serty.top/distr/installer/plugins-manifest.json"
+	slog.Debug("Загрузка манифеста", "url", url)
+
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("Сервер манифеста вернул ошибку", "status", resp.Status)
+		return nil, fmt.Errorf("сервер вернул статус: %s", resp.Status)
+	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -855,6 +896,7 @@ func LoadManifest() (*Manifest, error) {
 		return nil, err
 	}
 
+	slog.Info("Манифест плагинов загружен", "plugins_count", len(manifest.Plugins))
 	return &manifest, nil
 }
 
@@ -863,6 +905,10 @@ func GetInstalledPlugins() ([]string, error) {
 	pluginsDir := `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
 	entries, err := os.ReadDir(pluginsDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Debug("Директория плагинов не существует", "path", pluginsDir)
+			return []string{}, nil
+		}
 		return nil, err
 	}
 
@@ -872,6 +918,7 @@ func GetInstalledPlugins() ([]string, error) {
 			plugins = append(plugins, entry.Name())
 		}
 	}
+	slog.Debug("Найдены установленные плагины", "list", plugins)
 	return plugins, nil
 }
 
@@ -1001,6 +1048,7 @@ func processExtractedContent(extractDir string) error {
 
 	if len(entries) == 1 && entries[0].IsDir() && entries[0].Name() == extractName {
 		// Вложенная папка с тем же именем: переместить содержимое в родительскую
+		slog.Debug("Обнаружена лишняя вложенная папка, перемещение", "nested", entries[0].Name())
 		nestedDir := filepath.Join(extractDir, extractName)
 		nestedEntries, err := os.ReadDir(nestedDir)
 		if err != nil {
@@ -1018,6 +1066,7 @@ func processExtractedContent(extractDir string) error {
 		}
 	} else if len(entries) == 1 && !entries[0].IsDir() {
 		// Сразу файл: создать папку и переместить
+		slog.Debug("Архив содержит только файл, создание папки", "file", entries[0].Name())
 		pluginDir := filepath.Join(extractDir, extractName)
 		if err := os.MkdirAll(pluginDir, 0755); err != nil {
 			return fmt.Errorf("не удалось создать директорию плагина: %w", err)
@@ -1039,6 +1088,7 @@ func processExtractedContent(extractDir string) error {
 			}
 		}
 		if found {
+			slog.Debug("Обнаружена вложенная папка среди других файлов", "nested", nestedDir)
 			// Переместить содержимое вложенной папки в родительскую
 			nestedEntries, err := os.ReadDir(nestedDir)
 			if err != nil {
@@ -1056,6 +1106,7 @@ func processExtractedContent(extractDir string) error {
 			}
 		} else {
 			// Архив содержит сразу файлы и папки: создать папку с нужным именем и переместить все содержимое туда
+			slog.Debug("Архив содержит россыпь файлов, создание корневой папки")
 			pluginDir := filepath.Join(extractDir, extractName)
 			if err := os.MkdirAll(pluginDir, 0755); err != nil {
 				return fmt.Errorf("не удалось создать директорию плагина: %w", err)
@@ -1069,7 +1120,6 @@ func processExtractedContent(extractDir string) error {
 			}
 		}
 	}
-	// Если len(entries) == 1 и папка с другим именем, оставить как есть
 	return nil
 }
 
@@ -1079,7 +1129,7 @@ func CopyConfigIfExists(wu core.WinUtils, srcDir, destDir string) error {
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		return nil // файл не существует, ничего не копируем
 	}
-
+	slog.Debug("Копирование существующего конфига", "src", configFile)
 	destConfig := filepath.Join(destDir, ".config")
 	return wu.CopyFile(configFile, destConfig)
 }

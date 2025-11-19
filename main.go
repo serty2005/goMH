@@ -6,6 +6,7 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
+	"goMH/logging"
 	"goMH/modules/distro"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/frpc"
@@ -19,6 +20,7 @@ import (
 	"goMH/winutils"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -229,7 +231,7 @@ func main() {
 	}
 	tui.Success("Приложение запущено с правами администратора.")
 
-	// 2. Получение пути к конфигурации (новая логика)
+	// 2. Получение пути к конфигурации
 	finalConfigPath, err := getConfigPath(configPathFlag)
 	if err != nil {
 		log.Fatalf("Критическая ошибка: не удалось определить источник конфигурации: %v", err)
@@ -241,16 +243,22 @@ func main() {
 		log.Fatalf("Критическая ошибка: не удалось загрузить конфигурацию: %v", err)
 	}
 
-	// 4. Инициализация менеджера ресурсов
+	// 4. Инициализация логгера
+	logging.Init(cfg.LogLevel)
+	slog.Info("Логгер инициализирован с параметром из конфигурации.", "log_level", cfg.LogLevel, "cfg_path", finalConfigPath)
+
+	// 5. Инициализация менеджера ресурсов
 	assetManager, err := assetmgr.New(cfg)
 	if err != nil {
+		slog.Error("Критическая ошибка: не удалось инициализировать менеджер ресурсов", "error", err)
 		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
 	}
+	slog.Info("Менеджер ресурсов инициализирован")
 
 	// Создаём реальный объект утилит
 	RealWinUtils := &RealWinUtils{}
 
-	// 5. Регистрация всех доступных модулей
+	// 6. Регистрация всех доступных модулей
 	// map хранит core.Installer
 	registeredModules := map[string]core.Installer{
 		"VComCaster":    &vcomcaster.Module{},
@@ -264,7 +272,7 @@ func main() {
 		"UTM":           &utm.Module{},
 	}
 
-	// 6. Основной цикл меню
+	// 7. Основной цикл меню
 	for {
 		var availableModules []tui.Installer
 		for _, modDef := range cfg.Modules {
@@ -279,19 +287,23 @@ func main() {
 
 		selected, err := tui.ShowMenu(availableModules)
 		if err != nil {
+			slog.Info("Пользователь выбрал выход из главного меню")
 			tui.Info("Выход из программы.")
 			os.Exit(0)
 		}
 
 		selectedModule := selected.(core.Installer)
+		slog.Info("Пользователь выбрал модуль", "module_id", selectedModule.ID(), "menu_text", selectedModule.MenuText())
 
 		// Очищаем консоль перед переходом в подменю модуля
 		tui.ClearScreen()
 
 		err = selectedModule.Run(assetManager, RealWinUtils)
 		if err != nil {
+			slog.Error("Модуль завершился с ошибкой", "module_id", selectedModule.ID(), "error", err)
 			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", err))
 		} else {
+			slog.Info("Модуль успешно завершил работу", "module_id", selectedModule.ID())
 			tui.Success("\n--- Операция завершена успешно. ---")
 		}
 
