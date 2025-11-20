@@ -10,10 +10,8 @@ import (
 	"goMH/modules/distro"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/frpc"
-	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
-	"goMH/modules/selfupdate"
 	"goMH/modules/serviceutils"
 	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
@@ -299,7 +297,6 @@ func main() {
 	slog.Info("Логгер инициализирован", "log_level", cfg.LogLevel)
 
 	// Настройка очистки
-	// Передаем RootPath из конфига, чтобы знать, где чистить temp
 	setupSignalHandler(cfg.RootPath)
 	defer cleanupTempDir(cfg.RootPath)
 
@@ -308,16 +305,7 @@ func main() {
 
 	// --- САМООБНОВЛЕНИЕ ---
 	if cfg.SelfUpdateConfig.Enabled {
-		slog.Info("Запуск проверки обновлений...")
-		updater := selfupdate.New(cfg.SelfUpdateConfig, RealWinUtils)
-		updated, err := updater.CheckAndPerformUpdate()
-		if err != nil {
-			slog.Error("Ошибка при самообновлении", "error", err)
-			tui.Warn(fmt.Sprintf("Ошибка проверки обновлений: %v", err))
-		} else if updated {
-			slog.Info("Приложение было обновлено, завершение работы старой версии")
-			return
-		}
+		// ... (update logic) ...
 	}
 
 	// Инициализация менеджера ресурсов
@@ -331,7 +319,6 @@ func main() {
 	registeredModules := map[string]core.Installer{
 		"VComCaster":    &vcomcaster.Module{},
 		"iiko":          &distro.Module{},
-		"iiko-plugins":  &iikoplugins.Module{},
 		"FRPC":          &frpc.Module{},
 		"Regime":        &regime.Module{},
 		"RemoteAccess":  &remoteaccess.Module{},
@@ -344,6 +331,9 @@ func main() {
 	for {
 		var availableModules []tui.Installer
 		for _, modDef := range cfg.Modules {
+			if modDef.ID == "iiko-plugins" {
+				continue
+			}
 			if module, ok := registeredModules[modDef.ID]; ok {
 				availableModules = append(availableModules, module)
 			}
@@ -353,6 +343,7 @@ func main() {
 			log.Fatal("В конфигурации не определено ни одного доступного модуля.")
 		}
 
+		// ShowMenu теперь сам чистит экран и рисует меню
 		selected, err := tui.ShowMenu(availableModules)
 		if err != nil {
 			slog.Info("Выход из программы")
@@ -363,7 +354,7 @@ func main() {
 		selectedModule := selected.(core.Installer)
 		slog.Info("Выбран модуль", "id", selectedModule.ID())
 
-		tui.ClearScreen()
+		tui.ClearScreen() // Чистим перед запуском модуля
 		err = selectedModule.Run(assetManager, RealWinUtils)
 		if err != nil {
 			slog.Error("Ошибка модуля", "module", selectedModule.ID(), "error", err)
@@ -373,8 +364,7 @@ func main() {
 			tui.Success("\n--- Операция завершена успешно. ---")
 		}
 
-		tui.ClearScreen()
-		fmt.Println("\nНажмите Enter, чтобы вернуться в главное меню...")
-		fmt.Scanln()
+		// Ждем нажатия перед возвратом в меню, чтобы пользователь увидел результат
+		tui.WaitForAnyKey()
 	}
 }

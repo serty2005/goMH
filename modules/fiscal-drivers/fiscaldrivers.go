@@ -1,7 +1,6 @@
 package fiscaldrivers
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"goMH/config"
@@ -25,7 +24,7 @@ func (m *Module) MenuText() string {
 	return "Установка драйверов фискальных регистраторов"
 }
 
-// Run теперь управляет подменю выбора драйвера
+// Run теперь управляет подменю выбора драйвера (мгновенный ввод)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Запуск модуля FiscalDrivers")
 	drivers := am.Cfg().FiscalDriversConfig
@@ -34,9 +33,8 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		return errors.New("в конфигурации не определено ни одного драйвера (fiscal_drivers_config)")
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-
 	for {
+		tui.ClearScreen()
 		tui.Title("\n--- Выберите драйвер для установки ---")
 		for i, driver := range drivers {
 			fmt.Printf(" %d. %s\n", i+1, driver.MenuText)
@@ -44,17 +42,19 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		fmt.Println("\n 0. Назад в главное меню")
 		fmt.Print("Выберите пункт: ")
 
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
+		key, err := tui.ReadKey()
+		if err != nil {
+			return nil
+		}
 
-		if choiceStr == "0" {
+		if key == "0" {
 			slog.Info("Пользователь вышел из меню драйверов")
 			return nil
 		}
 
-		choice, err := strconv.Atoi(choiceStr)
+		choice, err := strconv.Atoi(key)
 		if err != nil || choice < 1 || choice > len(drivers) {
-			tui.Error("Неверный выбор. Попробуйте снова.")
+			// Неверный выбор, игнорируем
 			continue
 		}
 
@@ -83,6 +83,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		}
 
 		// Возвращаемся в главное меню после операции
+		tui.WaitForAnyKey()
 		return nil
 	}
 }

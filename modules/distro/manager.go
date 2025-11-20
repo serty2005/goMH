@@ -21,8 +21,10 @@ import (
 // Module реализует интерфейс core.Installer.
 type Module struct{}
 
-func (m *Module) ID() string       { return "iiko" }
-func (m *Module) MenuText() string { return "iiko / Syrve (Front, Back, Card)" }
+func (m *Module) ID() string { return "iiko" }
+func (m *Module) MenuText() string {
+	return "iiko / Syrve (Дистрибутивы и плагины)"
+}
 
 // DistroManager управляет всем процессом установки.
 type DistroManager struct {
@@ -37,56 +39,56 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	return dm.selectBrand()
 }
 
-// selectBrand - первый шаг, выбор между iiko и Syrve.
+// selectBrand - первый шаг, выбор между iiko и Syrve (цифровое меню с мгновенным вводом).
 func (dm *DistroManager) selectBrand() error {
 	slog.Debug("Отображение меню выбора бренда (iiko/Syrve)")
-	tui.DisableConsoleBeep()
-	defer tui.RestoreConsoleBeep()
 
-	prompt := promptui.Select{
-		Label: "Выберите продукт для установки",
-		Items: []string{"iiko", "Syrve", "Назад"},
-	}
-	_, result, err := prompt.Run()
-	if err != nil {
-		slog.Info("Выбор бренда отменен пользователем")
-		return nil // Пользователь отменил выбор (Ctrl+C)
-	}
-	slog.Info("Пользователь выбрал бренд", "brand", result)
+	for {
+		tui.ClearScreen()
+		tui.Title("\n--- Выберите продукт ---")
+		fmt.Println(" 1. iiko")
+		fmt.Println(" 2. Syrve")
+		fmt.Println("\n 0. Назад в главное меню")
+		fmt.Print("Ваш выбор: ")
 
-	switch result {
-	case "iiko":
-		handler := &iikoHandler{dm: dm}
-		return handler.Run()
-	case "Syrve":
-		handler := &syrveHandler{dm: dm}
-		return handler.Run()
-	default:
-		return nil // Выбрали "Назад"
+		// Используем ReadKey для мгновенного ввода
+		key, err := tui.ReadKey()
+		if err != nil {
+			// Если прерывание (Ctrl+C), выходим
+			return nil
+		}
+
+		switch key {
+		case "1":
+			slog.Info("Выбран бренд iiko")
+			handler := &iikoHandler{dm: dm}
+			return handler.Run()
+		case "2":
+			slog.Info("Выбран бренд Syrve")
+			handler := &syrveHandler{dm: dm}
+			return handler.Run()
+		case "0":
+			slog.Info("Выбор бренда отменен пользователем")
+			return nil
+		default:
+			// Игнорируем или мигаем ошибкой
+			// Для мгновенного меню лучше просто игнорировать неверные клавиши или быстро показать сообщение
+		}
 	}
 }
 
 // brandHandler определяет интерфейс для специфичной логики бренда.
 type brandHandler interface {
 	Run() error
-	selectComponentMenu() (config.DistroComponent, error)
 	getAvailableVersions() ([]string, error)
 	getAvailablePortableVersions(component config.DistroComponent) ([]string, error)
 	installComponent(component config.DistroComponent, version string) error
 	installPortable(component config.DistroComponent, version string) error
 }
 
-// runWorkflow - общий сценарий установки.
-// runWorkflow - обновленный общий сценарий установки.
-func (dm *DistroManager) runWorkflow(h brandHandler) error {
-	component, err := h.selectComponentMenu()
-	if err != nil {
-		if err == tui.ErrExitToMainMenu {
-			slog.Debug("Выбор компонента отменен пользователем")
-			return err
-		}
-		return nil
-	}
+// StartInstallFlow - общий сценарий установки для УЖЕ выбранного компонента.
+func (dm *DistroManager) StartInstallFlow(h brandHandler, component config.DistroComponent) error {
+	slog.Info("Запуск потока установки", "component", component.ID)
 
 	// Определяем установленную версию (если компонент версионный)
 	// Делаем это ВСЕГДА, если указан путь RunAfter
@@ -109,8 +111,6 @@ func (dm *DistroManager) runWorkflow(h brandHandler) error {
 
 	// Меню выбора режима установки (Обычная / Портативная)
 	mode := "install"
-	// Показываем выбор портативной версии только если есть ключ и обнаружена установка
-	// ИЛИ просто если есть ключ (чтобы можно было поставить portable даже если ничего нет)
 	if component.PortableArchiveKey != "" {
 		items := []string{"Стандартная установка (в Program Files)", "Портативная версия (распаковка)", "Назад"}
 		label := fmt.Sprintf("Выберите режим установки для %s", component.MenuText)

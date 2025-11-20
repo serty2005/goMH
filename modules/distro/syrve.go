@@ -1,4 +1,3 @@
-// modules/distro/syrve.go
 package distro
 
 import (
@@ -25,7 +24,17 @@ type syrveVersionInfo struct {
 }
 
 func (h *syrveHandler) Run() error {
-	return h.dm.runWorkflow(h)
+	// Теперь Run сам инициирует выбор компонента, так как StartInstallFlow ожидает уже выбранный
+	component, err := h.selectComponentMenu()
+	if err != nil {
+		if err == tui.ErrExitToMainMenu {
+			return nil
+		}
+		return err
+	}
+
+	// Запускаем поток установки для выбранного компонента
+	return h.dm.StartInstallFlow(h, component)
 }
 
 func (h *syrveHandler) selectComponentMenu() (config.DistroComponent, error) {
@@ -100,7 +109,12 @@ func (h *syrveHandler) getAvailableVersions() ([]string, error) {
 
 	var versionsData []syrveVersionInfo
 	if err := json.Unmarshal(body, &versionsData); err != nil {
-		slog.Error("Ошибка парсинга JSON манифеста", "error", err, "body_preview", string(body)[:min(len(body), 100)])
+		// Безопасное получение превью для лога
+		previewLen := len(body)
+		if previewLen > 100 {
+			previewLen = 100
+		}
+		slog.Error("Ошибка парсинга JSON манифеста", "error", err, "body_preview", string(body)[:previewLen])
 		return nil, fmt.Errorf("не удалось распарсить JSON манифеста: %w", err)
 	}
 

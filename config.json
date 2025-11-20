@@ -17,7 +17,7 @@
 		}
 	],
 	"self_update_config": {
-		"enabled": true,
+		"enabled": false,
 		"reference_url": "https://f.serty.top/distr/installer/goMH.exe",
 		"hash_url": "https://f.serty.top/distr/installer/goMH.md5",
 		"temp_dir": "C:\\MH\\_assets"
@@ -263,7 +263,7 @@
 			"type": "file"
 		},
 		"Regime_Installer": {
-			"url": "https://f.serty.top/regime-1.5.0-462.msi",
+			"url": "https://f.serty.top/regime-1.5.1-523.msi",
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "HTTP"
@@ -287,7 +287,7 @@
 			"download_method": "HTTP"
 		},
 		"UTM_Installer": {
-			"url": "https://f.serty.top/silent-setup-4.2.0-b2644.exe",
+			"url": "https://f.serty.top/silent-setup-4.2.0-b2660.exe",
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "HTTP"

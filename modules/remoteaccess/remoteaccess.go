@@ -1,7 +1,6 @@
 package remoteaccess
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -33,7 +32,7 @@ type remoteComponent struct {
 	InstallFunc    func(am core.AssetManager, wu core.WinUtils) error
 }
 
-// Главная функция Run теперь управляет подменю
+// Главная функция Run теперь управляет подменю (мгновенный ввод)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// Инициализируем компоненты
 	components := []*remoteComponent{
@@ -42,10 +41,9 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		{ID: "3", Name: "Getad Agent", ServiceName: "MH_Getad", InstallFunc: m.installGetad, AllowReinstall: true},
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-
 	// Основной цикл подменю
 	for {
+		tui.ClearScreen()
 		tui.Title("\n--- Меню установки средств удаленного доступа ---")
 		// Перед показом меню обновляем статусы
 		m.checkStatuses(wu, components)
@@ -66,18 +64,19 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		fmt.Println("\n 0. Назад в главное меню")
 		fmt.Print("Выберите пункт: ")
 
-		// Читаем выбор пользователя
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
+		key, err := tui.ReadKey()
+		if err != nil {
+			return nil
+		}
 
-		if choiceStr == "0" {
+		if key == "0" {
 			return nil // Выход из подменю
 		}
 
 		// Находим выбранный компонент
 		var chosenComponent *remoteComponent
 		for _, c := range components {
-			if c.ID == choiceStr {
+			if c.ID == key {
 				chosenComponent = c
 				break
 			}
@@ -85,28 +84,24 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 		// Если выбор корректен, запускаем установку
 		if chosenComponent != nil {
-			// Новая логика проверки
 			// Блокируем только если компонент установлен И у него НЕТ флага AllowReinstall
 			if chosenComponent.IsInstalled && !chosenComponent.AllowReinstall {
 				tui.Warn(fmt.Sprintf("\n%s уже установлен. Для переустановки сначала удалите его стандартными средствами Windows.", chosenComponent.Name))
-				fmt.Println("Нажмите Enter для продолжения...")
-				_, _ = reader.ReadString('\n')
+				tui.WaitForAnyKey()
 				continue
 			}
 
 			// Запускаем функцию установки
 			err := chosenComponent.InstallFunc(am, wu)
 			if err != nil {
-				tui.Error(fmt.Sprintf("\n--- ОШИБКА при установке/переустановке %s ---\n%v\n---------------------------------------\n", chosenComponent.Name, err))
+				tui.Error(fmt.Sprintf("\n--- ОШИБКА при установке/переустановке %s ---\\n%v\\n---------------------------------------\\n", chosenComponent.Name, err))
 			} else {
 				tui.Success(fmt.Sprintf("\n--- %s успешно установлен/переустановлен. ---", chosenComponent.Name))
 			}
-			fmt.Println("\nНажмите Enter, чтобы вернуться в меню...")
-			reader.ReadString('\n')
+			tui.WaitForAnyKey()
 
 		} else {
-			tui.Error("\nНеверный выбор. Попробуйте снова.")
-			time.Sleep(2 * time.Second)
+			// Неверный выбор, цикл просто повторится
 		}
 	}
 }

@@ -7,18 +7,22 @@ import (
 	"goMH/core"
 	"goMH/dependencies"
 	"goMH/tui"
-	"io"
-	"log/slog" // Импорт логгера
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+)
+
+// Constants
+const (
+	DefaultIikoPluginsDir = `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
+	ManifestURL           = "https://f.serty.top/distr/installer/plugins-manifest.json"
 )
 
 // Plugin представляет информацию о плагине
@@ -29,13 +33,7 @@ type Plugin struct {
 	DownloadUrl   string `json:"download_url"`
 }
 
-// PluginDisplayInfo представляет информацию о плагине для отображения в интерфейсе
-type PluginDisplayInfo struct {
-	Plugin      Plugin
-	DisplayText string
-}
-
-// UniquePluginDisplayInfo представляет информацию об уникальном плагине для отображения в интерфейсе
+// UniquePluginDisplayInfo представляет информацию об уникальном плагине для отображения
 type UniquePluginDisplayInfo struct {
 	Name        string
 	Versions    []Plugin
@@ -56,23 +54,15 @@ type Manifest struct {
 	Plugins     []Plugin    `json:"plugins"`
 }
 
-// Module реализует интерфейс core.Installer для управления плагинами iiko
+// Module реализует интерфейс core.Installer
 type Module struct{}
 
-// ID возвращает идентификатор модуля
-func (m *Module) ID() string {
-	return "iiko-plugins"
-}
-
-// MenuText возвращает текст для меню
-func (m *Module) MenuText() string {
-	return "Установка плагинов iiko"
-}
+func (m *Module) ID() string       { return "iiko-plugins" }
+func (m *Module) MenuText() string { return "Установка плагинов iiko" }
 
 // Run выполняет интерактивную установку плагинов через меню
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
-	slog.Info("Запуск модуля iiko-plugins (ручной режим)")
-	// Проверяем права администратора для операций с плагинами
+	slog.Info("Запуск модуля iiko-plugins (интерактивный режим)")
 	if !wu.IsAdmin() {
 		slog.Warn("Попытка запуска без прав администратора")
 		return fmt.Errorf("для установки плагинов требуются права администратора")
@@ -82,732 +72,413 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 // MenuInstallPlugins выполняет интерактивную установку плагинов через меню
 func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Начало процедуры выбора и установки плагина")
 	cfg := am.Cfg()
 
-	// Получить версию iikoFront
+	// 1. Получение версии iikoFront
 	version, err := GetIikoFrontVersion(wu)
 	if err != nil {
-		slog.Error("Не удалось определить версию iikoFront", "error", err)
+		slog.Error("Ошибка определения версии iikoFront", "error", err)
 		return fmt.Errorf("не удалось определить версию iikoFront: %w", err)
 	}
-	tui.Info(fmt.Sprintf("Обнаружена версия iikoFront: %s", version))
-	slog.Info("Обнаружена версия iikoFront", "version", version)
+	tui.InfoF("Обнаружена версия iikoFront: %s", version)
 
-	// Загрузить манифест
+	// 2. Загрузка манифеста
 	manifest, err := LoadManifest()
 	if err != nil {
-		slog.Error("Не удалось загрузить манифест", "error", err)
-		return fmt.Errorf("не удалось загрузить манифест: %w", err)
+		slog.Error("Ошибка загрузки манифеста", "error", err)
+		return err
 	}
 
-	// Получить совместимые API версии
+	// 3. Фильтрация доступных плагинов
 	compatibleApiVersions := getCompatibleApiVersions(manifest, version)
-	slog.Debug("Совместимые версии API", "versions", compatibleApiVersions)
+	slog.Debug("Определены совместимые версии API", "versions", compatibleApiVersions)
 
-	// Собрать доступные плагины по совместимым API версиям
 	var availablePlugins []Plugin
 	for _, plugin := range manifest.Plugins {
-		for _, apiVer := range compatibleApiVersions {
-			if plugin.ApiVersion == apiVer {
-				availablePlugins = append(availablePlugins, plugin)
-				break
-			}
+		if contains(compatibleApiVersions, plugin.ApiVersion) {
+			availablePlugins = append(availablePlugins, plugin)
 		}
 	}
 
-	// Отфильтровать по excludedPlugins
+	// Фильтрация исключенных
 	filteredPlugins := FilterPlugins(availablePlugins, cfg.DistroConfig.ExcludedPlugins)
-	slog.Debug("Доступные плагины после фильтрации", "count", len(filteredPlugins))
+	slog.Debug("Плагины отфильтрованы", "available_count", len(filteredPlugins))
 
-	// Сгруппировать плагины по имени
+	// Группировка
 	pluginGroups := make(map[string][]Plugin)
 	for _, plugin := range filteredPlugins {
 		pluginGroups[plugin.Name] = append(pluginGroups[plugin.Name], plugin)
 	}
 
-	// Получить установленные плагины для проверки
+	// Получение установленных
 	installed, err := GetInstalledPlugins()
 	if err != nil {
-		tui.Warn(fmt.Sprintf("Не удалось получить список установленных плагинов: %v", err))
-		slog.Warn("Не удалось получить список установленных плагинов", "error", err)
-		installed = []string{} // пустой список, если ошибка
+		slog.Warn("Не удалось прочитать директорию плагинов", "error", err)
+		installed = []string{}
 	}
 
-	// Отобразить меню выбора плагинов с поиском
-	selectedPlugin, err := selectPluginWithSearch(pluginGroups, installed)
+	// 4. UI Выбора имени плагина
+	// selectPluginWithSearch возвращает ВСЕ доступные версии для выбранного имени
+	selectedVersions, err := selectPluginWithSearch(pluginGroups, installed)
 	if err != nil {
-		// Проверяем, является ли ошибка выходом в главное меню
 		if err == tui.ErrExitToMainMenu {
+			slog.Info("Пользователь вышел в главное меню")
 			return err
 		}
 		return err
 	}
-	if selectedPlugin == nil {
-		slog.Info("Пользователь отменил выбор плагина")
-		return nil // пользователь отменил
+	if len(selectedVersions) == 0 {
+		return nil
 	}
 
-	slog.Info("Пользователь выбрал плагин", "name", selectedPlugin.Name, "default_version", selectedPlugin.PluginVersion)
-
-	// Если несколько версий, спросить выбор
-	if len(pluginGroups[selectedPlugin.Name]) > 1 {
-		selectedPlugin, err = selectPluginVersion(pluginGroups[selectedPlugin.Name])
-		if err != nil {
-			return err
-		}
-		if selectedPlugin == nil {
-			return nil // отмена
-		}
-		slog.Info("Пользователь выбрал конкретную версию", "version", selectedPlugin.PluginVersion)
+	// 5. UI Выбора конкретной версии (Stable vs Preview)
+	selectedPlugin, err := selectPluginVersion(selectedVersions)
+	if err != nil || selectedPlugin == nil {
+		return nil // Отмена или ошибка
 	}
 
-	// Найти folderName если установлен
-	var folderName string
-	for _, inst := range installed {
-		if strings.Contains(strings.ToLower(inst), strings.ToLower(selectedPlugin.Name)) {
-			folderName = inst
-			break
-		}
-	}
+	slog.Info("Выбран плагин для установки", "name", selectedPlugin.Name, "version", selectedPlugin.PluginVersion)
 
-	// Установить или обновить
-	if folderName != "" {
-		tui.Info(fmt.Sprintf("Плагин %s уже установлен, выполняем обновление", selectedPlugin.Name))
-		slog.Info("Запуск обновления плагина", "name", selectedPlugin.Name)
-		if err := updatePlugin(am, wu, selectedPlugin, cfg.RootPath, folderName); err != nil {
-			slog.Error("Ошибка обновления плагина", "name", selectedPlugin.Name, "error", err)
-			return fmt.Errorf("ошибка обновления плагина %s: %w", selectedPlugin.Name, err)
-		}
-		tui.Success(fmt.Sprintf("Плагин %s успешно обновлен", selectedPlugin.Name))
+	// Проверка на наличие установки (для обновления)
+	folderName := findInstalledFolderName(installed, selectedPlugin.Name)
+	isUpdate := folderName != ""
+
+	if isUpdate {
+		tui.InfoF("Плагин %s уже установлен (папка: %s), выполняем обновление...", selectedPlugin.Name, folderName)
 	} else {
-		tui.Info(fmt.Sprintf("Устанавливаем новый плагин: %s", selectedPlugin.Name))
-		slog.Info("Запуск установки нового плагина", "name", selectedPlugin.Name)
-		if err := installPlugin(am, wu, selectedPlugin, cfg.RootPath); err != nil {
-			slog.Error("Ошибка установки плагина", "name", selectedPlugin.Name, "error", err)
-			return fmt.Errorf("ошибка установки плагина %s: %w", selectedPlugin.Name, err)
-		}
-		tui.Success(fmt.Sprintf("Плагин %s успешно установлен", selectedPlugin.Name))
+		tui.InfoF("Устанавливаем новый плагин: %s", selectedPlugin.Name)
 	}
 
+	// 6. Установка / Обновление (Единая точка входа)
+	opts := deployOptions{
+		Plugin:            selectedPlugin,
+		RootPath:          cfg.RootPath,
+		PluginsDir:        DefaultIikoPluginsDir,
+		IsUpdate:          isUpdate,
+		CurrentFolderName: folderName,
+	}
+
+	if err := deployPlugin(am, wu, opts); err != nil {
+		slog.Error("Ошибка при развертывании плагина", "plugin", selectedPlugin.Name, "error", err)
+		return err
+	}
+
+	tui.SuccessF("Плагин %s успешно %s", selectedPlugin.Name, map[bool]string{true: "обновлен", false: "установлен"}[isUpdate])
 	return nil
 }
 
 // AutoUpdatePlugins выполняет автоматическое обновление плагинов
 func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error {
-	slog.Info("Запуск AutoUpdatePlugins")
+	slog.Info("Запуск автоматического обновления плагинов")
 	cfg := am.Cfg()
 
-	// Получить версию iikoFront
 	version, err := GetIikoFrontVersion(wu)
 	if err != nil {
-		slog.Error("Не удалось определить версию iikoFront", "error", err)
-		return fmt.Errorf("не удалось определить версию iikoFront: %w", err)
+		return fmt.Errorf("ошибка версии iikoFront: %w", err)
 	}
-	tui.Info(fmt.Sprintf("Обнаружена версия iikoFront: %s", version))
 
-	// Загрузить манифест
 	manifest, err := LoadManifest()
 	if err != nil {
-		return fmt.Errorf("не удалось загрузить манифест: %w", err)
+		return err
 	}
 
-	// Получить совместимые API версии
 	compatibleApiVersions := getCompatibleApiVersions(manifest, version)
-	slog.Debug("Совместимые версии API", "versions", compatibleApiVersions)
-
-	// Получить установленные плагины
 	installed, err := GetInstalledPlugins()
 	if err != nil {
-		return fmt.Errorf("не удалось получить список установленных плагинов: %w", err)
+		return err
 	}
-	tui.Info(fmt.Sprintf("Установлено плагинов: %d", len(installed)))
 
-	// Фильтровать установленные плагины по excludedPlugins и autoUpdatePlugins
-	filteredInstalled := FilterAutoUpdatePlugins(manifest, installed, cfg.DistroConfig.ExcludedPlugins, cfg.DistroConfig.AutoUpdatePlugins, compatibleApiVersions)
-	tui.Info(fmt.Sprintf("Плагинов для автообновления после фильтрации: %d", len(filteredInstalled)))
-	slog.Info("Плагины для автообновления", "list", filteredInstalled)
+	targets := FilterAutoUpdatePlugins(manifest, installed, cfg.DistroConfig.ExcludedPlugins, cfg.DistroConfig.AutoUpdatePlugins, compatibleApiVersions)
+	slog.Info("Цели для автообновления", "count", len(targets), "targets", targets)
 
-	var updated []string
-
-	for _, pluginName := range filteredInstalled {
-		// Найти все версии плагина с этим именем в манифесте
-		var pluginVersions []Plugin
+	var updatedCount int
+	for _, pluginName := range targets {
+		// Ищем лучшую версию
+		var versions []Plugin
 		for _, p := range manifest.Plugins {
 			if strings.EqualFold(p.Name, pluginName) {
-				pluginVersions = append(pluginVersions, p)
-			}
-		}
-		if len(pluginVersions) == 0 {
-			tui.Warn(fmt.Sprintf("Плагин %s не найден в манифесте", pluginName))
-			continue
-		}
-		// Выбрать плагин с максимальной plugin_version
-		plugin := pluginVersions[0]
-		for _, p := range pluginVersions {
-			if compareSemanticVersions(p.PluginVersion, plugin.PluginVersion) > 0 {
-				plugin = p
+				versions = append(versions, p)
 			}
 		}
 
-		// Найти folderName
-		var folderName string
-		for _, inst := range installed {
-			if strings.Contains(strings.ToLower(inst), strings.ToLower(pluginName)) {
-				folderName = inst
-				break
-			}
+		// Для автообновления берем "лучшую" версию без вопросов (Stable приоритетнее)
+		bestPlugin := selectBestPluginVersion(versions)
+		if bestPlugin == nil {
+			slog.Warn("Не найдена подходящая версия для автообновления", "plugin", pluginName)
+			continue
 		}
+
+		folderName := findInstalledFolderName(installed, pluginName)
 		if folderName == "" {
-			tui.Warn(fmt.Sprintf("Папка для плагина %s не найдена", pluginName))
 			continue
 		}
 
-		// Выполнить обновление
-		slog.Info("Обновление плагина", "name", pluginName, "version", plugin.PluginVersion)
-		if err := updatePlugin(am, wu, &plugin, cfg.RootPath, folderName); err != nil {
-			tui.Warn(fmt.Sprintf("Ошибка обновления плагина %s: %v", pluginName, err))
-			slog.Error("Ошибка обновления плагина", "name", pluginName, "error", err)
-			continue
+		opts := deployOptions{
+			Plugin:            bestPlugin,
+			RootPath:          cfg.RootPath,
+			PluginsDir:        DefaultIikoPluginsDir,
+			IsUpdate:          true,
+			CurrentFolderName: folderName,
 		}
 
-		updated = append(updated, pluginName)
-		tui.Info(fmt.Sprintf("Плагин %s успешно обновлен", pluginName))
+		slog.Info("Автообновление плагина", "name", pluginName, "version", bestPlugin.PluginVersion)
+		if err := deployPlugin(am, wu, opts); err != nil {
+			slog.Error("Ошибка автообновления", "plugin", pluginName, "error", err)
+			tui.Warn(fmt.Sprintf("Не удалось обновить %s: %v", pluginName, err))
+			continue
+		}
+		updatedCount++
+		tui.InfoF("Автообновление: %s -> v%s OK", pluginName, bestPlugin.PluginVersion)
 	}
 
-	tui.Info(fmt.Sprintf("Обновлено плагинов: %d", len(updated)))
-	slog.Info("Автообновление завершено", "count", len(updated))
+	slog.Info("Автообновление завершено", "updated_count", updatedCount)
 	return nil
 }
 
-// updatePlugin выполняет обновление одного плагина
-func updatePlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPath, folderName string) error {
-	pluginsDir := `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
-	backupDir := filepath.Join(rootPath, "plugins_backup", folderName)
-	tempDir := filepath.Join(rootPath, "temp")
+// --- Core Deployment Logic ---
 
-	slog.Debug("Пути обновления", "pluginsDir", pluginsDir, "backupDir", backupDir)
+type deployOptions struct {
+	Plugin            *Plugin
+	RootPath          string // C:\MH
+	PluginsDir        string // C:\Program Files\iiko\...\Plugins
+	IsUpdate          bool
+	CurrentFolderName string // Имя папки существующего плагина (только для update)
+}
 
-	// Создать директории
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать директорию бэкапа: %w", err)
-	}
+// deployPlugin - универсальная функция для установки и обновления
+func deployPlugin(am core.AssetManager, wu core.WinUtils, opts deployOptions) error {
+	slog.Debug("Начало deployPlugin", "plugin", opts.Plugin.Name, "isUpdate", opts.IsUpdate)
+
+	// 1. Подготовка путей
+	tempDir := filepath.Join(opts.RootPath, "temp")
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать временную директорию: %w", err)
+		return fmt.Errorf("ошибка создания temp: %w", err)
 	}
 
-	// Бэкап: переместить старую папку в backupDir
-	srcDir := filepath.Join(pluginsDir, folderName)
-	slog.Debug("Перемещение старой версии в бэкап", "src", srcDir, "dest", backupDir)
-	if err := wu.MoveDir(srcDir, backupDir); err != nil {
-		return fmt.Errorf("не удалось переместить старую папку в бэкап: %w", err)
-	}
-
-	// Скачать
-	slog.Debug("Скачивание плагина", "url", plugin.DownloadUrl)
-	zipPath, err := DownloadFile(am, plugin.DownloadUrl, tempDir)
+	// 2. Скачивание
+	zipPath, err := DownloadFile(am, opts.Plugin.DownloadUrl, tempDir)
 	if err != nil {
-		return fmt.Errorf("не удалось скачать плагин: %w", err)
+		return fmt.Errorf("скачивание не удалось: %w", err)
+	}
+	slog.Debug("Файл скачан", "path", zipPath)
+
+	// 3. Распаковка во временную папку
+	extractDir := filepath.Join(tempDir, fmt.Sprintf("extract_%s", opts.Plugin.Name))
+	// Очистим extractDir на случай мусора
+	_ = os.RemoveAll(extractDir)
+	if err := os.MkdirAll(extractDir, 0755); err != nil {
+		return err
 	}
 
-	// Получить путь к 7z.exe
 	sevenZip, err := dependencies.NewClient(am, wu)
 	if err != nil {
-		return fmt.Errorf("не удалось инициализировать клиент 7-Zip: %w", err)
+		return err
 	}
 
-	// Распаковать
-	extractDir := filepath.Join(tempDir, strings.TrimSuffix(filepath.Base(zipPath), ".zip"))
-	// Создать директорию для распаковки заранее
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать директорию для распаковки: %w", err)
-	}
-
-	// Использовать 7z для распаковки
-	slog.Debug("Распаковка архива", "zip", zipPath, "dest", extractDir)
+	slog.Debug("Распаковка архива", "dest", extractDir)
 	if err := sevenZip.Extract(zipPath, extractDir, true); err != nil {
-		return fmt.Errorf("не удалось распаковать архив: %w", err)
+		return fmt.Errorf("ошибка распаковки: %w", err)
 	}
 
-	// Обработать содержимое распакованной папки
-	if err := processExtractedContent(extractDir); err != nil {
-		return fmt.Errorf("не удалось обработать содержимое архива: %w", err)
-	}
-
-	// Найти папку плагина в extractDir (теперь гарантированно одна)
+	// 4. Анализ и нормализация распакованного
 	entries, err := os.ReadDir(extractDir)
 	if err != nil {
 		return fmt.Errorf("не удалось прочитать директорию распаковки: %w", err)
 	}
-	if len(entries) != 1 || !entries[0].IsDir() {
-		return fmt.Errorf("неожиданная структура архива после обработки")
-	}
-	extractedPluginDir := filepath.Join(extractDir, entries[0].Name())
 
-	// Переименовать папку (убрать версию)
-	extractedName := entries[0].Name()
-	// Найти первое вхождение версии API (V\d+ или V\d+Preview\d+) и обрезать строку после этой версии
-	re := regexp.MustCompile(`V\d+(?:Preview\d+)?`)
-	loc := re.FindStringIndex(extractedName)
-	var newName string
-	if loc != nil {
-		newName = extractedName[:loc[1]]
+	var pluginContentDir string
+	var rawName string
+	zipBaseName := strings.TrimSuffix(filepath.Base(zipPath), ".zip")
+
+	// Определение: это архив с одной папкой (стандарт) или "плоский" архив?
+	if len(entries) == 1 && entries[0].IsDir() {
+		// Стандартный случай: внутри папка с плагином
+		rawName = entries[0].Name()
+		pluginContentDir = filepath.Join(extractDir, rawName)
+		slog.Debug("Архив содержит папку", "rawName", rawName)
 	} else {
-		newName = extractedName // если не найдено, оставить как есть
-	}
-	renamedDir := filepath.Join(extractDir, newName)
-	// Создать новую папку с правильным именем и скопировать содержимое
-	if err := os.MkdirAll(renamedDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать папку для плагина: %w", err)
-	}
-	if err := wu.CopyDir(extractedPluginDir, renamedDir); err != nil {
-		return fmt.Errorf("не удалось скопировать содержимое плагина: %w", err)
-	}
-	// Удалить старую папку
-	if err := os.RemoveAll(extractedPluginDir); err != nil {
-		return fmt.Errorf("не удалось удалить старую папку плагина: %w", err)
+		// Плоский архив: файлы в корне. Используем имя ZIP-файла как базу.
+		rawName = zipBaseName
+		pluginContentDir = extractDir
+		slog.Debug("Архив плоский, используем имя ZIP-файла", "rawName", rawName)
 	}
 
-	// Скопировать .config из бэкапа
-	if err := CopyConfigIfExists(wu, backupDir, renamedDir); err != nil {
-		slog.Warn("Не удалось перенести конфиг", "error", err)
-		return fmt.Errorf("не удалось скопировать .config: %w", err)
-	}
+	// Нормализация имени: берем rawName и отрезаем версию плагина, оставляя API версию
+	cleanName := normalizePluginDirName(rawName)
+	slog.Debug("Имя папки плагина рассчитано", "original", rawName, "normalized", cleanName)
 
-	// Переместить в Plugins
-	destDir := filepath.Join(pluginsDir, newName)
-	// Убедиться, что finalDir не существует
-	if _, err := os.Stat(destDir); !os.IsNotExist(err) {
-		if err := os.RemoveAll(destDir); err != nil {
+	// 5. Логика обновления (Бэкап + Конфиг)
+	if opts.IsUpdate {
+		backupRoot := filepath.Join(opts.RootPath, "plugins_backup")
+		currentInstallPath := filepath.Join(opts.PluginsDir, opts.CurrentFolderName)
+
+		// Бэкап
+		slog.Debug("Бэкап плагина", "src", currentInstallPath, "dest_root", backupRoot)
+		if err := backupPlugin(wu, currentInstallPath, backupRoot, opts.CurrentFolderName); err != nil {
+			return err
+		}
+
+		// Сохранение конфига: копируем .config из бэкапа в новую распакованную папку
+		backupPath := filepath.Join(backupRoot, opts.CurrentFolderName)
+		if err := restoreConfig(wu, backupPath, pluginContentDir); err != nil {
+			slog.Warn("Не удалось перенести конфиг (возможно его нет)", "error", err)
+		}
+
+		// Удаляем старую версию из Plugins
+		slog.Debug("Удаление старой версии", "path", currentInstallPath)
+		if err := os.RemoveAll(currentInstallPath); err != nil {
 			return fmt.Errorf("не удалось удалить старую версию: %w", err)
 		}
 	}
-	slog.Debug("Установка плагина в финальную директорию", "dest", destDir)
-	if err := wu.MoveDir(renamedDir, destDir); err != nil {
-		return fmt.Errorf("не удалось переместить обновленный плагин: %w", err)
+
+	// 6. Перемещение новой версии в целевую директорию
+	finalDestPath := filepath.Join(opts.PluginsDir, cleanName)
+
+	if !opts.IsUpdate {
+		if _, err := os.Stat(finalDestPath); err == nil {
+			slog.Info("Целевая папка существует, удаляем перед установкой", "path", finalDestPath)
+			_ = os.RemoveAll(finalDestPath)
+		}
 	}
 
-	// Очистить temp
-	os.RemoveAll(tempDir)
+	slog.Info("Установка файлов плагина", "from", pluginContentDir, "to", finalDestPath)
+	if err := wu.CopyDir(pluginContentDir, finalDestPath); err != nil {
+		return fmt.Errorf("ошибка копирования в Program Files: %w", err)
+	}
 
+	// 7. Очистка
+	_ = os.RemoveAll(tempDir)
 	return nil
 }
 
-// installPlugin выполняет установку нового плагина
-func installPlugin(am core.AssetManager, wu core.WinUtils, plugin *Plugin, rootPath string) error {
-	pluginsDir := `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
-	tempDir := filepath.Join(rootPath, "temp")
+// --- Helper Functions ---
 
-	// Создать временную директорию
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать временную директорию: %w", err)
+func findInstalledFolderName(installed []string, pluginName string) string {
+	lowerName := strings.ToLower(pluginName)
+	for _, folder := range installed {
+		if strings.Contains(strings.ToLower(folder), lowerName) {
+			return folder
+		}
 	}
+	return ""
+}
 
-	// Скачать
-	slog.Debug("Скачивание плагина", "url", plugin.DownloadUrl)
-	zipPath, err := DownloadFile(am, plugin.DownloadUrl, tempDir)
-	if err != nil {
-		return fmt.Errorf("не удалось скачать плагин: %w", err)
-	}
-
-	sevenZip, err := dependencies.NewClient(am, wu)
-	if err != nil {
-		return fmt.Errorf("не удалось инициализировать клиент 7-Zip: %w", err)
-	}
-
-	// Распаковать
-	extractDir := filepath.Join(tempDir, strings.TrimSuffix(filepath.Base(zipPath), ".zip"))
-	// Создать директорию для распаковки заранее
-	if err := os.MkdirAll(extractDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать директорию для распаковки: %w", err)
-	}
-
-	// Использовать 7z для распаковки
-	slog.Debug("Распаковка архива", "zip", zipPath, "dest", extractDir)
-	if err := sevenZip.Extract(zipPath, extractDir, true); err != nil {
-		return fmt.Errorf("не удалось распаковать архив: %w", err)
-	}
-
-	// Обработать содержимое распакованной папки
-	if err := processExtractedContent(extractDir); err != nil {
-		return fmt.Errorf("не удалось обработать содержимое архива: %w", err)
-	}
-
-	// Найти папку плагина в extractDir (теперь гарантированно одна)
-	entries, err := os.ReadDir(extractDir)
-	if err != nil {
-		return fmt.Errorf("не удалось прочитать директорию распаковки: %w", err)
-	}
-	if len(entries) != 1 || !entries[0].IsDir() {
-		return fmt.Errorf("неожиданная структура архива после обработки")
-	}
-	extractedPluginDir := filepath.Join(extractDir, entries[0].Name())
-
-	// Переименовать папку (убрать версию)
-	extractedName := entries[0].Name()
-	// Найти первое вхождение версии API (V\d+ или V\d+Preview\d+) и обрезать строку после этой версии
+func normalizePluginDirName(name string) string {
+	// Паттерн ищет версию API: V + цифры + опционально Preview + цифры
 	re := regexp.MustCompile(`V\d+(?:Preview\d+)?`)
-	loc := re.FindStringIndex(extractedName)
-	var newName string
+	loc := re.FindStringIndex(name)
+
 	if loc != nil {
-		newName = extractedName[:loc[1]]
-	} else {
-		newName = extractedName // если не найдено, оставить как есть
-	}
-	renamedDir := filepath.Join(extractDir, newName)
-	// Создать новую папку с правильным именем и скопировать содержимое
-	if err := os.MkdirAll(renamedDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать папку для плагина: %w", err)
-	}
-	if err := wu.CopyDir(extractedPluginDir, renamedDir); err != nil {
-		return fmt.Errorf("не удалось скопировать содержимое плагина: %w", err)
-	}
-	// Удалить старую папку
-	if err := os.RemoveAll(extractedPluginDir); err != nil {
-		return fmt.Errorf("не удалось удалить старую папку плагина: %w", err)
+		// loc[1] - это конец совпадения версии API.
+		// Мы хотим оставить всё до этого места включительно.
+		// Пример: "Name.V9Preview4.1.2.39" -> loc="V9Preview4" -> loc[1] указывает на конец "4".
+		// Результат: "Name.V9Preview4"
+		return name[:loc[1]]
 	}
 
-	// Переместить в Plugins
-	destDir := filepath.Join(pluginsDir, newName)
-	slog.Debug("Перемещение плагина в целевую директорию", "dest", destDir)
-	if err := wu.MoveDir(renamedDir, destDir); err != nil {
-		return fmt.Errorf("не удалось переместить плагин: %w", err)
+	if strings.HasPrefix(name, "extract_") {
+		return strings.TrimPrefix(name, "extract_")
 	}
 
-	// Очистить temp
-	os.RemoveAll(tempDir)
+	return name
+}
 
+func backupPlugin(wu core.WinUtils, src, backupRoot, folderName string) error {
+	dest := filepath.Join(backupRoot, folderName)
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return fmt.Errorf("ошибка создания папки бэкапа: %w", err)
+	}
+	_ = os.RemoveAll(dest)
+	if err := wu.CopyDir(src, dest); err != nil {
+		return fmt.Errorf("ошибка копирования в бэкап: %w", err)
+	}
 	return nil
 }
 
-// buildPluginDisplayText создает форматированную строку для отображения плагина
-func buildPluginDisplayText(plugin Plugin, isInstalled bool) string {
-	var parts []string
-
-	// Название плагина
-	parts = append(parts, plugin.Name)
-
-	// Версия плагина
-	if plugin.PluginVersion != "" {
-		parts = append(parts, fmt.Sprintf("v%s", plugin.PluginVersion))
-	}
-
-	// API версия
-	if plugin.ApiVersion != "" {
-		parts = append(parts, fmt.Sprintf("API:%s", plugin.ApiVersion))
-	}
-
-	// Статус установки
-	if isInstalled {
-		parts = append(parts, "[УСТАНОВЛЕН]")
-	}
-
-	return strings.Join(parts, " ")
-}
-
-// buildUniquePluginDisplayText создает форматированную строку для отображения уникального плагина
-func buildUniquePluginDisplayText(name string, versions []Plugin, isInstalled bool) string {
-	var parts []string
-
-	// Название плагина
-	parts = append(parts, name)
-
-	// Количество доступных версий
-	if len(versions) > 0 {
-		parts = append(parts, fmt.Sprintf("(%d версий)", len(versions)))
-	}
-
-	// Диапазон API версий
-	apiVersions := make(map[string]bool)
-	for _, plugin := range versions {
-		if plugin.ApiVersion != "" {
-			apiVersions[plugin.ApiVersion] = true
-		}
-	}
-	if len(apiVersions) > 0 {
-		var apiList []string
-		for api := range apiVersions {
-			apiList = append(apiList, api)
-		}
-		parts = append(parts, fmt.Sprintf("API: %s", strings.Join(apiList, ", ")))
-	}
-
-	// Статус установки
-	if isInstalled {
-		parts = append(parts, "[УСТАНОВЛЕН]")
-	}
-
-	return strings.Join(parts, " ")
-}
-
-// selectBestPluginVersion выбирает наиболее подходящую версию плагина
-func selectBestPluginVersion(versions []Plugin) *Plugin {
-	if len(versions) == 0 {
+func restoreConfig(wu core.WinUtils, backupSrc, newVersionDir string) error {
+	configFile := filepath.Join(backupSrc, ".config")
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		return nil
 	}
-
-	// Найти стабильную версию: среди версий без "Preview" в api_version, сначала найти максимальный api_version, затем среди версий с этим api_version выбрать максимальную plugin_version
-	var stable *Plugin
-	var stableVersions []Plugin
-	for _, v := range versions {
-		if !strings.Contains(strings.ToLower(v.ApiVersion), "preview") {
-			stableVersions = append(stableVersions, v)
-		}
-	}
-	if len(stableVersions) > 0 {
-		// Найти максимальный api_version среди стабильных
-		maxApiVer := stableVersions[0].ApiVersion
-		for _, v := range stableVersions {
-			if compareApiVersions(v.ApiVersion, maxApiVer) > 0 {
-				maxApiVer = v.ApiVersion
-			}
-		}
-		// Среди версий с максимальным api_version найти максимальную plugin_version
-		var candidates []Plugin
-		for _, v := range stableVersions {
-			if v.ApiVersion == maxApiVer {
-				candidates = append(candidates, v)
-			}
-		}
-		stable = &candidates[0]
-		maxPluginVer := candidates[0].PluginVersion
-		for _, v := range candidates {
-			if compareSemanticVersions(v.PluginVersion, maxPluginVer) > 0 {
-				maxPluginVer = v.PluginVersion
-				stable = &v
-			}
-		}
-	}
-
-	// Найти последнюю версию: самая большая plugin_version среди всех версий
-	latest := versions[0]
-	for _, v := range versions {
-		if compareSemanticVersions(v.PluginVersion, latest.PluginVersion) > 0 {
-			latest = v
-		}
-	}
-
-	// Если нет стабильной версии, использовать последнюю как стабильную
-	if stable == nil {
-		stable = &latest
-	}
-
-	return stable
+	destConfig := filepath.Join(newVersionDir, ".config")
+	slog.Debug("Восстановление конфига", "from", configFile, "to", destConfig)
+	return wu.CopyFile(configFile, destConfig)
 }
 
-// selectPluginWithSearch создает интерфейс с поиском для выбора уникального плагина
-func selectPluginWithSearch(pluginGroups map[string][]Plugin, installed []string) (*Plugin, error) {
-	// Создаем информацию об уникальных плагинах для отображения
-	var uniquePlugins []UniquePluginDisplayInfo
-	for name, versions := range pluginGroups {
-		// Проверяем статус установки для группы плагинов
-		isInstalled := false
-		for _, inst := range installed {
-			if strings.Contains(strings.ToLower(inst), strings.ToLower(name)) {
-				isInstalled = true
-				break
-			}
-		}
-
-		// Создаем отображаемый текст для уникального плагина
-		displayText := buildUniquePluginDisplayText(name, versions, isInstalled)
-
-		uniquePlugin := UniquePluginDisplayInfo{
-			Name:        name,
-			Versions:    versions,
-			DisplayText: displayText,
-			IsInstalled: isInstalled,
-		}
-		uniquePlugins = append(uniquePlugins, uniquePlugin)
-	}
-
-	// Сортируем список уникальных плагинов по алфавиту по имени плагина
-	sort.Slice(uniquePlugins, func(i, j int) bool {
-		return strings.ToLower(uniquePlugins[i].Name) < strings.ToLower(uniquePlugins[j].Name)
-	})
-
-	// Создаем список строк для отображения (только уникальные имена плагинов)
-	itemStrings := make([]string, len(uniquePlugins))
-	for i, uniquePlugin := range uniquePlugins {
-		itemStrings[i] = uniquePlugin.DisplayText
-	}
-
-	// Используем tui.SelectWithSearch для поиска по именам плагинов
-	selectedText, err := tui.SelectWithSearch(itemStrings, "Выберите плагин для установки/обновления (введите текст для поиска):")
+func DownloadFile(am core.AssetManager, urlStr, dir string) (string, error) {
+	u, err := url.Parse(urlStr)
 	if err != nil {
-		// Проверяем, является ли ошибка выходом в главное меню
-		if err == tui.ErrExitToMainMenu {
-			return nil, err
+		return "", err
+	}
+	filename := filepath.Base(u.Path)
+	localPath := filepath.Join(dir, filename)
+	slog.Debug("Скачивание файла", "url", urlStr, "local", localPath)
+	_, err = am.DownloadHTTPWithProgress(urlStr, localPath)
+	return localPath, err
+}
+
+func GetIikoFrontVersion(wu core.WinUtils) (string, error) {
+	exePath := `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`
+	version, err := wu.GetFileVersion(exePath)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) >= 3 {
+		return strings.Join(parts[:3], "."), nil
+	}
+	return version, nil
+}
+
+func LoadManifest() (*Manifest, error) {
+	slog.Debug("Загрузка манифеста плагинов", "url", ManifestURL)
+	resp, err := http.Get(ManifestURL)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка сети: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	var manifest Manifest
+	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("ошибка JSON: %w", err)
+	}
+	return &manifest, nil
+}
+
+func GetInstalledPlugins() ([]string, error) {
+	entries, err := os.ReadDir(DefaultIikoPluginsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
 		}
 		return nil, err
 	}
-
-	// Находим выбранный плагин по отображаемому тексту
-	var selectedUniquePlugin *UniquePluginDisplayInfo
-	for i, uniquePlugin := range uniquePlugins {
-		if uniquePlugin.DisplayText == selectedText {
-			selectedUniquePlugin = &uniquePlugins[i]
-			break
+	var plugins []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			plugins = append(plugins, entry.Name())
 		}
 	}
-
-	if selectedUniquePlugin == nil {
-		return nil, fmt.Errorf("не удалось найти выбранный плагин")
-	}
-
-	// Если несколько версий, выбираем наиболее подходящую версию
-	var selectedPlugin *Plugin
-	if len(selectedUniquePlugin.Versions) == 1 {
-		// Только одна версия - выбираем её
-		selectedPlugin = &selectedUniquePlugin.Versions[0]
-	} else {
-		// Несколько версий - выбираем наиболее подходящую
-		selectedPlugin = selectBestPluginVersion(selectedUniquePlugin.Versions)
-	}
-
-	return selectedPlugin, nil
+	return plugins, nil
 }
 
-// selectPluginVersion позволяет выбрать версию плагина
-func selectPluginVersion(versions []Plugin) (*Plugin, error) {
-	reader := bufio.NewReader(os.Stdin)
+// --- Logic helpers ---
 
-	// Найти стабильную версию: среди версий без "Preview" в api_version, сначала найти максимальный api_version, затем среди версий с этим api_version выбрать максимальную plugin_version
-	var stable *Plugin
-	var stableVersions []Plugin
-	for _, v := range versions {
-		if !strings.Contains(strings.ToLower(v.ApiVersion), "preview") {
-			stableVersions = append(stableVersions, v)
+func getCompatibleApiVersions(manifest *Manifest, frontVersion string) []string {
+	var compatible []string
+	for _, compat := range manifest.ApiVersions {
+		if isVersionInRange(frontVersion, compat.MinFrontVersion, compat.MaxFrontVersion) {
+			compatible = append(compatible, compat.ApiVersion)
 		}
 	}
-	if len(stableVersions) > 0 {
-		// Найти максимальный api_version среди стабильных
-		maxApiVer := stableVersions[0].ApiVersion
-		for _, v := range stableVersions {
-			if compareApiVersions(v.ApiVersion, maxApiVer) > 0 {
-				maxApiVer = v.ApiVersion
-			}
-		}
-		// Среди версий с максимальным api_version найти максимальную plugin_version
-		var candidates []Plugin
-		for _, v := range stableVersions {
-			if v.ApiVersion == maxApiVer {
-				candidates = append(candidates, v)
-			}
-		}
-		stable = &candidates[0]
-		maxPluginVer := candidates[0].PluginVersion
-		for _, v := range candidates {
-			if compareSemanticVersions(v.PluginVersion, maxPluginVer) > 0 {
-				maxPluginVer = v.PluginVersion
-				stable = &v
-			}
-		}
-	}
-
-	// Найти последнюю версию: самая большая plugin_version среди всех версий
-	latest := versions[0]
-	for _, v := range versions {
-		if compareSemanticVersions(v.PluginVersion, latest.PluginVersion) > 0 {
-			latest = v
-		}
-	}
-
-	// Если нет стабильной версии, использовать последнюю как стабильную
-	if stable == nil {
-		stable = &latest
-	}
-
-	for {
-		clearScreen()
-		fmt.Println(tui.ColorYellow + "==================================================" + tui.ColorReset)
-		fmt.Println(tui.ColorYellow + "            ВЫБОР ВЕРСИИ ПЛАГИНА                 " + tui.ColorReset)
-		fmt.Println(tui.ColorYellow + "==================================================" + tui.ColorReset)
-		fmt.Println()
-		fmt.Printf("Плагин: %s\n", versions[0].Name)
-		fmt.Println()
-		fmt.Printf(" 1. Для LTS-версии API: %s\n", stable.PluginVersion)
-		fmt.Printf(" 2. Для Preview-версии API: %s\n", latest.PluginVersion)
-		fmt.Println()
-		fmt.Println(" Q. Назад")
-		fmt.Println()
-		fmt.Print("Введите номер пункта и нажмите Enter: ")
-
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
-
-		if strings.EqualFold(choiceStr, "q") {
-			return nil, nil // отмена
-		}
-
-		switch choiceStr {
-		case "1":
-			return stable, nil
-		case "2":
-			return &latest, nil
-		default:
-			tui.Error("\nНеверный выбор. Нажмите Enter, чтобы попробовать снова.")
-			_, _ = reader.ReadString('\n')
-			continue
-		}
-	}
+	return compatible
 }
 
-// compareSemanticVersions сравнивает две семантические версии
-func compareSemanticVersions(v1, v2 string) int {
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
-
-	maxLen := len(parts1)
-	if len(parts2) > maxLen {
-		maxLen = len(parts2)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		var num1, num2 int
-		if i < len(parts1) {
-			num1, _ = strconv.Atoi(parts1[i])
-		}
-		if i < len(parts2) {
-			num2, _ = strconv.Atoi(parts2[i])
-		}
-
-		if num1 > num2 {
-			return 1
-		} else if num1 < num2 {
-			return -1
-		}
-	}
-	return 0
-}
-
-// compareApiVersions сравнивает api_version, извлекая число после "V" и сравнивая как int
-func compareApiVersions(v1, v2 string) int {
-	num1, err1 := strconv.Atoi(strings.TrimPrefix(v1, "V"))
-	num2, err2 := strconv.Atoi(strings.TrimPrefix(v2, "V"))
-	if err1 != nil {
-		num1 = 0
-	}
-	if err2 != nil {
-		num2 = 0
-	}
-	if num1 > num2 {
-		return 1
-	} else if num1 < num2 {
-		return -1
-	}
-	return 0
-}
-
-// normalizeVersion нормализует версию, убирая из третьего октета все цифры после первой
-func normalizeVersion(version string) string {
-	parts := strings.Split(version, ".")
-	if len(parts) >= 3 && len(parts[2]) > 1 {
-		parts[2] = string(parts[2][0])
-	}
-	return strings.Join(parts, ".")
-}
-
-// isVersionInRange проверяет, находится ли версия в диапазоне [min, max]
 func isVersionInRange(version, min, max string) bool {
 	version = normalizeVersion(version)
 	min = normalizeVersion(min)
@@ -823,313 +494,266 @@ func isVersionInRange(version, min, max string) bool {
 	return true
 }
 
-// getCompatibleApiVersions возвращает список api_version, совместимых с frontVersion
-func getCompatibleApiVersions(manifest *Manifest, frontVersion string) []string {
-	var compatible []string
-	for _, compat := range manifest.ApiVersions {
-		if isVersionInRange(frontVersion, compat.MinFrontVersion, compat.MaxFrontVersion) {
-			compatible = append(compatible, compat.ApiVersion)
-		}
+func normalizeVersion(version string) string {
+	parts := strings.Split(version, ".")
+	if len(parts) >= 3 && len(parts[2]) > 1 {
+		parts[2] = string(parts[2][0])
 	}
-	return compatible
+	return strings.Join(parts, ".")
 }
 
-// contains проверяет, содержит ли слайс строку
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
+func compareSemanticVersions(v1, v2 string) int {
+	p1 := strings.Split(v1, ".")
+	p2 := strings.Split(v2, ".")
+	maxLen := len(p1)
+	if len(p2) > maxLen {
+		maxLen = len(p2)
+	}
+	for i := 0; i < maxLen; i++ {
+		n1, n2 := 0, 0
+		if i < len(p1) {
+			n1, _ = strconv.Atoi(p1[i])
+		}
+		if i < len(p2) {
+			n2, _ = strconv.Atoi(p2[i])
+		}
+		if n1 > n2 {
+			return 1
+		}
+		if n1 < n2 {
+			return -1
+		}
+	}
+	return 0
+}
+
+func FilterPlugins(plugins []Plugin, excluded []string) []Plugin {
+	var res []Plugin
+	for _, p := range plugins {
+		if !isExcluded(p.Name, excluded) {
+			res = append(res, p)
+		}
+	}
+	return res
+}
+
+func FilterAutoUpdatePlugins(manifest *Manifest, installed, excluded, autoUpdate, apiVersions []string) []string {
+	resMap := make(map[string]bool)
+	for _, p := range manifest.Plugins {
+		if !contains(apiVersions, p.ApiVersion) || isExcluded(p.Name, excluded) {
+			continue
+		}
+		if findInstalledFolderName(installed, p.Name) == "" {
+			continue
+		}
+		for _, pattern := range autoUpdate {
+			if strings.Contains(strings.ToLower(p.Name), strings.ToLower(pattern)) {
+				resMap[p.Name] = true
+				break
+			}
+		}
+	}
+	var res []string
+	for k := range resMap {
+		res = append(res, k)
+	}
+	return res
+}
+
+func isExcluded(name string, excluded []string) bool {
+	lower := strings.ToLower(name)
+	for _, ex := range excluded {
+		if strings.Contains(lower, strings.ToLower(ex)) {
 			return true
 		}
 	}
 	return false
 }
 
-// clearScreen очищает экран
-func clearScreen() {
-	if runtime.GOOS == "windows" {
-		cmd := exec.Command("cmd", "/c", "cls")
-		cmd.Stdout = os.Stdout
-		_ = cmd.Run()
-	} else {
-		fmt.Print("\033[H\033[2J")
+func contains(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val {
+			return true
+		}
 	}
+	return false
 }
 
-// GetIikoFrontVersion определяет версию iikoFront
-func GetIikoFrontVersion(wu core.WinUtils) (string, error) {
-	exePath := `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`
-	version, err := wu.GetFileVersion(exePath)
-	if err != nil {
-		return "", err
-	}
-	// Откидываем версию билда (4-й октет)
-	parts := strings.Split(version, ".")
-	if len(parts) >= 3 {
-		return strings.Join(parts[:3], "."), nil
-	}
-	return version, nil
-}
+// UI Selection Helpers
 
-// LoadManifest загружает манифест плагинов из URL
-func LoadManifest() (*Manifest, error) {
-	url := "https://f.serty.top/distr/installer/plugins-manifest.json"
-	slog.Debug("Загрузка манифеста", "url", url)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
+// selectPluginWithSearch возвращает СПИСОК версий для выбранного плагина
+func selectPluginWithSearch(groups map[string][]Plugin, installed []string) ([]Plugin, error) {
+	var displayItems []UniquePluginDisplayInfo
+	for name, versions := range groups {
+		isInst := findInstalledFolderName(installed, name) != ""
+		displayItems = append(displayItems, UniquePluginDisplayInfo{
+			Name:        name,
+			Versions:    versions,
+			IsInstalled: isInst,
+			DisplayText: fmt.Sprintf("%s %s", name, formatVersionsInfo(versions, isInst)),
+		})
 	}
-	defer resp.Body.Close()
+	sort.Slice(displayItems, func(i, j int) bool {
+		return strings.ToLower(displayItems[i].Name) < strings.ToLower(displayItems[j].Name)
+	})
 
-	if resp.StatusCode != http.StatusOK {
-		slog.Warn("Сервер манифеста вернул ошибку", "status", resp.Status)
-		return nil, fmt.Errorf("сервер вернул статус: %s", resp.Status)
+	var stringsList []string
+	for _, d := range displayItems {
+		stringsList = append(stringsList, d.DisplayText)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	choice, err := tui.SelectWithSearch(stringsList, "Выберите плагин (поиск по имени):")
 	if err != nil {
 		return nil, err
 	}
 
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, err
+	for _, d := range displayItems {
+		if d.DisplayText == choice {
+			return d.Versions, nil
+		}
 	}
-
-	slog.Info("Манифест плагинов загружен", "plugins_count", len(manifest.Plugins))
-	return &manifest, nil
+	return nil, fmt.Errorf("выбор не найден")
 }
 
-// GetInstalledPlugins собирает список установленных плагинов
-func GetInstalledPlugins() ([]string, error) {
-	pluginsDir := `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
-	entries, err := os.ReadDir(pluginsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			slog.Debug("Директория плагинов не существует", "path", pluginsDir)
-			return []string{}, nil
-		}
-		return nil, err
+func formatVersionsInfo(versions []Plugin, installed bool) string {
+	status := ""
+	if installed {
+		status = "[УСТАНОВЛЕН] "
 	}
-
-	var plugins []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			plugins = append(plugins, entry.Name())
-		}
+	if len(versions) == 1 {
+		return fmt.Sprintf("%s(v%s API:%s)", status, versions[0].PluginVersion, versions[0].ApiVersion)
 	}
-	slog.Debug("Найдены установленные плагины", "list", plugins)
-	return plugins, nil
+	return fmt.Sprintf("%s(%d версий)", status, len(versions))
 }
 
-// FilterPlugins исключает плагины из списка excluded
-func FilterPlugins(plugins []Plugin, excluded []string) []Plugin {
-	var filtered []Plugin
-	for _, plugin := range plugins {
-		exclude := false
-		pluginNameLower := strings.ToLower(plugin.Name)
-		for _, excl := range excluded {
-			if strings.Contains(pluginNameLower, strings.ToLower(excl)) {
-				exclude = true
-				break
-			}
-		}
-		if !exclude {
-			filtered = append(filtered, plugin)
-		}
-	}
-	return filtered
-}
-
-// FilterInstalledPlugins возвращает список имен плагинов из манифеста, которые установлены, совместимы и не исключены
-func FilterInstalledPlugins(manifest *Manifest, installed []string, excluded []string, compatibleApiVersions []string) []string {
-	var filtered []string
-	for _, plugin := range manifest.Plugins {
-		if !contains(compatibleApiVersions, plugin.ApiVersion) {
-			continue
-		}
-		pluginNameLower := strings.ToLower(plugin.Name)
-		exclude := false
-		for _, excl := range excluded {
-			if strings.Contains(pluginNameLower, strings.ToLower(excl)) {
-				exclude = true
-				break
-			}
-		}
-		if exclude {
-			continue
-		}
-		// Проверить, установлен ли
-		isInstalled := false
-		for _, folder := range installed {
-			if strings.Contains(strings.ToLower(folder), pluginNameLower) {
-				isInstalled = true
-				break
-			}
-		}
-		if isInstalled {
-			filtered = append(filtered, plugin.Name)
-		}
-	}
-	return filtered
-}
-
-// FilterAutoUpdatePlugins возвращает список имен плагинов для автообновления: установлены, совместимы, не исключены и содержат фрагмент из autoUpdatePlugins
-func FilterAutoUpdatePlugins(manifest *Manifest, installed []string, excluded []string, autoUpdate []string, compatibleApiVersions []string) []string {
-	filteredMap := make(map[string]bool)
-	for _, plugin := range manifest.Plugins {
-		if !contains(compatibleApiVersions, plugin.ApiVersion) {
-			continue
-		}
-		pluginNameLower := strings.ToLower(plugin.Name)
-		exclude := false
-		for _, excl := range excluded {
-			if strings.Contains(pluginNameLower, strings.ToLower(excl)) {
-				exclude = true
-				break
-			}
-		}
-		if exclude {
-			continue
-		}
-		// Проверить, установлен ли
-		isInstalled := false
-		for _, folder := range installed {
-			if strings.Contains(strings.ToLower(folder), pluginNameLower) {
-				isInstalled = true
-				break
-			}
-		}
-		if !isInstalled {
-			continue
-		}
-		// Проверить, содержит ли имя хотя бы одну строку из autoUpdatePlugins
-		autoUpdateMatch := false
-		for _, au := range autoUpdate {
-			if strings.Contains(pluginNameLower, strings.ToLower(au)) {
-				autoUpdateMatch = true
-				break
-			}
-		}
-		if autoUpdateMatch {
-			filteredMap[plugin.Name] = true
-		}
-	}
-	var filtered []string
-	for name := range filteredMap {
-		filtered = append(filtered, name)
-	}
-	return filtered
-}
-
-// DownloadFile скачивает файл по URL в указанную директорию под оригинальным именем
-func DownloadFile(am core.AssetManager, urlStr, dir string) (string, error) {
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return "", err
-	}
-	filename := filepath.Base(u.Path)
-	localPath := filepath.Join(dir, filename)
-	_, err = am.DownloadHTTPWithProgress(urlStr, localPath)
-	return localPath, err
-}
-
-// processExtractedContent обрабатывает содержимое распакованной папки
-func processExtractedContent(extractDir string) error {
-	entries, err := os.ReadDir(extractDir)
-	if err != nil {
-		return fmt.Errorf("не удалось прочитать директорию распаковки: %w", err)
-	}
-	if len(entries) == 0 {
-		return fmt.Errorf("архив пустой")
+// selectPluginVersion запрашивает у пользователя выбор между Stable и Latest версиями
+func selectPluginVersion(versions []Plugin) (*Plugin, error) {
+	if len(versions) == 0 {
+		return nil, nil
 	}
 
-	extractName := filepath.Base(extractDir) // имя папки, zip_name без .zip
-
-	if len(entries) == 1 && entries[0].IsDir() && entries[0].Name() == extractName {
-		// Вложенная папка с тем же именем: переместить содержимое в родительскую
-		slog.Debug("Обнаружена лишняя вложенная папка, перемещение", "nested", entries[0].Name())
-		nestedDir := filepath.Join(extractDir, extractName)
-		nestedEntries, err := os.ReadDir(nestedDir)
-		if err != nil {
-			return fmt.Errorf("не удалось прочитать вложенную директорию: %w", err)
+	// 1. Определяем "Стабильную" версию (без Preview в API)
+	var stable *Plugin
+	var stableVersions []Plugin
+	for _, v := range versions {
+		if !strings.Contains(strings.ToLower(v.ApiVersion), "preview") {
+			stableVersions = append(stableVersions, v)
 		}
-		for _, ne := range nestedEntries {
-			src := filepath.Join(nestedDir, ne.Name())
-			dest := filepath.Join(extractDir, ne.Name())
-			if err := os.Rename(src, dest); err != nil {
-				return fmt.Errorf("не удалось переместить %s: %w", ne.Name(), err)
-			}
-		}
-		if err := os.Remove(nestedDir); err != nil {
-			return fmt.Errorf("не удалось удалить пустую вложенную директорию: %w", err)
-		}
-	} else if len(entries) == 1 && !entries[0].IsDir() {
-		// Сразу файл: создать папку и переместить
-		slog.Debug("Архив содержит только файл, создание папки", "file", entries[0].Name())
-		pluginDir := filepath.Join(extractDir, extractName)
-		if err := os.MkdirAll(pluginDir, 0755); err != nil {
-			return fmt.Errorf("не удалось создать директорию плагина: %w", err)
-		}
-		src := filepath.Join(extractDir, entries[0].Name())
-		dest := filepath.Join(pluginDir, entries[0].Name())
-		if err := os.Rename(src, dest); err != nil {
-			return fmt.Errorf("не удалось переместить файл: %w", err)
-		}
-	} else if len(entries) > 1 {
-		// Проверить, есть ли вложенная папка с тем же именем среди нескольких элементов
-		var nestedDir string
-		found := false
-		for _, entry := range entries {
-			if entry.IsDir() && entry.Name() == extractName {
-				nestedDir = filepath.Join(extractDir, entry.Name())
-				found = true
-				break
-			}
-		}
-		if found {
-			slog.Debug("Обнаружена вложенная папка среди других файлов", "nested", nestedDir)
-			// Переместить содержимое вложенной папки в родительскую
-			nestedEntries, err := os.ReadDir(nestedDir)
-			if err != nil {
-				return fmt.Errorf("не удалось прочитать вложенную директорию: %w", err)
-			}
-			for _, ne := range nestedEntries {
-				src := filepath.Join(nestedDir, ne.Name())
-				dest := filepath.Join(extractDir, ne.Name())
-				if err := os.Rename(src, dest); err != nil {
-					return fmt.Errorf("не удалось переместить %s: %w", ne.Name(), err)
-				}
-			}
-			if err := os.Remove(nestedDir); err != nil {
-				return fmt.Errorf("не удалось удалить пустую вложенную директорию: %w", err)
-			}
-		} else {
-			// Архив содержит сразу файлы и папки: создать папку с нужным именем и переместить все содержимое туда
-			slog.Debug("Архив содержит россыпь файлов, создание корневой папки")
-			pluginDir := filepath.Join(extractDir, extractName)
-			if err := os.MkdirAll(pluginDir, 0755); err != nil {
-				return fmt.Errorf("не удалось создать директорию плагина: %w", err)
-			}
-			for _, entry := range entries {
-				src := filepath.Join(extractDir, entry.Name())
-				dest := filepath.Join(pluginDir, entry.Name())
-				if err := os.Rename(src, dest); err != nil {
-					return fmt.Errorf("не удалось переместить %s: %w", entry.Name(), err)
+	}
+	if len(stableVersions) > 0 {
+		// Ищем макс plugin_version среди стабильных API
+		stable = &stableVersions[0]
+		for i := range stableVersions {
+			// Сначала сравниваем API версии, если равны - версии плагина
+			if compareApiVersions(stableVersions[i].ApiVersion, stable.ApiVersion) > 0 {
+				stable = &stableVersions[i]
+			} else if stableVersions[i].ApiVersion == stable.ApiVersion {
+				if compareSemanticVersions(stableVersions[i].PluginVersion, stable.PluginVersion) > 0 {
+					stable = &stableVersions[i]
 				}
 			}
 		}
 	}
-	return nil
+
+	// 2. Определяем "Последнюю" версию (вообще самую свежую, включая Preview)
+	latest := &versions[0]
+	for i := range versions {
+		if compareSemanticVersions(versions[i].PluginVersion, latest.PluginVersion) > 0 {
+			latest = &versions[i]
+		}
+	}
+
+	// Если стабильной нет, то последняя и есть единственная опция (она же "стабильная" в контексте выбора)
+	if stable == nil {
+		stable = latest
+	}
+
+	// Если версии совпадают, выбора нет
+	if stable.PluginVersion == latest.PluginVersion && stable.ApiVersion == latest.ApiVersion {
+		return stable, nil
+	}
+
+	// 3. Интерактивный выбор
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		tui.ClearScreen()
+		tui.Title("\n--- Выберите версию плагина ---")
+		fmt.Printf("Плагин: %s\n\n", versions[0].Name)
+
+		fmt.Printf(" 1. Стабильная (API: %s, v%s)\n", stable.ApiVersion, stable.PluginVersion)
+		fmt.Printf(" 2. Новейшая/Preview (API: %s, v%s)\n", latest.ApiVersion, latest.PluginVersion)
+
+		fmt.Println("\n 0. Отмена")
+		fmt.Print("Ваш выбор: ")
+
+		choiceStr, _ := reader.ReadString('\n')
+		choiceStr = strings.TrimSpace(choiceStr)
+
+		switch choiceStr {
+		case "1":
+			return stable, nil
+		case "2":
+			return latest, nil
+		case "0":
+			return nil, nil
+		default:
+			tui.Error("Неверный выбор.")
+			time.Sleep(1 * time.Second)
+		}
+	}
 }
 
-// CopyConfigIfExists копирует .config файл из srcDir в destDir, если он существует
-func CopyConfigIfExists(wu core.WinUtils, srcDir, destDir string) error {
-	configFile := filepath.Join(srcDir, ".config")
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		return nil // файл не существует, ничего не копируем
+// selectBestPluginVersion (для автообновления) - предпочитает Stable, иначе берет Latest
+func selectBestPluginVersion(versions []Plugin) *Plugin {
+	if len(versions) == 0 {
+		return nil
 	}
-	slog.Debug("Копирование существующего конфига", "src", configFile)
-	destConfig := filepath.Join(destDir, ".config")
-	return wu.CopyFile(configFile, destConfig)
+
+	// Ищем стабильную
+	var stable *Plugin
+	for i := range versions {
+		if !strings.Contains(strings.ToLower(versions[i].ApiVersion), "preview") {
+			if stable == nil || compareSemanticVersions(versions[i].PluginVersion, stable.PluginVersion) > 0 {
+				v := versions[i]
+				stable = &v
+			}
+		}
+	}
+
+	if stable != nil {
+		return stable
+	}
+
+	// Если стабильных нет, берем самую свежую из всех
+	latest := &versions[0]
+	for i := range versions {
+		if compareSemanticVersions(versions[i].PluginVersion, latest.PluginVersion) > 0 {
+			latest = &versions[i]
+		}
+	}
+	return latest
+}
+
+func compareApiVersions(v1, v2 string) int {
+	// Упрощенное сравнение: V9 > V8
+	// Извлекаем цифры после V
+	re := regexp.MustCompile(`V(\d+)`)
+	m1 := re.FindStringSubmatch(v1)
+	m2 := re.FindStringSubmatch(v2)
+
+	n1, n2 := 0, 0
+	if len(m1) > 1 {
+		n1, _ = strconv.Atoi(m1[1])
+	}
+	if len(m2) > 1 {
+		n2, _ = strconv.Atoi(m2[1])
+	}
+
+	if n1 > n2 {
+		return 1
+	}
+	if n1 < n2 {
+		return -1
+	}
+	return 0
 }

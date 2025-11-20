@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
-	"goMH/modules/distro"
 	"goMH/tui"
 	"io"
 	"io/fs"
@@ -45,53 +44,49 @@ func (m *Module) MenuText() string {
 
 // Run управляет подменю утилит
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
-	reader := bufio.NewReader(os.Stdin)
-
 	for {
+		tui.ClearScreen() // Добавим очистку, чтобы было красиво при возврате
 		tui.Title("\n--- Меню утилит обслуживания ---")
 		fmt.Println(" 1. Очистка временных файлов")
 		fmt.Println(" 2. Сборщик логов в архив")
 		fmt.Println(" 3. Просмотр лога в реальном времени (tail -f)")
-		fmt.Println(" 4. Патчи iikoFront")
-		fmt.Println(" 5. OrderCheck")
-		fmt.Println(" 6. FrontTools")
+		fmt.Println(" 4. OrderCheck")
+		fmt.Println(" 5. FrontTools")
 		fmt.Println("\n 0. Назад в главное меню")
 		fmt.Print("Выберите пункт: ")
 
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
+		key, err := tui.ReadKey()
+		if err != nil {
+			return nil
+		}
 
-		var err error
-		switch choiceStr {
+		var opErr error
+		switch key {
 		case "1":
-			err = m.cleanTempFiles(am)
+			opErr = m.cleanTempFiles(am)
 		case "2":
-			err = m.collectLogs(am)
+			opErr = m.collectLogs(am)
 		case "3":
-			err = m.viewLog(am)
+			opErr = m.viewLog(am)
 		case "4":
-			err = m.updateIikoPatches(am, wu)
+			opErr = m.downloadAndRunOrderCheck(am, wu)
 		case "5":
-			err = m.downloadAndRunOrderCheck(am, wu)
-		case "6":
-			err = m.downloadAndRunFrontTools(am, wu)
+			opErr = m.downloadAndRunFrontTools(am, wu)
 		case "0":
 			tui.Info("Возврат в главное меню.")
 			return nil
 		default:
-			tui.Error("Неверный выбор. Попробуйте снова.")
-			time.Sleep(2 * time.Second)
+			// Игнорируем неверный ввод
 			continue
 		}
 
-		if err != nil {
-			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", err))
+		if opErr != nil {
+			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", opErr))
 		} else {
 			tui.Success("\n--- Операция завершена успешно. ---")
 		}
 
-		fmt.Println("\nНажмите Enter, чтобы вернуться в меню утилит...")
-		reader.ReadString('\n')
+		tui.WaitForAnyKey()
 	}
 }
 
@@ -683,46 +678,6 @@ func (m *Module) detectIikoFrontDbType() (string, error) {
 
 	// Если ни один файл не найден
 	return "", errors.New("база данных iikoFront не найдена (проверьте путь или запустите iikoFront)")
-}
-
-// --- Пункт 4: Обновление патчей iikoFront ---
-func (m *Module) updateIikoPatches(am core.AssetManager, wu core.WinUtils) error {
-	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
-	const iikoFrontExe = `iikoFront.Net.exe`
-
-	frontExePath := filepath.Join(iikoFrontDir, iikoFrontExe)
-
-	if _, err := os.Stat(frontExePath); os.IsNotExist(err) {
-		return fmt.Errorf("установка iikoFront не найдена по стандартному пути: %s", iikoFrontDir)
-	}
-
-	tui.Info("Определение версии установленного iikoFront...")
-	fullVersion, err := wu.GetFileVersion(frontExePath)
-	if err != nil {
-		return fmt.Errorf("не удалось определить версию файла %s: %w", iikoFrontExe, err)
-	}
-	tui.SuccessF("Найдена версия: %s", fullVersion)
-
-	backupDir := filepath.Join(am.Cfg().RootPath, fullVersion)
-
-	// Находим и применяем актуальный патч для версии
-	patch, patchFound, err := distro.FindAndSelectPatch(am, fullVersion)
-	if err != nil {
-		tui.Warn(fmt.Sprintf("Ошибка при поиске патча: %v", err))
-		return nil // Продолжаем без патча
-	}
-
-	if patchFound {
-		tui.InfoF("Найден актуальный патч: %s", patch.ShortName)
-		if err := distro.ApplyPatch(am, wu, patch, iikoFrontDir, backupDir); err != nil {
-			return fmt.Errorf("ошибка при применении патча: %w", err)
-		}
-		tui.Success("Патч успешно применен")
-	} else {
-		tui.Info("Актуальные патчи не найдены")
-	}
-
-	return nil
 }
 
 // downloadOrderCheck скачивает утилиту OrderCheck через менеджер ассетов

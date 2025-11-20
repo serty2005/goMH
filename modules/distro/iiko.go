@@ -3,6 +3,8 @@ package distro
 import (
 	"fmt"
 	"goMH/config"
+	iikoplugins "goMH/modules/iiko-plugins"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -31,57 +33,114 @@ type iikoHandler struct {
 	dm *DistroManager
 }
 
+// Run - единое меню для iiko (дистрибутивы, плагины, патчи)
 func (h *iikoHandler) Run() error {
-	return h.dm.runWorkflow(h)
+	for {
+		tui.ClearScreen()
+		tui.Title("\n--- Меню продуктов iiko ---")
+
+		// 1. Получаем список компонентов из конфига
+		components := h.dm.AM.Cfg().DistroConfig.Iiko.Components
+
+		// 2. Выводим дистрибутивы
+		for i, comp := range components {
+			fmt.Printf(" %d. %s\n", i+1, comp.MenuText)
+		}
+
+		// 3. Выводим дополнительные опции с продолжением нумерации
+		pluginsIdx := len(components) + 1
+		patchesIdx := len(components) + 2
+
+		fmt.Printf(" %d. Установка плагинов iikoFront\n", pluginsIdx)
+		fmt.Printf(" %d. Установка патчей iikoFront\n", patchesIdx)
+
+		fmt.Println("\n 0. Назад к выбору бренда")
+		fmt.Print("Ваш выбор: ")
+
+		key, err := tui.ReadKey()
+		if err != nil {
+			return nil
+		}
+
+		if key == "0" {
+			return nil
+		}
+
+		choiceInt, err := strconv.Atoi(key)
+		if err != nil {
+			continue // Игнорируем не-цифры
+		}
+
+		// Обработка выбора
+		if choiceInt >= 1 && choiceInt <= len(components) {
+			// Выбран дистрибутив
+			selectedComp := components[choiceInt-1]
+			slog.Info("Выбран дистрибутив", "name", selectedComp.MenuText)
+			if err := h.dm.StartInstallFlow(h, selectedComp); err != nil {
+				tui.Error(fmt.Sprintf("Ошибка установки: %v", err))
+			}
+		} else if choiceInt == pluginsIdx {
+			// Выбраны плагины
+			slog.Info("Выбрана установка плагинов")
+			pluginModule := &iikoplugins.Module{}
+			if err := pluginModule.MenuInstallPlugins(h.dm.AM, h.dm.WU); err != nil {
+				tui.Error(fmt.Sprintf("Ошибка в модуле плагинов: %v", err))
+			}
+		} else if choiceInt == patchesIdx {
+			// Выбраны патчи
+			slog.Info("Выбрана установка патчей")
+			if err := h.runManualPatching(); err != nil {
+				tui.Error(fmt.Sprintf("Ошибка установки патча: %v", err))
+			}
+		} else {
+			// Неверный номер
+			continue
+		}
+
+		// Вместо fmt.Scanln используем ожидание любой клавиши
+		tui.WaitForAnyKey()
+	}
 }
 
-func (h *iikoHandler) selectComponentMenu() (config.DistroComponent, error) {
-	slog.Debug("Формирование меню компонентов iiko")
-	components := h.dm.AM.Cfg().DistroConfig.Iiko.Components
+// runManualPatching запускает логику выбора и установки патча вручную
+func (h *iikoHandler) runManualPatching() error {
+	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
+	const iikoFrontExe = `iikoFront.Net.exe`
+	frontExePath := filepath.Join(iikoFrontDir, iikoFrontExe)
 
-	// Создаем список для отображения с дополнительной информацией
-	type ComponentDisplay struct {
-		Component   config.DistroComponent
-		DisplayText string
+	if _, err := os.Stat(frontExePath); os.IsNotExist(err) {
+		return fmt.Errorf("установка iikoFront не найдена по пути: %s", iikoFrontDir)
 	}
 
-	var displayItems []ComponentDisplay
-	for _, comp := range components {
-		displayText := comp.MenuText
-		displayItems = append(displayItems, ComponentDisplay{
-			Component:   comp,
-			DisplayText: displayText,
-		})
-	}
-
-	// Создаем список строк для отображения
-	itemStrings := make([]string, len(displayItems))
-	for i, item := range displayItems {
-		itemStrings[i] = item.DisplayText
-	}
-
-	selectedText, err := tui.SelectSimple(itemStrings, "\n--- Выберите дистрибутив iiko для установки ---")
+	tui.Info("Определение версии установленного iikoFront...")
+	fullVersion, err := h.dm.WU.GetFileVersion(frontExePath)
 	if err != nil {
-		// Проверяем, является ли ошибка выходом в главное меню
-		if err == tui.ErrExitToMainMenu {
-			slog.Debug("Пользователь выбрал выход в главное меню из списка компонентов iiko")
-			return config.DistroComponent{}, err
-		}
-		return config.DistroComponent{}, err
+		return fmt.Errorf("не удалось определить версию файла %s: %w", iikoFrontExe, err)
+	}
+	tui.SuccessF("Найдена версия: %s", fullVersion)
+
+	// Находим патчи
+	patch, patchFound, err := FindAndSelectPatch(h.dm.AM, fullVersion)
+	if err != nil {
+		return err
 	}
 
-	// Находим выбранный компонент по тексту отображения
-	for _, item := range displayItems {
-		if item.DisplayText == selectedText {
-			slog.Info("Выбран компонент iiko", "id", item.Component.ID, "text", item.DisplayText)
-			return item.Component, nil
-		}
+	if !patchFound {
+		return nil // Пользователь отменил или патчи не найдены (сообщение уже выведено внутри FindAndSelectPatch)
 	}
 
-	slog.Error("Не удалось сопоставить выбранный текст с компонентом", "selectedText", selectedText)
-	return config.DistroComponent{}, fmt.Errorf("не удалось найти выбранный компонент")
+	backupDir := filepath.Join(h.dm.AM.Cfg().RootPath, fmt.Sprintf("iiko_%s", fullVersion))
+	tui.InfoF("Применение патча %s...", patch.ShortName)
+
+	if err := ApplyPatch(h.dm.AM, h.dm.WU, patch, iikoFrontDir, backupDir); err != nil {
+		return fmt.Errorf("ошибка при применении патча: %w", err)
+	}
+
+	tui.Success("Патч успешно установлен.")
+	return nil
 }
 
+// Эти методы остаются для удовлетворения интерфейса brandHandler
 func (h *iikoHandler) getAvailableVersions() ([]string, error) {
 	slog.Info("Запуск поиска официальных версий iiko на FTP")
 	return discoverIikoOfficialVersions()

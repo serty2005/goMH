@@ -7,7 +7,7 @@ import (
 	"goMH/tui"
 	"io"
 	"io/fs"
-	"log/slog" // Импорт
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,16 +35,28 @@ func FindAndSelectPatch(am core.AssetManager, version string) (core.PatchInfo, b
 		return core.PatchInfo{}, false, nil
 	}
 
-	slog.Debug("Найдено патчей", "count", len(patches), "top_patches", patches)
+	slog.Debug("Найдено патчей", "count", len(patches))
 
+	// Запускаем меню выбора
 	selectedPatch, err := selectPatchMenu(patches)
+
+	// Обработка особых случаев выбора
 	if err != nil {
-		tui.Info("Установка патча пропущена по выбору пользователя.")
-		slog.Info("Пользователь отказался от выбора патча", "error", err)
+		// Если пользователь нажал Ctrl+C или выбрал выход в главное меню
+		// Мы интерпретируем это как "Пропустить установку патча" и продолжаем основной процесс
+		tui.Info("Выбор патча отменен пользователем. Установка продолжится без патча.")
+		slog.Info("Пользователь отказался от выбора патча (Interrupt/Cancel)", "error", err)
 		return core.PatchInfo{}, false, nil
 	}
 
-	tui.SuccessF("Выбран патч: %s. Он будет установлен после основного дистрибутива.", selectedPatch.ShortName)
+	// Проверка на фиктивный патч "SKIP"
+	if selectedPatch.ShortName == "SKIP" {
+		tui.Info("Выбрано: Не устанавливать патч.")
+		slog.Info("Пользователь выбрал пропустить патч")
+		return core.PatchInfo{}, false, nil
+	}
+
+	tui.SuccessF("Выбран патч: %s.", selectedPatch.ShortName)
 	slog.Info("Патч выбран", "patch", selectedPatch.ShortName, "url", selectedPatch.FullURL)
 	return selectedPatch, true, nil
 }
@@ -81,12 +93,13 @@ func findLatestPatches(baseURL, version string) ([]core.PatchInfo, error) {
 	}
 
 	linkRegex := regexp.MustCompile(`<a href=\"([^\"]+)\"`)
-	buildRegex := regexp.MustCompile(`build(?:\s|%20)(\d+)\)`)
+	buildRegex := regexp.MustCompile(`build(?:[\s_]|%20)(\d+)\)`)
 
 	var foundPatches []core.PatchInfo
 	for _, match := range linkRegex.FindAllStringSubmatch(string(body), -1) {
 		encodedFileName := match[1]
-		if !(strings.HasSuffix(strings.ToLower(encodedFileName), ".7z") || strings.HasSuffix(strings.ToLower(encodedFileName), ".zip")) {
+		lowerName := strings.ToLower(encodedFileName)
+		if !(strings.HasSuffix(lowerName, ".7z") || strings.HasSuffix(lowerName, ".zip")) {
 			continue
 		}
 		buildMatches := buildRegex.FindStringSubmatch(encodedFileName)
@@ -101,7 +114,7 @@ func findLatestPatches(baseURL, version string) ([]core.PatchInfo, error) {
 
 		foundPatches = append(foundPatches, core.PatchInfo{
 			ShortName:   shortName,
-			Description: decodedFileName,
+			Description: decodedFileName, // Хранит оригинальное имя файла
 			FullURL:     fullURL,
 			BuildNumber: buildNumber,
 		})
@@ -116,16 +129,21 @@ func findLatestPatches(baseURL, version string) ([]core.PatchInfo, error) {
 }
 
 func selectPatchMenu(patches []core.PatchInfo) (core.PatchInfo, error) {
-	// Конвертируем core.PatchInfo в формат для отображения
+	// Создаем фиктивный пункт для пропуска
+	skipOption := core.PatchInfo{
+		ShortName:   "SKIP",
+		Description: "Не применять патч",
+		BuildNumber: 0,
+	}
+
+	// Формируем список: Сначала "Пропустить", потом патчи
 	var displayPatches []core.PatchInfo
+	displayPatches = append(displayPatches, skipOption)
 	displayPatches = append(displayPatches, patches...)
 
 	selectedPatch, err := tui.SelectPatch(displayPatches, "\n--- Выберите патч для установки ---")
 	if err != nil {
-		// Проверяем, является ли ошибка выходом в главное меню
-		if err == tui.ErrExitToMainMenu {
-			return core.PatchInfo{}, err
-		}
+		// Пробрасываем ошибку наверх, там решим, что это отмена
 		return core.PatchInfo{}, err
 	}
 
@@ -147,65 +165,118 @@ func ApplyPatch(am core.AssetManager, wu core.WinUtils, patch core.PatchInfo, in
 		slog.Warn("Ошибка восстановления бэкапа (возможно, его и не было)", "error", err)
 	}
 
-	patchCachePath := filepath.Join(am.Cfg().AssetsCachePath, patch.ShortName)
+	// 1. Скачивание с правильным расширением
+	ext := filepath.Ext(patch.Description) // .7z или .zip
+	if ext == "" {
+		ext = ".7z" // Fallback
+	}
+	fileName := patch.ShortName + ext
+	patchCachePath := filepath.Join(am.Cfg().AssetsCachePath, fileName)
+
 	slog.Debug("Скачивание патча", "url", patch.FullURL, "path", patchCachePath)
 	if _, err := am.DownloadHTTPWithProgress(patch.FullURL, patchCachePath); err != nil {
 		slog.Error("Ошибка скачивания патча", "error", err)
 		return err
 	}
 
-	// Создаем временную директорию для анализа архива
+	// 2. Подготовка временной директории
 	tempRootPath := filepath.Join(am.Cfg().RootPath, "temp")
 	if err := os.MkdirAll(tempRootPath, 0755); err != nil {
-		return fmt.Errorf("не удалось создать временную директорию %s: %w", tempRootPath, err)
+		return err
 	}
-
-	tempAnalysisDir, err := os.MkdirTemp(tempRootPath, "patch-analysis-*")
+	// Уникальная папка для распаковки этого патча
+	extractDir, err := os.MkdirTemp(tempRootPath, "patch-extract-*")
 	if err != nil {
-		return fmt.Errorf("не удалось создать временную директорию для анализа: %w", err)
+		return err
 	}
-	defer os.RemoveAll(tempAnalysisDir)
+	defer os.RemoveAll(extractDir)
 
-	// Извлекаем архив для анализа структуры
-	slog.Debug("Извлечение патча для анализа", "tempDir", tempAnalysisDir)
-	if err := sevenZip.Extract(patchCachePath, tempAnalysisDir, false); err != nil {
+	// 3. Первичная распаковка
+	slog.Debug("Извлечение патча для анализа", "tempDir", extractDir)
+	if err := sevenZip.Extract(patchCachePath, extractDir, false); err != nil { // false = e (flat) для поиска вложенных архивов
 		slog.Error("Ошибка извлечения патча", "error", err)
 		return fmt.Errorf("не удалось извлечь архив для анализа: %w", err)
 	}
 
-	// Определяем, какой архив использовать для извлечения
-	sourceArchive := patchCachePath
-	if nestedArchive, err := findNestedFrontArchive(tempAnalysisDir); err == nil {
+	// 4. Поиск вложенного архива (aggregated-patch...zip внутри)
+	var sourceDir string
+
+	nestedArchive, err := findNestedFrontArchive(extractDir)
+	if err == nil {
 		tui.InfoF("Найден вложенный архив: %s", filepath.Base(nestedArchive))
 		slog.Info("Найден вложенный архив в патче", "nested", nestedArchive)
-		sourceArchive = nestedArchive
+
+		// Очищаем extractDir для распаковки вложенного архива
+		finalContentDir := filepath.Join(extractDir, "final_content")
+		_ = os.MkdirAll(finalContentDir, 0755)
+
+		slog.Debug("Распаковка вложенного архива", "archive", nestedArchive, "dest", finalContentDir)
+		// Тут используем true (full paths), так как внутри уже структура папок
+		if err := sevenZip.Extract(nestedArchive, finalContentDir, true); err != nil {
+			return fmt.Errorf("ошибка распаковки вложенного архива: %w", err)
+		}
+		sourceDir = finalContentDir
+	} else {
+		// Если вложенного архива нет, возможно мы распаковали 'flat'.
+		// Попробуем распаковать исходный архив с сохранением путей в чистую папку
+		finalContentDir := filepath.Join(extractDir, "final_content_direct")
+		_ = os.MkdirAll(finalContentDir, 0755)
+		if err := sevenZip.Extract(patchCachePath, finalContentDir, true); err != nil {
+			return err
+		}
+		sourceDir = finalContentDir
 	}
 
-	// Получаем список файлов из правильного архива
-	slog.Debug("Чтение списка файлов из архива", "archive", sourceArchive)
-	filesToBackup, err := sevenZip.List(sourceArchive)
+	// 5. Нормализация структуры (спуск в корень)
+	// Патчи часто лежат в папке "aggregated-patch-x.x.x". Нам нужно содержимое ЭТОЙ папки.
+	realContentDir, err := findContentRoot(sourceDir)
 	if err != nil {
-		slog.Error("Ошибка чтения списка файлов архива", "error", err)
-		return fmt.Errorf("не удалось получить список файлов из архива: %w", err)
+		return err
 	}
+	slog.Info("Определен корневой каталог патча", "path", realContentDir)
 
-	// Создаем бэкап перед извлечением
-	slog.Info("Создание бэкапа заменяемых файлов", "count", len(filesToBackup))
-	if err := createBackup(wu, installDir, filesToBackup, backupBaseDir, patch.BuildNumber); err != nil {
+	// 6. Создание бэкапа (Сравниваем содержимое патча с installDir)
+	slog.Info("Создание бэкапа заменяемых файлов")
+	if err := createBackupFromDir(wu, realContentDir, installDir, backupBaseDir, patch.BuildNumber); err != nil {
 		slog.Error("Ошибка создания бэкапа", "error", err)
 		return fmt.Errorf("не удалось создать бэкап: %w", err)
 	}
 
-	// Извлекаем файлы из правильного архива
-	slog.Info("Извлечение патча в целевую директорию", "dest", installDir)
-	if err := sevenZip.Extract(sourceArchive, installDir, true); err != nil {
-		slog.Error("Ошибка применения патча (распаковка)", "error", err)
-		return fmt.Errorf("не удалось извлечь архив: %w", err)
+	// 7. Установка (Копирование файлов)
+	slog.Info("Применение патча (копирование файлов)", "src", realContentDir, "dest", installDir)
+	if err := wu.CopyDir(realContentDir, installDir); err != nil {
+		slog.Error("Ошибка копирования файлов патча", "error", err)
+		return fmt.Errorf("ошибка при копировании файлов: %w", err)
 	}
 
 	tui.Success("Патч успешно применен.")
 	slog.Info("Патч успешно применен")
 	return nil
+}
+
+// findContentRoot спускается вниз по директориям, пока не найдет папку с более чем 1 элементом или файлами.
+func findContentRoot(startDir string) (string, error) {
+	currentDir := startDir
+	for {
+		entries, err := os.ReadDir(currentDir)
+		if err != nil {
+			return "", err
+		}
+		if len(entries) == 0 {
+			return "", fmt.Errorf("пустая директория патча: %s", currentDir)
+		}
+
+		// Если в папке только одна директория - спускаемся в неё
+		if len(entries) == 1 && entries[0].IsDir() {
+			newDir := filepath.Join(currentDir, entries[0].Name())
+			slog.Debug("Спуск в подпапку", "dir", newDir)
+			currentDir = newDir
+			continue
+		}
+
+		// Если мы здесь, значит нашли файлы или несколько папок - это и есть корень
+		return currentDir, nil
+	}
 }
 
 func restoreFromBackup(wu core.WinUtils, installDir, backupBaseDir string) error {
@@ -235,31 +306,51 @@ func restoreFromBackup(wu core.WinUtils, installDir, backupBaseDir string) error
 	return os.RemoveAll(backupDir)
 }
 
-func createBackup(wu core.WinUtils, installDir string, filesToReplace []string, backupBaseDir string, buildNumber int) error {
-	slog.Debug("Создание бэкапа", "installDir", installDir, "backupBaseDir", backupBaseDir, "buildNumber", buildNumber)
+// createBackupFromDir сканирует исходную папку патча (patchDir) и бэкапит соответствующие файлы из installDir
+func createBackupFromDir(wu core.WinUtils, patchDir, installDir, backupBaseDir string, buildNumber int) error {
 	backupDir := filepath.Join(backupBaseDir, fmt.Sprintf("backup_%d", buildNumber))
 	_ = os.MkdirAll(backupDir, 0755)
+
 	var movedCount int
-	for _, fileRelPath := range filesToReplace {
-		sourcePath := filepath.Join(installDir, fileRelPath)
-		destPath := filepath.Join(backupDir, fileRelPath)
-		if _, err := os.Stat(sourcePath); err == nil {
-			_ = os.MkdirAll(filepath.Dir(destPath), 0755)
-			if err := wu.MoveFile(sourcePath, destPath); err != nil {
-				tui.Warn(fmt.Sprintf("Не удалось переместить файл %s в бэкап: %v", sourcePath, err))
-				slog.Warn("Не удалось переместить файл в бэкап", "file", sourcePath, "error", err)
-				continue
-			}
-			movedCount++
+	err := filepath.Walk(patchDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
 		}
+
+		// Получаем путь файла относительно корня патча
+		relPath, err := filepath.Rel(patchDir, path)
+		if err != nil {
+			return err
+		}
+
+		// Определяем, где этот файл находится в установленной версии
+		existingFilePath := filepath.Join(installDir, relPath)
+		backupFilePath := filepath.Join(backupDir, relPath)
+
+		// Если файл существует в установке - бэкапим его
+		if _, err := os.Stat(existingFilePath); err == nil {
+			// Создаем папку в бэкапе
+			_ = os.MkdirAll(filepath.Dir(backupFilePath), 0755)
+
+			if err := wu.CopyFile(existingFilePath, backupFilePath); err != nil {
+				slog.Warn("Не удалось скопировать файл в бэкап", "file", existingFilePath, "error", err)
+			} else {
+				movedCount++
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
 	}
-	tui.InfoF("Перемещено в бэкап %d файлов.", movedCount)
+
+	tui.InfoF("Скопировано в бэкап %d файлов.", movedCount)
 	slog.Debug("Бэкап завершен", "moved_count", movedCount)
 	return nil
 }
 
 func getFullVersionString(shortVersion string) (string, error) {
-	// Эта функция может быть расширена, если появятся новые версии
 	versions := map[string]string{
 		"927": "9.2.7014.0",
 		"926": "9.2.6029.0",

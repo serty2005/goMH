@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"goMH/config"
@@ -78,8 +77,6 @@ func ClearScreen() {
 }
 
 func ShowMenu(modules []Installer) (Installer, error) {
-	reader := bufio.NewReader(os.Stdin)
-
 	for {
 		ClearScreen()
 		fmt.Println(ColorYellow + "==================================================" + ColorReset)
@@ -88,25 +85,43 @@ func ShowMenu(modules []Installer) (Installer, error) {
 		fmt.Println()
 
 		for i, mod := range modules {
-			// Используем стандартный fmt.Printf, но можем добавить цвет, если хотим
-			fmt.Printf(" %d. %s\n", i+1, mod.MenuText())
+			// Используем i+1 для нумерации 1..9
+			// Если модулей > 9, то A, B, C... но пока предположим до 9
+			key := strconv.Itoa(i + 1)
+			if i >= 9 {
+				key = string(rune('A' + (i - 9)))
+			}
+			fmt.Printf(" %s. %s\n", key, mod.MenuText())
 		}
 		fmt.Println()
 		fmt.Println(" Q. Выход")
 		fmt.Println()
-		fmt.Print("Введите номер пункта и нажмите Enter: ")
+		fmt.Print("Нажмите клавишу для выбора: ")
 
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
+		key, err := ReadKey()
+		if err != nil {
+			return nil, fmt.Errorf("ошибка чтения ввода: %w", err)
+		}
 
-		if strings.EqualFold(choiceStr, "q") {
+		// Эхо нажатой клавиши (опционально, но приятно видеть, что нажал)
+		// fmt.Println(key)
+
+		if strings.EqualFold(key, "q") {
 			return nil, fmt.Errorf("пользователь выбрал выход")
 		}
 
-		choiceInt, err := strconv.Atoi(choiceStr)
-		if err != nil || choiceInt < 1 || choiceInt > len(modules) {
-			Error("\nНеверный выбор. Нажмите Enter, чтобы попробовать снова.")
-			_, _ = reader.ReadString('\n') // Ожидаем нажатия Enter
+		var choiceInt int = -1
+
+		// Пытаемся распарсить число
+		if val, err := strconv.Atoi(key); err == nil {
+			choiceInt = val
+		} else {
+			// Если это буква (для меню > 9)
+			// Пока не реализуем сложную логику букв, так как модулей < 10
+		}
+
+		if choiceInt < 1 || choiceInt > len(modules) {
+			// Неверный выбор, просто перерисовываем меню
 			continue
 		}
 
@@ -298,6 +313,11 @@ type PatchDisplayInfo struct {
 // buildPatchDisplayText создает форматированную строку для отображения патча
 func buildPatchDisplayText(patch core.PatchInfo) string {
 	var parts []string
+
+	// Специальная обработка для SKIP
+	if patch.ShortName == "SKIP" {
+		return patch.Description
+	}
 
 	// Название патча
 	parts = append(parts, patch.ShortName)
