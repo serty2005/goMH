@@ -6,3 +6,4 @@ pipeline*
 .kilocode
 *.pdf
 *.py
+prompt.md
