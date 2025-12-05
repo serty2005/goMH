@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -438,6 +439,17 @@ func GetStartupFolders() (user, common string, err error) {
 	return user, common, nil
 }
 
+// GetDesktopDir возвращает путь к рабочему столу текущего пользователя.
+func GetDesktopDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	// Стандартный путь. Для 100% надежности нужно через SHGetKnownFolderPath,
+	// но os.UserHomeDir + Desktop работает в 99.9% случаев на Windows.
+	return filepath.Join(homeDir, "Desktop"), nil
+}
+
 // DeleteFile просто удаляет файл.
 func DeleteFile(path string) error {
 	return os.Remove(path)
@@ -459,6 +471,71 @@ func CleanDirectory(path string) error {
 		}
 	}
 	return nil
+}
+
+// GracefulShutdownProcess выполняет мягкое завершение процесса по имени, отправляя WM_CLOSE всем видимым окнам.
+func GracefulShutdownProcess(processName string) error {
+	pids, err := getPIDsByName(processName)
+	if err != nil {
+		return err
+	}
+	if len(pids) == 0 {
+		return fmt.Errorf("процесс '%s' не найден", processName)
+	}
+	for _, pid := range pids {
+		shutdownProcess(pid)
+	}
+	return nil
+}
+
+// getPIDsByName возвращает список PID процессов с указанным именем.
+func getPIDsByName(processName string) ([]uint32, error) {
+	out, err := RunCommand("tasklist", "/NH", "/FO", "CSV")
+	if err != nil {
+		return nil, fmt.Errorf("не удалось выполнить tasklist: %w", err)
+	}
+
+	r := csv.NewReader(strings.NewReader(out))
+	records, err := r.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("не удалось распарсить CSV-вывод tasklist: %w", err)
+	}
+
+	var pids []uint32
+	for _, record := range records {
+		if len(record) > 1 {
+			imageName := record[0]
+			if strings.HasPrefix(strings.ToLower(imageName), strings.ToLower(processName)) {
+				pid, err := strconv.ParseUint(record[1], 10, 32)
+				if err == nil {
+					pids = append(pids, uint32(pid))
+				}
+			}
+		}
+	}
+	return pids, nil
+}
+
+// shutdownProcess отправляет WM_CLOSE всем видимым окнам указанного процесса.
+func shutdownProcess(pid uint32) {
+	user32 := windows.NewLazyDLL("user32.dll")
+	getPidProc := user32.NewProc("GetWindowThreadProcessId")
+	isVisibleProc := user32.NewProc("IsWindowVisible")
+	postMessageProc := user32.NewProc("PostMessageW")
+	const WM_CLOSE = 0x0010
+
+	callback := windows.NewCallback(func(hwnd uintptr, lParam uintptr) uintptr {
+		var windowPid uint32
+		getPidProc.Call(hwnd, uintptr(unsafe.Pointer(&windowPid)))
+		ret, _, _ := isVisibleProc.Call(hwnd)
+		if windowPid == uint32(lParam) && ret != 0 {
+			postMessageProc.Call(hwnd, WM_CLOSE, 0, 0)
+		}
+		return 1
+	})
+
+	enumWindowsProc := user32.NewProc("EnumWindows")
+	enumWindowsProc.Call(callback, uintptr(pid))
 }
 
 // FindScheduledTaskByPath ищет задачу в планировщике по пути к исполняемому файлу.
@@ -753,17 +830,6 @@ func ExtractArchive(archivePath, destDir string, fullPaths bool) error {
 
 	// Распаковываем архив
 	return client.Extract(archivePath, destDir, fullPaths)
-}
-
-// GetDesktopDir возвращает путь к рабочему столу текущего пользователя.
-func GetDesktopDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	// Стандартный путь. Для 100% надежности нужно через SHGetKnownFolderPath,
-	// но os.UserHomeDir + Desktop работает в 99.9% случаев на Windows.
-	return filepath.Join(homeDir, "Desktop"), nil
 }
 
 // CreateShortcut создает ярлык (.lnk) через PowerShell.

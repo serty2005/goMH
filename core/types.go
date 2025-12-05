@@ -25,6 +25,7 @@ type WinUtils interface {
 	GetComPorts() ([]string, error)
 	GetScanners() ([]ScannerInfo, error)
 	IsProcessRunning(processName string) (bool, error)
+	GracefulShutdownProcess(processName string) error
 	GetFileVersion(filePath string) (string, error)
 	ListArchiveContents(archivePath string) ([]string, error)
 	CreateScheduledTask(taskName, executablePath, workingDir string) error

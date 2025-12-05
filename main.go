@@ -68,6 +68,9 @@ func (rw *RealWinUtils) GetScanners() ([]core.ScannerInfo, error) {
 func (rw *RealWinUtils) IsProcessRunning(processName string) (bool, error) {
 	return winutils.IsProcessRunning(processName)
 }
+func (rw *RealWinUtils) GracefulShutdownProcess(processName string) error {
+	return winutils.GracefulShutdownProcess(processName)
+}
 func (rw *RealWinUtils) CreateScheduledTask(taskName, executablePath, workingDir string) error {
 	return winutils.CreateScheduledTask(taskName, executablePath, workingDir)
 }

@@ -258,6 +258,38 @@ func (m *Module) updateIikoConfig(wu core.WinUtils, iikoPort string) error {
 	}
 	tui.InfoF("Найден файл конфигурации iiko: %s", configPath)
 
+	// Проверить статус процесса iikoFront
+	isRunning, err := wu.IsProcessRunning(iikoProcessName)
+	if err != nil {
+		slog.Error("Ошибка проверки статуса процесса iiko", "error", err)
+		return fmt.Errorf("не удалось проверить статус процесса iiko: %w", err)
+	}
+	if !isRunning {
+		slog.Debug("Процесс iiko не запущен, можно обновлять конфиг")
+		goto editConfig
+	}
+
+	// Процесс запущен, попытка мягкого завершения
+	slog.Info("Попытка мягкого завершения процесса iikoFront для безопасного обновления конфигурации")
+	if err := wu.GracefulShutdownProcess(iikoProcessName); err != nil {
+		slog.Warn("Не удалось выполнить мягкое завершение процесса iikoFront", "error", err)
+	}
+	time.Sleep(5 * time.Second)
+
+	// Проверяем статус после попытки мягкого завершения
+	isRunning, err = wu.IsProcessRunning(iikoProcessName)
+	if err != nil {
+		slog.Error("Ошибка проверки статуса процесса iiko после мягкого завершения", "error", err)
+		return fmt.Errorf("не удалось проверить статус процесса iiko: %w", err)
+	}
+	if !isRunning {
+		slog.Info("Процесс iikoFront успешно завершен мягко")
+		goto editConfig
+	} else {
+		slog.Warn("Процесс iikoFront все еще запущен после попытки мягкого завершения, продолжаем ожидание")
+	}
+
+	// Цикл ожидания с предупреждениями
 	for i := 0; i < maxRetries; i++ {
 		isRunning, err := wu.IsProcessRunning(iikoProcessName)
 		if err != nil {
@@ -278,6 +310,8 @@ func (m *Module) updateIikoConfig(wu core.WinUtils, iikoPort string) error {
 			return fmt.Errorf("процесс '%s' все еще запущен после %d попыток. Изменение отменено", iikoProcessName, maxRetries)
 		}
 	}
+
+editConfig:
 
 	doc := etree.NewDocument()
 	if err := doc.ReadFromFile(configPath); err != nil {
