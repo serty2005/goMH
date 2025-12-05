@@ -12,6 +12,7 @@ import (
 	"goMH/tui"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,154 +28,624 @@ import (
 
 // fileToArchive хранит путь к файлу на диске и желаемый путь внутри архива.
 type fileToArchive struct {
-	SourcePath       string // Физический путь на диске (может быть временным)
-	OriginalPath     string // Оригинальный путь к файлу/архиву (для имени папки)
-	OriginalBaseName string // Имя файла, которое будет в итоговом архиве
+	SourcePath       string
+	OriginalPath     string
+	OriginalBaseName string
+}
+
+// ActionType определяет тип утилиты
+type ActionType int
+
+const (
+	ActionCleanTemp ActionType = iota
+	ActionCollectLogs
+	ActionViewLog
+	ActionOrderCheck
+	ActionFrontTools
+)
+
+// ServiceUtilsConfig хранит параметры для выполнения
+type ServiceUtilsConfig struct {
+	Action ActionType
+	// Параметры для CollectLogs
+	LogDays int
+	LogDirs []string
+	// Параметры для ViewLog
+	LogFileToView string
+	// Параметры для OrderCheck / FrontTools
+	TargetDatabasePath string
+	DatabaseType       string // "db" or "sdf"
 }
 
 type Module struct{}
 
-func (m *Module) ID() string {
-	return "ServiceUtils"
-}
+func (m *Module) ID() string       { return "ServiceUtils" }
+func (m *Module) MenuText() string { return "Утилиты обслуживания" }
 
-func (m *Module) MenuText() string {
-	return "Утилиты обслуживания"
-}
-
-// Run управляет подменю утилит
+// Run - точка входа (UI)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Запуск модуля ServiceUtils")
+	ctx := tui.NewConsoleContext()
+
 	for {
-		tui.ClearScreen() // Добавим очистку, чтобы было красиво при возврате
-		tui.Title("\n--- Меню утилит обслуживания ---")
-		fmt.Println(" 1. Очистка временных файлов")
-		fmt.Println(" 2. Сборщик логов в архив")
-		fmt.Println(" 3. Просмотр лога в реальном времени (tail -f)")
-		fmt.Println(" 4. OrderCheck")
-		fmt.Println(" 5. FrontTools")
-		fmt.Println("\n 0. Назад в главное меню")
-		fmt.Print("Выберите пункт: ")
-
-		key, err := tui.ReadKey()
+		// 1. Конфигурация
+		cfg, err := m.Configure(ctx, am, wu)
 		if err != nil {
-			return nil
-		}
-
-		var opErr error
-		switch key {
-		case "1":
-			opErr = m.cleanTempFiles(am)
-		case "2":
-			opErr = m.collectLogs(am)
-		case "3":
-			opErr = m.viewLog(am)
-		case "4":
-			opErr = m.downloadAndRunOrderCheck(am, wu)
-		case "5":
-			opErr = m.downloadAndRunFrontTools(am, wu)
-		case "0":
-			tui.Info("Возврат в главное меню.")
-			return nil
-		default:
-			// Игнорируем неверный ввод
+			slog.Error("Ошибка конфигурации ServiceUtils", "error", err)
+			ctx.Error(fmt.Sprintf("Ошибка: %v", err))
+			tui.WaitForAnyKey()
 			continue
 		}
+		if cfg == nil {
+			slog.Info("Выход из ServiceUtils в главное меню")
+			return nil // Выход
+		}
 
-		if opErr != nil {
-			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", opErr))
+		// 2. Выполнение
+		slog.Info("Запуск выполнения задачи ServiceUtils", "action", cfg.Action)
+		if err := m.Execute(ctx, am, wu, cfg); err != nil {
+			slog.Error("Ошибка выполнения задачи", "action", cfg.Action, "error", err)
+			ctx.Error(fmt.Sprintf("Ошибка: %v", err))
 		} else {
-			tui.Success("\n--- Операция завершена успешно. ---")
+			slog.Info("Задача выполнена успешно", "action", cfg.Action)
 		}
 
 		tui.WaitForAnyKey()
 	}
 }
 
-// --- Пункт 1: Очистка временных файлов ---
-func (m *Module) cleanTempFiles(am core.AssetManager) error {
-	pathsToCleanRaw := am.Cfg().MaintenanceConfig.TempPaths
-	if len(pathsToCleanRaw) == 0 {
-		return errors.New("список путей для очистки 'TempPaths' в конфигурации пуст")
+// Configure - Сбор данных (UI слой)
+func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*ServiceUtilsConfig, error) {
+	tui.ClearScreen()
+	tui.Title("\n--- Меню утилит обслуживания ---")
+	fmt.Println(" 1. Очистка временных файлов")
+	fmt.Println(" 2. Сборщик логов в архив")
+	fmt.Println(" 3. Просмотр лога в реальном времени (tail -f)")
+	fmt.Println(" 4. OrderCheck")
+	fmt.Println(" 5. FrontTools")
+	fmt.Println("\n 0. Назад")
+	fmt.Print("Выберите пункт: ")
+
+	key, err := tui.ReadKey()
+	if err != nil {
+		return nil, err
 	}
 
-	tui.Info("Начинается анализ и очистка временных файлов...")
-	var totalFreed int64
+	slog.Info("Пользователь выбрал пункт меню ServiceUtils", "key", key)
 
-	var finalPathsToProcess []string
-	for _, rawPath := range pathsToCleanRaw {
-		expandedPath := os.ExpandEnv(rawPath)
-		if strings.Contains(expandedPath, "*") {
-			matches, err := filepath.Glob(expandedPath)
-			if err == nil {
-				finalPathsToProcess = append(finalPathsToProcess, matches...)
-			} else {
-				tui.Warn(fmt.Sprintf("Ошибка при поиске по шаблону '%s': %v", expandedPath, err))
-			}
-		} else {
-			finalPathsToProcess = append(finalPathsToProcess, expandedPath)
-		}
+	switch key {
+	case "1":
+		return &ServiceUtilsConfig{Action: ActionCleanTemp}, nil
+
+	case "2": // Collect Logs
+		return m.configureCollectLogs(am)
+
+	case "3": // Tail Log
+		return m.configureViewLog(am)
+
+	case "4": // OrderCheck
+		return m.configureOrderCheck(wu)
+
+	case "5": // FrontTools
+		return m.configureFrontTools()
+
+	case "0":
+		return nil, nil
+	default:
+		return m.Configure(ctx, am, wu)
 	}
+}
 
-	for _, path := range finalPathsToProcess {
-		tui.InfoF("Обработка: %s", path)
-
-		fi, err := os.Stat(path)
-		if os.IsNotExist(err) {
-			tui.Info("  Путь не существует. Пропускаем.")
-			continue
-		}
-		if err != nil {
-			tui.Warn(fmt.Sprintf("  Не удалось получить информацию о пути: %v. Пропускаем.", err))
-			continue
-		}
-
-		if !fi.IsDir() {
-			size := fi.Size()
-			if err := os.Remove(path); err != nil {
-				tui.Warn(fmt.Sprintf("  Не удалось удалить файл %s: %v", path, err))
-			} else {
-				totalFreed += size
-			}
-			continue
-		}
-
-		dirEntries, err := os.ReadDir(path)
-		if err != nil {
-			tui.Warn(fmt.Sprintf("  Не удалось прочитать директорию %s: %v. Пропускаем.", path, err))
-			continue
-		}
-
-		if len(dirEntries) == 0 {
-			tui.Info("  Директория пуста.")
-			continue
-		}
-
-		var currentPathSize int64
-		for _, entry := range dirEntries {
-			fullPath := filepath.Join(path, entry.Name())
-			size, err := getPathSize(fullPath)
-			if err != nil {
-				tui.Warn(fmt.Sprintf("  Не удалось посчитать размер %s: %v", entry.Name(), err))
-				continue
-			}
-			currentPathSize += size
-		}
-
-		tui.InfoF("  Найдено для удаления: %.2f MB. Начинаем удаление...", float64(currentPathSize)/1024/1024)
-		for _, entry := range dirEntries {
-			fullPath := filepath.Join(path, entry.Name())
-			if err := os.RemoveAll(fullPath); err != nil {
-				tui.Warn(fmt.Sprintf("  Не удалось удалить %s: %v", fullPath, err))
-			}
-		}
-		totalFreed += currentPathSize
+// Execute - Выполнение логики (Worker слой)
+func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *ServiceUtilsConfig) error {
+	switch cfg.Action {
+	case ActionCleanTemp:
+		return m.cleanTempFiles(ctx, am)
+	case ActionCollectLogs:
+		return m.collectLogs(ctx, am, cfg)
+	case ActionViewLog:
+		return m.tailFile(ctx, cfg.LogFileToView, 50)
+	case ActionOrderCheck:
+		return m.runOrderCheckFlow(ctx, am, wu, cfg)
+	case ActionFrontTools:
+		return m.runFrontToolsFlow(ctx, am, wu, cfg)
 	}
-
-	tui.SuccessF("\nОчистка завершена. Всего освобождено: %.2f MB", float64(totalFreed)/1024/1024)
 	return nil
 }
 
-// getPathSize рекурсивно вычисляет размер файла или содержимого директории.
+// --- CONFIGURE HELPERS ---
+
+func (m *Module) configureCollectLogs(am core.AssetManager) (*ServiceUtilsConfig, error) {
+	fmt.Print("\nЗа какое количество дней нужно собрать логи? (например, 7): ")
+	reader := bufio.NewReader(os.Stdin)
+	daysStr, _ := reader.ReadString('\n')
+	days, err := strconv.Atoi(strings.TrimSpace(daysStr))
+	if err != nil || days <= 0 {
+		return nil, errors.New("некорректное число")
+	}
+
+	slog.Debug("Поиск доступных директорий логов")
+	availableDirs := m.findLogDirectories(am.Cfg())
+	if len(availableDirs) == 0 {
+		return nil, errors.New("директории логов не найдены")
+	}
+
+	tui.Title("\n--- Доступные директории ---")
+	for i, dir := range availableDirs {
+		fmt.Printf(" %d. %s\n", i+1, dir)
+	}
+	fmt.Print("Укажите номера через запятую (например: 1,3): ")
+	choiceStr, _ := reader.ReadString('\n')
+
+	var selectedDirs []string
+	parts := strings.Split(strings.TrimSpace(choiceStr), ",")
+	for _, part := range parts {
+		idx, err := strconv.Atoi(strings.TrimSpace(part))
+		if err == nil && idx >= 1 && idx <= len(availableDirs) {
+			selectedDirs = append(selectedDirs, availableDirs[idx-1])
+		}
+	}
+	if len(selectedDirs) == 0 {
+		return nil, errors.New("ничего не выбрано")
+	}
+
+	slog.Info("Сконфигурирован сбор логов", "days", days, "dirs_count", len(selectedDirs))
+	return &ServiceUtilsConfig{
+		Action:  ActionCollectLogs,
+		LogDays: days,
+		LogDirs: selectedDirs,
+	}, nil
+}
+
+func (m *Module) configureViewLog(am core.AssetManager) (*ServiceUtilsConfig, error) {
+	slog.Debug("Поиск директорий для просмотра логов")
+	allLogDirs := m.findLogDirectories(am.Cfg())
+	if len(allLogDirs) == 0 {
+		return nil, errors.New("нет директорий с логами")
+	}
+
+	// Поиск файлов за сегодня
+	today := time.Now()
+	startOfDay := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
+
+	dirsWithTodayLogs := make(map[string][]string)
+	var dirList []string
+
+	tui.Info("Поиск сегодняшних логов...")
+	slog.Info("Сканирование директорий на наличие свежих логов")
+
+	for _, dir := range allLogDirs {
+		var todayFiles []string
+		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(strings.ToLower(d.Name()), ".log") && !strings.HasSuffix(strings.ToLower(d.Name()), ".txt") {
+				return nil
+			}
+			if info, err := d.Info(); err == nil && info.ModTime().After(startOfDay) {
+				todayFiles = append(todayFiles, path)
+			}
+			return nil
+		})
+		if len(todayFiles) > 0 {
+			sort.Strings(todayFiles)
+			dirsWithTodayLogs[dir] = todayFiles
+			dirList = append(dirList, dir)
+		}
+	}
+
+	if len(dirList) == 0 {
+		slog.Warn("Свежие логи не найдены")
+		return nil, errors.New("логов за сегодня не найдено")
+	}
+	sort.Strings(dirList)
+
+	// Выбор папки
+	tui.Title("\n--- Папки с логами за сегодня ---")
+	for i, dir := range dirList {
+		fmt.Printf(" %d. %s (%d шт.)\n", i+1, dir, len(dirsWithTodayLogs[dir]))
+	}
+	fmt.Print("Выберите папку: ")
+	reader := bufio.NewReader(os.Stdin)
+	choiceStr, _ := reader.ReadString('\n')
+	choice, err := strconv.Atoi(strings.TrimSpace(choiceStr))
+	if err != nil || choice < 1 || choice > len(dirList) {
+		return nil, errors.New("неверный выбор")
+	}
+
+	selectedDir := dirList[choice-1]
+	files := dirsWithTodayLogs[selectedDir]
+
+	// Выбор файла
+	tui.Title(fmt.Sprintf("\n--- Файлы в %s ---", selectedDir))
+	for i, file := range files {
+		fmt.Printf(" %d. %s\n", i+1, filepath.Base(file))
+	}
+	fmt.Print("Выберите файл: ")
+	choiceStr, _ = reader.ReadString('\n')
+	choice, err = strconv.Atoi(strings.TrimSpace(choiceStr))
+	if err != nil || choice < 1 || choice > len(files) {
+		return nil, errors.New("неверный выбор")
+	}
+
+	selectedFile := files[choice-1]
+	slog.Info("Выбран файл для просмотра", "path", selectedFile)
+
+	return &ServiceUtilsConfig{
+		Action:        ActionViewLog,
+		LogFileToView: selectedFile,
+	}, nil
+}
+
+func (m *Module) configureOrderCheck(wu core.WinUtils) (*ServiceUtilsConfig, error) {
+	slog.Info("Поиск баз данных для OrderCheck")
+	// Поиск БД
+	alcoholDb, errAlc := m.findAlcoholMarkingPluginDb(wu)
+	dbType, errType := m.detectIikoFrontDbType()
+
+	var iikoFrontDb string
+	if errType == nil {
+		appData := os.ExpandEnv("$APPDATA")
+		iikoFrontDb = filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities."+dbType)
+	} else {
+		slog.Warn("Не удалось определить тип БД iikoFront", "error", errType)
+	}
+
+	if errAlc != nil && errType != nil {
+		slog.Error("Ни одна база данных не найдена")
+		return nil, errors.New("базы данных не найдены")
+	}
+
+	targetDb := iikoFrontDb
+	if errAlc == nil {
+		slog.Info("Найдена БД Алкоплагина", "path", alcoholDb)
+		fmt.Println("\nВыберите базу данных:")
+		fmt.Printf(" 1. Алкоплагин: %s\n", alcoholDb)
+		if iikoFrontDb != "" {
+			fmt.Printf(" 2. iikoFront: %s\n", iikoFrontDb)
+		}
+		fmt.Print("Выбор: ")
+		key, _ := tui.ReadKey()
+		if key == "1" {
+			targetDb = alcoholDb
+		}
+	} else {
+		slog.Info("БД Алкоплагина не найдена, используем iikoFront", "path", iikoFrontDb)
+	}
+
+	slog.Info("Выбрана БД для OrderCheck", "path", targetDb)
+	return &ServiceUtilsConfig{
+		Action:             ActionOrderCheck,
+		TargetDatabasePath: targetDb,
+	}, nil
+}
+
+func (m *Module) configureFrontTools() (*ServiceUtilsConfig, error) {
+	slog.Info("Определение типа БД для FrontTools")
+	dbType, err := m.detectIikoFrontDbType()
+	if err != nil {
+		slog.Warn("Не удалось определить тип БД, fallback to sdf", "error", err)
+		tui.Warn("Не удалось определить тип БД автоматически. Используем .sdf по умолчанию.")
+		dbType = "sdf"
+	} else {
+		slog.Info("Определен тип БД", "type", dbType)
+	}
+	return &ServiceUtilsConfig{
+		Action:       ActionFrontTools,
+		DatabaseType: dbType,
+	}, nil
+}
+
+// --- EXECUTE IMPLEMENTATION ---
+
+func (m *Module) cleanTempFiles(ctx core.TaskContext, am core.AssetManager) error {
+	ctx.SetStatus("Очистка временных файлов")
+	slog.Info("Начало очистки временных файлов")
+	pathsToCleanRaw := am.Cfg().MaintenanceConfig.TempPaths
+	var totalFreed int64
+
+	for _, rawPath := range pathsToCleanRaw {
+		expandedPath := os.ExpandEnv(rawPath)
+		var paths []string
+		if strings.Contains(expandedPath, "*") {
+			matches, _ := filepath.Glob(expandedPath)
+			paths = append(paths, matches...)
+		} else {
+			paths = append(paths, expandedPath)
+		}
+
+		for _, path := range paths {
+			ctx.Info(fmt.Sprintf("Сканирование: %s", path))
+			slog.Debug("Обработка пути", "path", path)
+
+			entries, err := os.ReadDir(path)
+			if err == nil {
+				for _, e := range entries {
+					fullPath := filepath.Join(path, e.Name())
+					size, _ := getPathSize(fullPath)
+					if err := os.RemoveAll(fullPath); err == nil {
+						totalFreed += size
+					} else {
+						slog.Warn("Не удалось удалить", "path", fullPath, "error", err)
+					}
+				}
+			} else if !os.IsNotExist(err) {
+				// Если это файл
+				fi, err := os.Stat(path)
+				if err == nil && !fi.IsDir() {
+					size := fi.Size()
+					if err := os.Remove(path); err == nil {
+						totalFreed += size
+					} else {
+						slog.Warn("Не удалось удалить файл", "path", path, "error", err)
+					}
+				}
+			}
+		}
+	}
+	msg := fmt.Sprintf("Освобождено: %.2f MB", float64(totalFreed)/1024/1024)
+	ctx.Success(msg)
+	slog.Info("Очистка завершена", "freed_bytes", totalFreed)
+	return nil
+}
+
+func (m *Module) collectLogs(ctx core.TaskContext, am core.AssetManager, cfg *ServiceUtilsConfig) error {
+	ctx.SetStatus("Сбор логов")
+	slog.Info("Начало сбора логов", "days", cfg.LogDays)
+
+	cutoffDate := time.Now().AddDate(0, 0, -cfg.LogDays)
+	ctx.Info(fmt.Sprintf("Поиск файлов новее %s", cutoffDate.Format("2006-01-02")))
+
+	var filesToArchive []fileToArchive
+	tempExtractDir := filepath.Join(am.Cfg().RootPath, "temp", "log_collector_extract")
+	// Создаем временную папку для распакованных логов
+	if err := os.MkdirAll(tempExtractDir, 0755); err != nil {
+		slog.Error("Не удалось создать temp dir", "path", tempExtractDir, "error", err)
+		return err
+	}
+	defer os.RemoveAll(tempExtractDir)
+
+	for _, dir := range cfg.LogDirs {
+		ctx.Info(fmt.Sprintf("Сканирование %s...", dir))
+		slog.Debug("Сканирование директории", "path", dir)
+
+		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			// Проверяем дату изменения файла (или архива)
+			if !info.ModTime().After(cutoffDate) {
+				return nil
+			}
+
+			lower := strings.ToLower(d.Name())
+			if strings.HasSuffix(lower, ".log") || strings.HasSuffix(lower, ".txt") {
+				// Обычный файл лога
+				filesToArchive = append(filesToArchive, fileToArchive{
+					SourcePath:       path,
+					OriginalPath:     path,
+					OriginalBaseName: d.Name(),
+				})
+			} else if strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".gz") || strings.HasSuffix(lower, ".7z") {
+				// Архив. Нужно распаковать и добавить содержимое.
+				// Используем ту же логику, что была в старом файле.
+				ctx.Info(fmt.Sprintf("  Обработка архива: %s", d.Name()))
+				slog.Debug("Найден архив, попытка извлечения логов", "archive", path)
+
+				if extracted, err := m.handleArchive(path, tempExtractDir); err == nil {
+					filesToArchive = append(filesToArchive, extracted...)
+					slog.Debug("Из архива извлечено файлов", "count", len(extracted))
+				} else {
+					ctx.Warn(fmt.Sprintf("    Не удалось обработать архив %s", d.Name()))
+					slog.Warn("Ошибка обработки архива", "archive", path, "error", err)
+				}
+			}
+			return nil
+		})
+	}
+
+	if len(filesToArchive) == 0 {
+		slog.Warn("Файлы для архивации не найдены")
+		return errors.New("файлы не найдены")
+	}
+
+	archiveDir := filepath.Join(am.Cfg().RootPath, "log_collector")
+	_ = os.MkdirAll(archiveDir, 0755)
+	archiveName := fmt.Sprintf("logs_%s_%ddelta.zip", time.Now().Format("2006-01-02_1504"), cfg.LogDays)
+	archivePath := filepath.Join(archiveDir, archiveName)
+
+	ctx.Info("Создание архива...")
+	slog.Info("Создание zip-архива", "path", archivePath, "files_count", len(filesToArchive))
+
+	if err := m.createLogArchive(filesToArchive, archivePath); err != nil {
+		slog.Error("Ошибка создания архива", "error", err)
+		return err
+	}
+	ctx.Success(fmt.Sprintf("Архив создан: %s", archivePath))
+	return nil
+}
+
+func (m *Module) tailFile(ctx core.TaskContext, filePath string, lines int) error {
+	ctx.SetStatus("Просмотр лога")
+	slog.Info("Запуск просмотра лога (tail)", "file", filePath)
+
+	tui.InfoF("Файл: %s", filePath)
+	tui.Info("--- [Ctrl+C] выход ---")
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		slog.Error("Не удалось открыть файл", "error", err)
+		return err
+	}
+	defer file.Close()
+
+	stat, _ := file.Stat()
+	if stat.Size() > 0 {
+		startPos, _ := findStartOfLastNLines(file, lines)
+		file.Seek(startPos, io.SeekStart)
+	}
+
+	cancelCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	_, _ = io.Copy(os.Stdout, file) // Вывод хвоста
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-cancelCtx.Done():
+			fmt.Println("\n--- Выход ---")
+			slog.Info("Просмотр лога завершен пользователем")
+			return nil
+		case <-ticker.C:
+			_, _ = io.Copy(os.Stdout, file)
+		}
+	}
+}
+
+func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *ServiceUtilsConfig) error {
+	ctx.SetStatus("Запуск OrderCheck")
+	slog.Info("Начало процесса запуска OrderCheck")
+
+	// Проверка наличия ассета
+	if _, ok := am.Cfg().AssetCatalog["ordercheck"]; !ok {
+		return errors.New("ассет ordercheck не найден в конфиге")
+	}
+
+	ctx.Info("Скачивание OrderCheck...")
+	slog.Debug("Скачивание ассета ordercheck")
+	finalPath, err := am.Get("ordercheck")
+	if err != nil {
+		return err
+	}
+
+	exePath := filepath.Join(finalPath, "OrderCheck.exe")
+	if _, err := os.Stat(exePath); os.IsNotExist(err) {
+		slog.Info("OrderCheck.exe не в корне, поиск рекурсивно")
+		if found, err := wu.FindFileRecursive(finalPath, "OrderCheck.exe"); err == nil {
+			exePath = found
+		} else {
+			return errors.New("OrderCheck.exe не найден")
+		}
+	}
+
+	ctx.Info(fmt.Sprintf("Запуск с БД: %s", cfg.TargetDatabasePath))
+	slog.Info("Выполнение команды", "exe", exePath, "arg", cfg.TargetDatabasePath)
+
+	_, err = wu.RunCommand(exePath, cfg.TargetDatabasePath)
+	if err == nil {
+		ctx.Success("OrderCheck завершен.")
+	} else {
+		slog.Error("Ошибка выполнения OrderCheck", "error", err)
+	}
+	return err
+}
+
+func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *ServiceUtilsConfig) error {
+	ctx.SetStatus("Запуск FrontTools")
+	slog.Info("Начало процесса запуска FrontTools", "db_type", cfg.DatabaseType)
+
+	assetName := "fronttools_db"
+	if cfg.DatabaseType == "sdf" {
+		assetName = "fronttools_sdf"
+	}
+
+	if _, ok := am.Cfg().AssetCatalog[assetName]; !ok {
+		return fmt.Errorf("ассет %s не найден", assetName)
+	}
+
+	ctx.Info("Скачивание FrontTools...")
+	finalPath, err := am.Get(assetName)
+	if err != nil {
+		return err
+	}
+
+	exePath := filepath.Join(finalPath, "FrontTools.exe")
+	if _, err := os.Stat(exePath); os.IsNotExist(err) {
+		if found, err := wu.FindFileRecursive(finalPath, "FrontTools.exe"); err == nil {
+			exePath = found
+		} else {
+			return errors.New("FrontTools.exe не найден")
+		}
+	}
+
+	// Запуск
+	if wu.IsAdmin() {
+		ctx.Info("Запуск процесса...")
+		slog.Info("Запуск FrontTools (Admin)", "path", exePath)
+		_, err := wu.RunCommand(exePath)
+		return err
+	} else {
+		ctx.Warn("Попытка запуска через Планировщик (требуются права)...")
+		slog.Info("Запуск FrontTools через TaskScheduler", "path", exePath)
+		taskName := "goMH_FrontTools_Run"
+		if err := wu.CreateScheduledTask(taskName, exePath, filepath.Dir(exePath)); err != nil {
+			return err
+		}
+		_, err := wu.RunCommand("schtasks", "/Run", "/TN", taskName)
+		time.Sleep(2 * time.Second)
+		_ = wu.DeleteScheduledTaskByName(taskName)
+		return err
+	}
+}
+
+// --- UTILS (Private) ---
+
+func (m *Module) findLogDirectories(cfg *config.Config) []string {
+	dirMap := make(map[string]bool)
+	potentialPaths := cfg.MaintenanceConfig.LogCollectorPaths
+	if cfg.FrpcConfig.InstallPath != "" {
+		potentialPaths = append(potentialPaths, os.ExpandEnv(cfg.FrpcConfig.InstallPath))
+	}
+	potentialPaths = append(potentialPaths, filepath.Join(os.ExpandEnv(cfg.RootPath), "logs"))
+
+	for _, path := range potentialPaths {
+		expanded := os.ExpandEnv(path)
+		if strings.Contains(expanded, "*") {
+			matches, _ := filepath.Glob(expanded)
+			for _, match := range matches {
+				if fi, err := os.Stat(match); err == nil && fi.IsDir() {
+					dirMap[match] = true
+				}
+			}
+		} else {
+			if fi, err := os.Stat(expanded); err == nil && fi.IsDir() {
+				dirMap[expanded] = true
+			}
+		}
+	}
+	var res []string
+	for k := range dirMap {
+		res = append(res, k)
+	}
+	return res
+}
+
+func (m *Module) detectIikoFrontDbType() (string, error) {
+	appData := os.ExpandEnv("$APPDATA")
+	base := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities")
+	if _, err := os.Stat(base + ".db"); err == nil {
+		return "db", nil
+	}
+	if _, err := os.Stat(base + ".sdf"); err == nil {
+		return "sdf", nil
+	}
+	return "", errors.New("not found")
+}
+
+func (m *Module) findAlcoholMarkingPluginDb(wu core.WinUtils) (string, error) {
+	appData := os.ExpandEnv("$APPDATA")
+	path := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Plugins")
+	return wu.FindNewestFileByPattern(path, "AlcoholMarkingPluginStorage.sdf")
+}
+
 func getPathSize(path string) (int64, error) {
 	var size int64
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
@@ -189,94 +660,32 @@ func getPathSize(path string) (int64, error) {
 	return size, err
 }
 
-// --- Пункт 2: Сборщик логов ---
-func (m *Module) collectLogs(am core.AssetManager) error {
-	reader := bufio.NewReader(os.Stdin)
-
-	fmt.Print("За какое количество дней нужно собрать логи? (например, 7): ")
-	daysStr, _ := reader.ReadString('\n')
-	days, err := strconv.Atoi(strings.TrimSpace(daysStr))
-	if err != nil || days <= 0 {
-		return errors.New("некорректное количество дней, должно быть положительное число")
+func (m *Module) createLogArchive(files []fileToArchive, archivePath string) error {
+	f, err := os.Create(archivePath)
+	if err != nil {
+		return err
 	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	defer zw.Close()
 
-	availableDirs := m.findLogDirectories(am.Cfg())
-	if len(availableDirs) == 0 {
-		return errors.New("не найдено ни одной доступной директории с логами на основе конфигурации")
-	}
-
-	tui.Title("\n--- Доступные директории для сбора логов ---")
-	for i, dir := range availableDirs {
-		fmt.Printf(" %d. %s\n", i+1, dir)
-	}
-	fmt.Print("Укажите номера путей, откуда собрать логи (через запятую, например: 1,3): ")
-	choiceStr, _ := reader.ReadString('\n')
-	choiceStr = strings.TrimSpace(choiceStr)
-
-	var selectedDirs []string
-	parts := strings.Split(choiceStr, ",")
-	for _, part := range parts {
-		idx, err := strconv.Atoi(strings.TrimSpace(part))
-		if err != nil || idx < 1 || idx > len(availableDirs) {
-			tui.Warn(fmt.Sprintf("Некорректный номер '%s', пропускаем.", part))
+	re := regexp.MustCompile(`[\\/:]`)
+	for _, file := range files {
+		src, err := os.Open(file.SourcePath)
+		if err != nil {
+			slog.Warn("Не удалось открыть файл для архивации", "path", file.SourcePath, "error", err)
 			continue
 		}
-		selectedDirs = append(selectedDirs, availableDirs[idx-1])
+		defer src.Close()
+
+		sanitizedDir := re.ReplaceAllString(filepath.Dir(file.OriginalPath), "_")
+		sanitizedDir = strings.TrimPrefix(sanitizedDir, "_")
+		w, err := zw.Create(filepath.Join(sanitizedDir, file.OriginalBaseName))
+		if err == nil {
+			io.Copy(w, src)
+		}
 	}
-
-	if len(selectedDirs) == 0 {
-		return errors.New("не выбрано ни одной корректной директории для сбора логов")
-	}
-
-	cutoffDate := time.Now().AddDate(0, 0, -days)
-	tui.InfoF("Поиск файлов (.log, .txt, .zip, .gz), измененных после %s", cutoffDate.Format("2006-01-02"))
-
-	var filesToArchive []fileToArchive
-	tempExtractDir := filepath.Join(am.Cfg().RootPath, "temp", "log_collector_extract")
-	if err := os.MkdirAll(tempExtractDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать временную директорию: %w", err)
-	}
-	defer os.RemoveAll(tempExtractDir)
-
-	for _, dir := range selectedDirs {
-		tui.InfoF("Сканирование: %s", dir)
-		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
-			if !info.ModTime().After(cutoffDate) {
-				return nil
-			}
-
-			lowerName := strings.ToLower(d.Name())
-			if strings.HasSuffix(lowerName, ".log") || strings.HasSuffix(lowerName, ".txt") {
-				filesToArchive = append(filesToArchive, fileToArchive{
-					SourcePath:       path,
-					OriginalPath:     path,
-					OriginalBaseName: d.Name(),
-				})
-			} else if strings.HasSuffix(lowerName, ".zip") || strings.HasSuffix(lowerName, ".gz") || strings.HasSuffix(lowerName, ".7z") {
-				tui.InfoF("  Найден архив, обработка: %s", d.Name())
-				extractedLogs, err := m.handleArchive(path, tempExtractDir)
-				if err != nil {
-					tui.Warn(fmt.Sprintf("    Не удалось обработать архив %s: %v", d.Name(), err))
-				} else {
-					filesToArchive = append(filesToArchive, extractedLogs...)
-				}
-			}
-			return nil
-		})
-	}
-
-	if len(filesToArchive) == 0 {
-		return errors.New("не найдено ни одного подходящего лог-файла за указанный период в выбранных папках")
-	}
-
-	return m.createLogArchive(filesToArchive, am.Cfg().RootPath, days)
+	return nil
 }
 
 // handleArchive - гибридная функция, которая пытается распаковать архив сначала как GZIP, а потом как универсальный архив.
@@ -286,7 +695,7 @@ func (m *Module) handleArchive(archivePath, tempDir string) ([]fileToArchive, er
 		return []fileToArchive{extractedGzip}, nil
 	}
 
-	tui.InfoF("    ...не является GZIP, пробую как стандартный архив (ZIP, 7z...)")
+	// Если не GZIP, пробуем как универсальный архив
 	extractedUniversal, errUniversal := m.extractLogsFromUniversalArchive(archivePath, tempDir)
 	if errUniversal == nil {
 		return extractedUniversal, nil
@@ -379,523 +788,29 @@ func (m *Module) extractLogsFromUniversalArchive(archivePath, tempDir string) ([
 	return extractedLogs, err
 }
 
-// findLogDirectories "интеллектуально" находит папки с логами с поддержкой wildcards.
-func (m *Module) findLogDirectories(cfg *config.Config) []string {
-	dirMap := make(map[string]bool)
-
-	potentialPaths := []string{}
-	potentialPaths = append(potentialPaths, cfg.MaintenanceConfig.LogCollectorPaths...)
-	if cfg.FrpcConfig.InstallPath != "" {
-		potentialPaths = append(potentialPaths, os.ExpandEnv(cfg.FrpcConfig.InstallPath))
-	}
-	potentialPaths = append(potentialPaths, filepath.Join(os.ExpandEnv(cfg.RootPath), "logs"))
-
-	for _, path := range potentialPaths {
-		expandedPath := os.ExpandEnv(path)
-		if strings.Contains(expandedPath, "*") {
-			matches, err := filepath.Glob(expandedPath)
-			if err == nil {
-				for _, match := range matches {
-					if fi, err := os.Stat(match); err == nil && fi.IsDir() {
-						dirMap[match] = true
-					}
-				}
-			}
-		} else {
-			if _, err := os.Stat(expandedPath); err == nil {
-				dirMap[expandedPath] = true
-			}
-		}
-	}
-
-	var result []string
-	for dir := range dirMap {
-		result = append(result, dir)
-	}
-	return result
-}
-
-// createLogArchive создает архив с логами.
-func (m *Module) createLogArchive(files []fileToArchive, rootPath string, days int) error {
-	archiveDir := filepath.Join(rootPath, "log_collector")
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать директорию для архивов %s: %w", archiveDir, err)
-	}
-
-	datetimeStr := time.Now().Format("2006-01-02_1504")
-	archiveName := fmt.Sprintf("logs_%s_%ddelta.zip", datetimeStr, days)
-	archivePath := filepath.Join(archiveDir, archiveName)
-
-	tui.InfoF("Создание архива: %s", archivePath)
-	archiveFile, err := os.Create(archivePath)
-	if err != nil {
-		return fmt.Errorf("не удалось создать файл архива: %w", err)
-	}
-	defer archiveFile.Close()
-
-	zipWriter := zip.NewWriter(archiveFile)
-	defer zipWriter.Close()
-
-	re := regexp.MustCompile(`[\\/:]`)
-
-	for _, file := range files {
-		tui.InfoF("  Добавление: %s", file.OriginalPath)
-
-		f, err := os.Open(file.SourcePath)
-		if err != nil {
-			tui.Warn(fmt.Sprintf("    Не удалось открыть файл: %v", err))
-			continue
-		}
-		defer f.Close()
-
-		dir := filepath.Dir(file.OriginalPath)
-		sanitizedDir := re.ReplaceAllString(dir, "_")
-		sanitizedDir = strings.TrimPrefix(sanitizedDir, "_")
-
-		baseName := file.OriginalBaseName
-
-		internalPath := filepath.Join(sanitizedDir, baseName)
-
-		w, err := zipWriter.Create(internalPath)
-		if err != nil {
-			tui.Warn(fmt.Sprintf("    Не удалось создать запись в архиве: %v", err))
-			continue
-		}
-		if _, err := io.Copy(w, f); err != nil {
-			tui.Warn(fmt.Sprintf("    Не удалось скопировать данные в архив: %v", err))
-		}
-	}
-	tui.SuccessF("%d файлов добавлено в архив (%s)", len(files), archivePath)
-	return nil
-}
-
-// --- Пункт 3: Просмотр лога в реальном времени ---
-func (m *Module) viewLog(am core.AssetManager) error {
-	allLogDirs := m.findLogDirectories(am.Cfg())
-	if len(allLogDirs) == 0 {
-		return errors.New("не найдено ни одной директории с логами")
-	}
-
-	today := time.Now()
-	year, month, day := today.Date()
-	startOfDay := time.Date(year, month, day, 0, 0, 0, 0, today.Location())
-
-	dirsWithTodayLogs := make(map[string][]string)
-	var dirList []string
-
-	for _, dir := range allLogDirs {
-		var todayFiles []string
-		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			lowerName := strings.ToLower(d.Name())
-			if !(strings.HasSuffix(lowerName, ".log") || strings.HasSuffix(lowerName, ".txt")) {
-				return nil
-			}
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
-			if info.ModTime().After(startOfDay) {
-				todayFiles = append(todayFiles, path)
-			}
-			return nil
-		})
-
-		if len(todayFiles) > 0 {
-			sort.Strings(todayFiles)
-			dirsWithTodayLogs[dir] = todayFiles
-			dirList = append(dirList, dir)
-		}
-	}
-
-	if len(dirList) == 0 {
-		return errors.New("не найдено ни одного лог-файла за сегодня")
-	}
-	sort.Strings(dirList)
-
-	reader := bufio.NewReader(os.Stdin)
-	tui.Title("\n--- Найдены сегодняшние логи в следующих папках: ---")
-	for i, dir := range dirList {
-		fmt.Printf(" %d. %s (%d шт.)\n", i+1, dir, len(dirsWithTodayLogs[dir]))
-	}
-	fmt.Print("Выберите номер папки: ")
-	choiceStr, _ := reader.ReadString('\n')
-	choice, err := strconv.Atoi(strings.TrimSpace(choiceStr))
-	if err != nil || choice < 1 || choice > len(dirList) {
-		return errors.New("неверный выбор папки")
-	}
-	selectedDirKey := dirList[choice-1]
-	filesInSelectedDir := dirsWithTodayLogs[selectedDirKey]
-
-	tui.Title(fmt.Sprintf("\n--- Актуальные логи в папке: %s ---", selectedDirKey))
-	for i, file := range filesInSelectedDir {
-		fmt.Printf(" %d. %s\n", i+1, filepath.Base(file))
-	}
-	fmt.Print("Выберите номер файла для просмотра: ")
-	choiceStr, _ = reader.ReadString('\n')
-	choice, err = strconv.Atoi(strings.TrimSpace(choiceStr))
-	if err != nil || choice < 1 || choice > len(filesInSelectedDir) {
-		return errors.New("неверный выбор файла")
-	}
-	selectedLog := filesInSelectedDir[choice-1]
-
-	return m.tailFile(selectedLog, 50) // <-- ВЫЗОВ С КОЛИЧЕСТВОМ СТРОК
-}
-
-// tailFile выводит последние N строк файла и продолжает следить за ним.
-func (m *Module) tailFile(filePath string, lineCount int) error {
-	tui.Title(fmt.Sprintf("\n--- Просмотр файла: %s ---", filePath))
-	tui.Info("--- Управление: [Ctrl+C] - выход | [Ctrl+S] - пауза | [Ctrl+Q] - возобновить ---")
-	time.Sleep(1 * time.Second)
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	startPos, err := findStartOfLastNLines(file, lineCount)
-	if err != nil {
-		return fmt.Errorf("не удалось определить начальную позицию: %w", err)
-	}
-	// Перемещаем указатель на найденную позицию
-	if _, err := file.Seek(startPos, io.SeekStart); err != nil {
-		return fmt.Errorf("не удалось переместить указатель в файле: %w", err)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// Выводим "хвост" и продолжаем следить
-	if _, err := io.Copy(os.Stdout, file); err != nil {
-		return err
-	}
-
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("\n--- Просмотр завершен. ---")
-			return nil
-		case <-ticker.C:
-			if _, err := io.Copy(os.Stdout, file); err != nil {
-				tui.Warn(fmt.Sprintf("\nОшибка чтения файла (возможно, он был удален): %v", err))
-				return nil
-			}
-		}
-	}
-}
-
-// findStartOfLastNLines ищет позицию в файле, с которой начинаются последние N строк.
 func findStartOfLastNLines(file *os.File, n int) (int64, error) {
-	stat, err := file.Stat()
-	if err != nil {
-		return 0, err
-	}
+	stat, _ := file.Stat()
 	fileSize := stat.Size()
-	if fileSize == 0 {
-		return 0, nil
-	}
-
-	const bufferSize = 4096 // Читаем блоками по 4KB
-	buffer := make([]byte, bufferSize)
-	lineCount := 0
 	var readPos int64 = fileSize
+	count := 0
+	buf := make([]byte, 4096)
 
-	// Цикл чтения файла с конца
-	for {
-		var readSize int64 = bufferSize
-		if readPos < bufferSize {
-			readSize = readPos // Если осталось меньше, чем размер буфера
+	for readPos > 0 && count < n {
+		readSize := int64(4096)
+		if readPos < 4096 {
+			readSize = readPos
 		}
 		readPos -= readSize
-
-		_, err := file.Seek(readPos, io.SeekStart)
-		if err != nil {
-			return 0, err
-		}
-
-		bytesRead, err := file.Read(buffer[:readSize])
-		if err != nil {
-			return 0, err
-		}
-
-		// Сканируем прочитанный блок с конца в начало
-		for i := bytesRead - 1; i >= 0; i-- {
-			// Ищем символ переноса строки
-			if buffer[i] == '\n' {
-				lineCount++
-				// Если нашли N-ю строку с конца
-				if lineCount >= n {
-					// Возвращаем позицию следующего за \n символа
-					return readPos + int64(i) + 1, nil
+		file.Seek(readPos, io.SeekStart)
+		file.Read(buf[:readSize])
+		for i := readSize - 1; i >= 0; i-- {
+			if buf[i] == '\n' {
+				count++
+				if count >= n {
+					return readPos + i + 1, nil
 				}
 			}
 		}
-
-		// Если дошли до начала файла, выходим из цикла
-		if readPos == 0 {
-			break
-		}
 	}
-
-	// Если во всем файле меньше N строк, начинаем с самого начала
 	return 0, nil
-}
-
-// detectIikoFrontDbType определяет тип базы данных iikoFront.
-// Возвращает "db", "sdf" или ошибку если база данных не найдена.
-func (m *Module) detectIikoFrontDbType() (string, error) {
-	// Путь к базе данных iikoFront
-	appData := os.ExpandEnv("$APPDATA")
-	dbPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities")
-
-	// Проверяем наличие файлов базы данных
-	dbFile := dbPath + ".db"
-	sdfFile := dbPath + ".sdf"
-
-	tui.Info("Поиск базы данных iikoFront...")
-
-	// Проверяем файл .db
-	if _, err := os.Stat(dbFile); err == nil {
-		tui.Success("Найдена база данных типа .db")
-		return "db", nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("ошибка при проверке файла %s: %w", dbFile, err)
-	}
-
-	// Проверяем файл .sdf
-	if _, err := os.Stat(sdfFile); err == nil {
-		tui.Success("Найдена база данных типа .sdf")
-		return "sdf", nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("ошибка при проверке файла %s: %w", sdfFile, err)
-	}
-
-	// Если ни один файл не найден
-	return "", errors.New("база данных iikoFront не найдена (проверьте путь или запустите iikoFront)")
-}
-
-// downloadOrderCheck скачивает утилиту OrderCheck через менеджер ассетов
-func (m *Module) downloadOrderCheck(am core.AssetManager, wu core.WinUtils) (string, error) {
-	tui.Info("Начинается скачивание OrderCheck...")
-
-	// Используем менеджер ассетов для скачивания OrderCheck
-	// Предполагаем, что ассет называется "ordercheck" и настроен в конфигурации
-	const assetName = "ordercheck"
-
-	// Проверяем, настроен ли ассет в конфигурации
-	if _, exists := am.Cfg().AssetCatalog[assetName]; !exists {
-		return "", fmt.Errorf("ассет '%s' не найден в каталоге конфигурации", assetName)
-	}
-
-	// Скачиваем и обрабатываем ассет через менеджер ассетов
-	tui.Info("Скачивание и обработка OrderCheck через менеджер ассетов...")
-	finalPath, err := am.Get(assetName)
-	if err != nil {
-		return "", fmt.Errorf("не удалось скачать и обработать ассет: %w", err)
-	}
-
-	// Путь к исполняемому файлу OrderCheck.exe
-	orderCheckExe := filepath.Join(finalPath, "OrderCheck.exe")
-	if _, err := os.Stat(orderCheckExe); os.IsNotExist(err) {
-		// Если OrderCheck.exe не найден в корне, ищем его рекурсивно
-		foundPath, err := wu.FindFileRecursive(finalPath, "OrderCheck.exe")
-		if err != nil {
-			return "", fmt.Errorf("OrderCheck.exe не найден в распакованных файлах: %w", err)
-		}
-		orderCheckExe = foundPath
-	}
-
-	tui.SuccessF("OrderCheck найден: %s", orderCheckExe)
-	return orderCheckExe, nil
-}
-
-// runOrderCheck проверяет базы данных и запускает утилиту OrderCheck
-func (m *Module) runOrderCheck(am core.AssetManager, wu core.WinUtils, orderCheckExe string) error {
-	// Определяем путь к выбранной базе данных
-	dbPath, err := m.selectDatabase(wu)
-	if err != nil {
-		return fmt.Errorf("не удалось определить базу данных: %w", err)
-	}
-
-	tui.InfoF("Используется база данных: %s", dbPath)
-
-	// Запускаем OrderCheck с путем к базе данных как аргументом
-	tui.Info("Запуск OrderCheck.exe...")
-	_, err = wu.RunCommand(orderCheckExe, dbPath)
-	if err != nil {
-		return fmt.Errorf("не удалось запустить OrderCheck: %w", err)
-	}
-
-	tui.Success("OrderCheck.exe запущен успешно")
-	return nil
-}
-
-// selectDatabase определяет путь к базе данных для OrderCheck
-func (m *Module) selectDatabase(wu core.WinUtils) (string, error) {
-	// Проверяем наличие БД Алкоплагина
-	alcoholDbPath, err := m.findAlcoholMarkingPluginDb(wu)
-	alcoholDbFound := err == nil
-
-	// Определяем тип БД iikoFront
-	dbType, err := m.detectIikoFrontDbType()
-	if err != nil {
-		return "", fmt.Errorf("не удалось определить тип базы данных iikoFront: %w", err)
-	}
-
-	// Определяем путь к БД iikoFront
-	appData := os.ExpandEnv("$APPDATA")
-	iikoFrontDbPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities."+dbType)
-
-	if alcoholDbFound {
-		// Если найдена БД Алкоплагина, предлагаем выбор
-		tui.Info("Найдена база данных Алкоплагина")
-		tui.InfoF("БД Алкоплагина: %s", alcoholDbPath)
-		tui.InfoF("БД iikoFront: %s", iikoFrontDbPath)
-
-		reader := bufio.NewReader(os.Stdin)
-		tui.Title("\n--- Выбор базы данных для OrderCheck ---")
-		fmt.Println(" 1. База данных Алкоплагина")
-		fmt.Println(" 2. База данных iikoFront")
-		fmt.Print("Выберите номер (1-2): ")
-
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
-
-		switch choiceStr {
-		case "1":
-			tui.Info("Выбрана база данных Алкоплагина")
-			return alcoholDbPath, nil
-		case "2":
-			tui.Info("Выбрана база данных iikoFront")
-			return iikoFrontDbPath, nil
-		default:
-			return "", errors.New("неверный выбор базы данных")
-		}
-	} else {
-		// Если БД Алкоплагина не найдена, используем БД iikoFront
-		tui.Info("База данных Алкоплагина не найдена, используется база данных iikoFront")
-		return iikoFrontDbPath, nil
-	}
-}
-
-// findAlcoholMarkingPluginDb ищет базу данных Алкоплагина
-func (m *Module) findAlcoholMarkingPluginDb(wu core.WinUtils) (string, error) {
-	// Путь для поиска БД Алкоплагина
-	appData := os.ExpandEnv("$APPDATA")
-	searchPath := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Plugins")
-
-	tui.Info("Поиск базы данных Алкоплагина...")
-
-	// Используем новую функцию WinUtils для поиска самого нового файла по паттерну
-	newestFile, err := wu.FindNewestFileByPattern(searchPath, "AlcoholMarkingPluginStorage.sdf")
-	if err != nil {
-		return "", fmt.Errorf("база данных Алкоплагина не найдена: %w", err)
-	}
-
-	tui.SuccessF("Найдена база данных Алкоплагина: %s", newestFile)
-	return newestFile, nil
-}
-
-// --- Пункт 5: Скачивание и запуск OrderCheck ---
-func (m *Module) downloadAndRunOrderCheck(am core.AssetManager, wu core.WinUtils) error {
-	tui.Info("Начинается скачивание и запуск OrderCheck...")
-
-	// Скачиваем OrderCheck
-	orderCheckExe, err := m.downloadOrderCheck(am, wu)
-	if err != nil {
-		return err
-	}
-
-	// Запускаем OrderCheck с проверкой баз данных
-	return m.runOrderCheck(am, wu, orderCheckExe)
-}
-
-// --- Пункт 6: Скачивание и запуск FrontTools ---
-func (m *Module) downloadAndRunFrontTools(am core.AssetManager, wu core.WinUtils) error {
-	tui.Info("Начинается скачивание и запуск FrontTools...")
-
-	// Определяем тип базы данных iikoFront
-	dbType, err := m.detectIikoFrontDbType()
-	if err != nil {
-		return fmt.Errorf("не удалось определить тип базы данных: %w", err)
-	}
-
-	// Выбираем соответствующий ассет на основе типа базы данных
-	var assetName string
-	if dbType == "sdf" {
-		assetName = "fronttools_sdf"
-		tui.Info("Выбран ассет FrontTools для баз данных типа .sdf")
-	} else {
-		assetName = "fronttools_db"
-		tui.Info("Выбран ассет FrontTools для баз данных типа .db")
-	}
-
-	// Проверяем, настроен ли ассет в конфигурации
-	if _, exists := am.Cfg().AssetCatalog[assetName]; !exists {
-		return fmt.Errorf("ассет '%s' не найден в каталоге конфигурации", assetName)
-	}
-
-	// Скачиваем и обрабатываем ассет через менеджер ассетов
-	tui.Info("Скачивание и обработка FrontTools через менеджер ассетов...")
-	finalPath, err := am.Get(assetName)
-	if err != nil {
-		return fmt.Errorf("не удалось скачать и обработать ассет: %w", err)
-	}
-
-	// Рекурсивно ищем FrontTools.exe в распакованных файлах
-	tui.Info("Поиск FrontTools.exe в распакованных файлах...")
-	frontToolsExe := filepath.Join(finalPath, "FrontTools.exe")
-	if _, err := os.Stat(frontToolsExe); os.IsNotExist(err) {
-		// Если FrontTools.exe не найден в корне, ищем его рекурсивно
-		foundPath, err := wu.FindFileRecursive(finalPath, "FrontTools.exe")
-		if err != nil {
-			return fmt.Errorf("FrontTools.exe не найден в распакованных файлах: %w", err)
-		}
-		frontToolsExe = foundPath
-	}
-
-	tui.SuccessF("FrontTools найден: %s", frontToolsExe)
-
-	// Проверяем права администратора
-	if !wu.IsAdmin() {
-		tui.Warn("Для запуска FrontTools требуются права администратора")
-		tui.Info("Пытаемся запустить с повышенными правами...")
-
-		// Создаем задачу в планировщике для запуска с правами администратора
-		taskName := "goMH_FrontTools_Run"
-		err := wu.CreateScheduledTask(taskName, frontToolsExe, filepath.Dir(frontToolsExe))
-		if err != nil {
-			return fmt.Errorf("не удалось создать задачу планировщика: %w", err)
-		}
-
-		// Запускаем задачу
-		tui.Info("Запуск FrontTools через планировщик задач...")
-		_, err = wu.RunCommand("schtasks", "/Run", "/TN", taskName)
-		if err != nil {
-			return fmt.Errorf("не удалось запустить задачу: %w", err)
-		}
-
-		tui.Success("FrontTools запущен с правами администратора")
-
-		// Ждем немного и удаляем задачу
-		time.Sleep(3 * time.Second)
-		wu.DeleteScheduledTaskByName(taskName)
-		tui.Info("Временная задача планировщика удалена")
-	} else {
-		// Запускаем напрямую если уже есть права администратора
-		tui.Info("Запуск FrontTools.exe...")
-		_, err := wu.RunCommand(frontToolsExe)
-		if err != nil {
-			return fmt.Errorf("не удалось запустить FrontTools: %w", err)
-		}
-		tui.Success("FrontTools.exe запущен успешно")
-	}
-
-	return nil
 }

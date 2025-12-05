@@ -6,6 +6,18 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+// TaskContext определяет методы для взаимодействия логики с интерфейсом (CLI или GUI).
+type TaskContext interface {
+	Info(msg string)
+	Warn(msg string)
+	Error(msg string)
+	Success(msg string)
+	// SetStatus устанавливает текстовое описание текущего этапа (например, "Скачивание...")
+	SetStatus(text string)
+	// SetProgress устанавливает процент выполнения (0-100). -1 для неопределенного прогресса.
+	SetProgress(percent int)
+}
+
 // ScannerInfo содержит информацию о найденном устройстве-сканере.
 type ScannerInfo struct {
 	Port        string // Например, "COM3"
@@ -65,7 +77,6 @@ type AssetManager interface {
 }
 
 // Installer — это единый интерфейс для всех устанавливаемых модулей.
-// Мы переносим его сюда, чтобы он был доступен всем.
 type Installer interface {
 	ID() string
 	MenuText() string

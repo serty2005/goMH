@@ -7,6 +7,7 @@ import (
 	"goMH/core"
 	"goMH/tui"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,138 +23,150 @@ func (m *Module) MenuText() string {
 	return "Установить средства удаленного доступа (TV, LM, Getad)"
 }
 
-// Структура для хранения информации о компоненте
-type remoteComponent struct {
-	ID             string
-	Name           string
-	ServiceName    string
-	IsInstalled    bool
-	AllowReinstall bool
-	InstallFunc    func(am core.AssetManager, wu core.WinUtils) error
+// ToolType определяет тип инструмента
+type ToolType int
+
+const (
+	ToolTeamViewer ToolType = iota
+	ToolLiteManager
+	ToolGetad
+)
+
+// RemoteAccessConfig хранит выбор пользователя
+type RemoteAccessConfig struct {
+	Tool ToolType
 }
 
-// Главная функция Run теперь управляет подменю (мгновенный ввод)
+// Run - точка входа (UI)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
-	// Инициализируем компоненты
-	components := []*remoteComponent{
-		{ID: "1", Name: "TeamViewer", ServiceName: "TeamViewer", InstallFunc: m.installTeamViewer, AllowReinstall: false},
-		{ID: "2", Name: "LiteManager", ServiceName: "ROMService", InstallFunc: m.installLiteManager, AllowReinstall: false},
-		{ID: "3", Name: "Getad Agent", ServiceName: "MH_Getad", InstallFunc: m.installGetad, AllowReinstall: true},
-	}
+	slog.Info("Запуск модуля RemoteAccess")
+	ctx := tui.NewConsoleContext()
 
-	// Основной цикл подменю
+	// 1. Конфигурация (меню с обновляемыми статусами)
+	// В консольной версии мы хотим возвращаться в меню после установки,
+	// поэтому цикл for оставим здесь, в Run.
+	// В GUI это будет просто вызов диалога один раз.
 	for {
-		tui.ClearScreen()
-		tui.Title("\n--- Меню установки средств удаленного доступа ---")
-		// Перед показом меню обновляем статусы
-		m.checkStatuses(wu, components)
-
-		// Отображаем меню
-		for _, c := range components {
-			status := tui.ColorRed + "[не установлено]" + tui.ColorReset
-			menuText := fmt.Sprintf("Установить %s", c.Name)
-			if c.IsInstalled {
-				status = tui.ColorGreen + "[установлено]" + tui.ColorReset
-				// Если разрешена переустановка, меняем текст
-				if c.AllowReinstall {
-					menuText = fmt.Sprintf("Переустановить %s", c.Name)
-				}
-			}
-			fmt.Printf(" %s. %s %s\n", c.ID, menuText, status)
-		}
-		fmt.Println("\n 0. Назад в главное меню")
-		fmt.Print("Выберите пункт: ")
-
-		key, err := tui.ReadKey()
+		cfg, err := m.Configure(ctx, am, wu)
 		if err != nil {
-			return nil
+			slog.Error("Ошибка конфигурации RemoteAccess", "error", err)
+			return err
+		}
+		if cfg == nil {
+			return nil // Выход
 		}
 
-		if key == "0" {
-			return nil // Выход из подменю
+		// 2. Выполнение
+		if err := m.Execute(ctx, am, wu, cfg); err != nil {
+			slog.Error("Ошибка выполнения задачи RemoteAccess", "error", err)
+			// Ошибку уже показали через ctx.Error внутри (если нужно), или вернем её наверх
+			// Но в цикле лучше обработать и продолжить
+			ctx.Error(fmt.Sprintf("Ошибка: %v", err))
 		}
 
-		// Находим выбранный компонент
-		var chosenComponent *remoteComponent
-		for _, c := range components {
-			if c.ID == key {
-				chosenComponent = c
-				break
-			}
+		tui.WaitForAnyKey()
+	}
+}
+
+// Configure - показывает меню со статусами и возвращает выбор
+func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*RemoteAccessConfig, error) {
+	// Определяем статусы служб
+	tvInstalled, _ := wu.ServiceExists("TeamViewer")
+	lmInstalled, _ := wu.ServiceExists("ROMService")
+	getadInstalled, _ := wu.ServiceExists("MH_Getad")
+
+	tui.ClearScreen()
+	tui.Title("\n--- Меню установки средств удаленного доступа ---")
+
+	printStatus := func(installed bool) string {
+		if installed {
+			return tui.ColorGreen + "[установлено]" + tui.ColorReset
 		}
+		return tui.ColorRed + "[не установлено]" + tui.ColorReset
+	}
 
-		// Если выбор корректен, запускаем установку
-		if chosenComponent != nil {
-			// Блокируем только если компонент установлен И у него НЕТ флага AllowReinstall
-			if chosenComponent.IsInstalled && !chosenComponent.AllowReinstall {
-				tui.Warn(fmt.Sprintf("\n%s уже установлен. Для переустановки сначала удалите его стандартными средствами Windows.", chosenComponent.Name))
-				tui.WaitForAnyKey()
-				continue
-			}
+	fmt.Printf(" 1. TeamViewer %s\n", printStatus(tvInstalled))
+	fmt.Printf(" 2. LiteManager %s\n", printStatus(lmInstalled))
+	fmt.Printf(" 3. Getad Agent %s (возможна переустановка)\n", printStatus(getadInstalled))
+	fmt.Println("\n 0. Назад в главное меню")
+	fmt.Print("Выберите пункт: ")
 
-			// Запускаем функцию установки
-			err := chosenComponent.InstallFunc(am, wu)
-			if err != nil {
-				tui.Error(fmt.Sprintf("\n--- ОШИБКА при установке/переустановке %s ---\\n%v\\n---------------------------------------\\n", chosenComponent.Name, err))
-			} else {
-				tui.Success(fmt.Sprintf("\n--- %s успешно установлен/переустановлен. ---", chosenComponent.Name))
-			}
+	key, err := tui.ReadKey()
+	if err != nil {
+		return nil, err
+	}
+
+	switch key {
+	case "1":
+		if tvInstalled {
+			tui.Warn("TeamViewer уже установлен.")
 			tui.WaitForAnyKey()
-
-		} else {
-			// Неверный выбор, цикл просто повторится
+			return m.Configure(ctx, am, wu) // Рекурсия для перерисовки меню (можно просто continue в цикле Run, но это не красиво)
 		}
+		return &RemoteAccessConfig{Tool: ToolTeamViewer}, nil
+	case "2":
+		if lmInstalled {
+			tui.Warn("LiteManager уже установлен.")
+			tui.WaitForAnyKey()
+			return m.Configure(ctx, am, wu)
+		}
+		return &RemoteAccessConfig{Tool: ToolLiteManager}, nil
+	case "3":
+		// Getad можно переустанавливать
+		return &RemoteAccessConfig{Tool: ToolGetad}, nil
+	case "0":
+		return nil, nil
+	default:
+		return m.Configure(ctx, am, wu) // Повтор при неверном вводе
 	}
 }
 
-// checkStatuses обновляет поле IsInstalled для каждого компонента
-func (m *Module) checkStatuses(wu core.WinUtils, components []*remoteComponent) {
-	for _, c := range components {
-		installed, err := wu.ServiceExists(c.ServiceName)
-		if err != nil {
-			// Если проверка не удалась, считаем что не установлено, но выводим ошибку
-			tui.Warn(fmt.Sprintf("Не удалось проверить статус службы %s: %v", c.ServiceName, err))
-			c.IsInstalled = false
-		} else {
-			c.IsInstalled = installed
-		}
+// Execute - выполнение установки
+func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *RemoteAccessConfig) error {
+	switch cfg.Tool {
+	case ToolTeamViewer:
+		ctx.SetStatus("Установка TeamViewer")
+		return m.installTeamViewer(ctx, am, wu)
+	case ToolLiteManager:
+		ctx.SetStatus("Установка LiteManager")
+		return m.installLiteManager(ctx, am, wu)
+	case ToolGetad:
+		ctx.SetStatus("Установка Getad Agent")
+		return m.installGetad(ctx, am, wu)
 	}
+	return nil
 }
 
-// --- Функции установки остаются такими же, как и были ---
+// --- Логика установки ---
 
-// --- Установка TeamViewer ---
-func (m *Module) installTeamViewer(am core.AssetManager, wu core.WinUtils) error {
-	tui.Info("\n-> Начало установки TeamViewer...")
+func (m *Module) installTeamViewer(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Начало установки TeamViewer")
 	cfg := am.Cfg().TeamViewerConfig
 
-	// --- Шаг 1: Получение configId ---
-	tui.InfoF("Запрос страницы: %s", cfg.ShortURL)
+	// 1. Получение configId
+	ctx.Info(fmt.Sprintf("Запрос страницы: %s", cfg.ShortURL))
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", cfg.ShortURL, nil)
 	if err != nil {
-		return fmt.Errorf("не удалось создать HTTP-запрос: %w", err)
+		return err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("не удалось выполнить HTTP-запрос: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("не удалось прочитать тело ответа: %w", err)
-	}
+	body, _ := io.ReadAll(resp.Body)
 
 	re := regexp.MustCompile(`var configId\s*=\s*"([^"]+)"`)
 	matches := re.FindStringSubmatch(string(body))
 	if len(matches) < 2 {
-		return fmt.Errorf("не удалось найти configId на странице")
+		return fmt.Errorf("не удалось найти configId")
 	}
 	configID := matches[1]
-	tui.InfoF("Найден configId: %s", configID)
+	slog.Debug("Найден configId", "id", configID)
 
-	// --- Шаг 2: Запрос прямой ссылки от API ---
+	// 2. API запрос
 	type ApiRequestBody struct {
 		ConfigID       string `json:"ConfigId"`
 		Version        string `json:"Version"`
@@ -161,199 +174,143 @@ func (m *Module) installTeamViewer(am core.AssetManager, wu core.WinUtils) error
 		Subdomain      string `json:"Subdomain"`
 		ConnectionID   string `json:"ConnectionId"`
 	}
-	reqBody := ApiRequestBody{
+	jsonBody, _ := json.Marshal(ApiRequestBody{
 		ConfigID:       configID,
 		Version:        "15",
 		IsCustomModule: true,
 		Subdomain:      "1",
-		ConnectionID:   "",
-	}
-	jsonBody, _ := json.Marshal(reqBody)
+	})
 
-	tui.InfoF("Запрос прямой ссылки от API: %s", cfg.ApiURL)
-	apiReq, err := http.NewRequest("POST", cfg.ApiURL, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return fmt.Errorf("не удалось создать API-запрос: %w", err)
-	}
+	ctx.Info("Запрос прямой ссылки через API...")
+	apiReq, _ := http.NewRequest("POST", cfg.ApiURL, bytes.NewBuffer(jsonBody))
 	apiReq.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	apiReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	apiReq.Header.Set("Accept", "application/json, text/plain, */*")
+	apiReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 
 	apiResp, err := client.Do(apiReq)
 	if err != nil {
-		return fmt.Errorf("ошибка при выполнении API-запроса: %w", err)
+		return err
 	}
 	defer apiResp.Body.Close()
 
 	if apiResp.StatusCode != http.StatusOK {
-		errorBody, _ := io.ReadAll(apiResp.Body)
-		return fmt.Errorf("API вернуло ошибку: %s. Тело ответа: %s", apiResp.Status, string(errorBody))
+		return fmt.Errorf("API error: %s", apiResp.Status)
 	}
 
-	directURLBody, err := io.ReadAll(apiResp.Body)
-	if err != nil {
-		return fmt.Errorf("не удалось прочитать ответ от API: %w", err)
-	}
+	directURLBody, _ := io.ReadAll(apiResp.Body)
 	directURL := strings.Trim(string(directURLBody), `"`)
-	tui.InfoF("Получена прямая ссылка для скачивания")
+	slog.Debug("Получена ссылка", "url", directURL)
 
-	// --- Шаг 3: Скачивание файла с помощью assetmgr ---
-	installerName := "TeamViewer_Setup.exe"
-	installerPath := filepath.Join(am.Cfg().AssetsCachePath, installerName)
-
+	// 3. Скачивание
+	installerPath := filepath.Join(am.Cfg().AssetsCachePath, "TeamViewer_Setup.exe")
+	ctx.Info("Скачивание дистрибутива...")
 	if _, err := am.DownloadHTTPWithProgress(directURL, installerPath); err != nil {
-		return fmt.Errorf("не удалось скачать установщик: %w", err)
+		return err
 	}
 
-	// --- Шаг 4: Запуск установщика ---
-	tui.Info("Запуск установщика TeamViewer в тихом режиме...")
+	// 4. Установка
+	ctx.Info("Запуск установки...")
 	_, err = wu.RunCommand(installerPath, "/S")
+	if err == nil {
+		ctx.Success("TeamViewer успешно установлен.")
+	}
 	return err
 }
 
-// --- Установка LiteManager ---
-func (m *Module) installLiteManager(am core.AssetManager, wu core.WinUtils) error {
-	tui.Info("\n-> Начало установки LiteManager...")
+func (m *Module) installLiteManager(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Начало установки LiteManager")
+	ctx.Info("Скачивание MSI пакета...")
 	msiPath, err := am.DownloadToCache("LiteManager_Installer")
 	if err != nil {
-		return fmt.Errorf("не удалось скачать установщик LiteManager: %w", err)
+		return err
 	}
 
-	tui.Info("Запуск установки LiteManager в тихом режиме...")
+	ctx.Info("Запуск msiexec...")
 	_, err = wu.RunCommand("msiexec.exe", "/i", msiPath, "/quiet", "/norestart")
+	if err == nil {
+		ctx.Success("LiteManager успешно установлен.")
+	}
 	return err
 }
 
-// --- Установка Getad ---
-func (m *Module) installGetad(am core.AssetManager, wu core.WinUtils) error {
+func (m *Module) installGetad(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Начало установки Getad")
 	const assetName = "Getad_Agent"
 	const serviceName = "MH_Getad"
-	const installSubDir = "getad" // Папка внутри C:\MH
+	installDir := filepath.Join(am.Cfg().RootPath, "getad")
 
-	installDir := filepath.Join(am.Cfg().RootPath, installSubDir)
-
-	tui.Title("\n--- Начало установки/переустановки Getad Agent ---")
-
-	// --- ЭТАП 1: ПОИСК И ОЧИСТКА СТАРОЙ ВЕРСИИ ---
-	tui.Info("-> Этап 1: Поиск и удаление предыдущих версий...")
-
-	// Ищем старый getad*.exe
+	// 1. Очистка старого
+	ctx.Info("Поиск и удаление старых версий...")
 	oldExePath, err := wu.FindFileRecursive(am.Cfg().RootPath, "getad*.exe")
 	if err == nil {
-		tui.InfoF("Найдена предыдущая установка: %s", oldExePath)
-		oldInstallDir := filepath.Dir(oldExePath)
-
-		// 1.1 Удаление службы
-		serviceExists, _ := wu.ServiceExists(serviceName)
-		if serviceExists {
-			tui.Info("Остановка и удаление службы...")
+		slog.Info("Найдена старая версия", "path", oldExePath)
+		if exists, _ := wu.ServiceExists(serviceName); exists {
+			ctx.Info("Остановка службы...")
 			_, _ = wu.RunCommand(oldExePath, "stop")
-			time.Sleep(2 * time.Second) // Даем время на остановку
-			_, err := wu.RunCommand(oldExePath, "remove")
-			if err != nil {
-				// Пробуем альтернативный вариант, если 'remove' не сработал
-				_, _ = wu.RunCommand(oldExePath, "uninstall")
-			}
+			time.Sleep(2 * time.Second)
+			_, _ = wu.RunCommand(oldExePath, "remove")
 		}
 
-		// 1.2 Удаление из автозагрузки
-		userStartup, commonStartup, err := wu.GetStartupFolders()
-		if err == nil {
-			for _, startupDir := range []string{userStartup, commonStartup} {
-				entries, _ := os.ReadDir(startupDir)
-				for _, entry := range entries {
-					if strings.HasSuffix(strings.ToLower(entry.Name()), ".lnk") {
-						// TODO: Нужна библиотека для чтения .lnk, чтобы проверить путь.
-						// Пока что удаляем по имени файла getad*.lnk
-						if strings.HasPrefix(strings.ToLower(entry.Name()), "getad") {
-							shortcutPath := filepath.Join(startupDir, entry.Name())
-							tui.InfoF("Удаление ярлыка из автозагрузки: %s", shortcutPath)
-							_ = wu.DeleteFile(shortcutPath)
-						}
-					}
+		// Очистка автозагрузки
+		userStartup, commonStartup, _ := wu.GetStartupFolders()
+		for _, dir := range []string{userStartup, commonStartup} {
+			if matches, _ := filepath.Glob(filepath.Join(dir, "getad*.lnk")); len(matches) > 0 {
+				for _, match := range matches {
+					_ = os.Remove(match)
 				}
 			}
 		}
 
-		// 1.3 Удаление из планировщика
+		// Планировщик
 		taskName, _ := wu.FindScheduledTaskByPath(oldExePath)
 		if taskName != "" {
-			tui.InfoF("Удаление задачи '%s' из планировщика...", taskName)
 			_ = wu.DeleteScheduledTaskByName(taskName)
 		}
 
-		// 1.4 Очистка папки установки (если это не корневая папка C:\MH)
-		if strings.EqualFold(oldInstallDir, am.Cfg().RootPath) {
-			tui.Warn("Getad установлен в корневую папку, очистка не производится.")
-		} else {
-			tui.InfoF("Очистка директории: %s", oldInstallDir)
-			_ = wu.CleanDirectory(oldInstallDir)
+		// Очистка папки
+		oldDir := filepath.Dir(oldExePath)
+		if !strings.EqualFold(oldDir, am.Cfg().RootPath) {
+			_ = wu.CleanDirectory(oldDir)
 		}
-
-	} else {
-		tui.Info("Предыдущих версий не найдено, выполняется чистая установка.")
 	}
-	// Очищаем целевую папку на всякий случай
+
 	_ = wu.CleanDirectory(installDir)
 	_ = os.MkdirAll(installDir, 0755)
 
-	// --- ЭТАП 2: УСТАНОВКА НОВОЙ ВЕРСИИ ---
-	tui.Info("\n-> Этап 2: Установка новой версии...")
+	// 2. Установка нового
+	ctx.Info("Добавление исключения в Defender...")
+	_ = wu.AddDefenderExclusion(installDir)
 
-	// 2.1 Добавляем исключение в антивирус
-	tui.InfoF("Добавление пути '%s' в исключения Защитника Windows...", installDir)
-	if err := wu.AddDefenderExclusion(installDir); err != nil {
-		tui.Warn(fmt.Sprintf("Не удалось добавить исключение: %v", err))
-	}
-
-	// 2.2 Скачиваем и распаковываем
-	tui.Info("Скачивание архива агента...")
+	ctx.Info("Скачивание и распаковка...")
 	cachePath, err := am.DownloadToCache(assetName)
 	if err != nil {
-		return fmt.Errorf("не удалось скачать архив агента: %w", err)
+		return err
 	}
-
-	tui.InfoF("Распаковка архива в '%s'...", installDir)
-	// Используем новую "умную" распаковку
 	if err := am.UnpackToFlatDir(assetName, cachePath, installDir); err != nil {
-		return fmt.Errorf("не удалось распаковать архив агента: %w", err)
+		return err
 	}
 
-	// 2.3 Установка и запуск службы
 	serviceExe := filepath.Join(installDir, "getadsc.exe")
 	if _, err := os.Stat(serviceExe); os.IsNotExist(err) {
-		return fmt.Errorf("не найден исполняемый файл службы: %s", serviceExe)
+		return fmt.Errorf("файл %s не найден", serviceExe)
 	}
 
-	tui.Info("Установка службы...")
+	ctx.Info("Регистрация службы...")
 	if _, err := wu.RunCommand(serviceExe, "--startup", "auto", "install"); err != nil {
-		return fmt.Errorf("не удалось установить службу: %w", err)
+		return err
 	}
-
-	tui.Info("Запуск службы...")
 	if _, err := wu.RunCommand(serviceExe, "start"); err != nil {
-		return fmt.Errorf("не удалось запустить службу: %w", err)
+		return err
 	}
 
-	// 2.4 Настройка триггеров
-	tui.Info("Настройка триггеров службы...")
-	triggers := []string{"start/machinepolicy", "start/userpolicy"}
-	if err := wu.SetServiceTriggers(serviceName, triggers); err != nil {
-		tui.Warn(fmt.Sprintf("Не удалось установить триггеры: %v", err))
-	}
+	ctx.Info("Настройка триггеров...")
+	_ = wu.SetServiceTriggers(serviceName, []string{"start/machinepolicy", "start/userpolicy"})
 
-	// --- ЭТАП 3: ПРОВЕРКА ---
-	tui.Info("\n-> Этап 3: Проверка статуса службы...")
-	time.Sleep(3 * time.Second) // Даем службе время на запуск
-	status, err := wu.GetServiceStatus(serviceName)
-	if err != nil {
-		return fmt.Errorf("не удалось проверить статус службы: %w", err)
-	}
-
+	time.Sleep(3 * time.Second)
+	status, _ := wu.GetServiceStatus(serviceName)
 	if status == "RUNNING" {
-		tui.SuccessF("Служба '%s' успешно установлена и запущена.", serviceName)
+		ctx.Success("Служба Getad успешно запущена.")
 	} else {
-		return fmt.Errorf("служба '%s' установлена, но ее статус '%s', а не 'RUNNING'", serviceName, status)
+		ctx.Warn(fmt.Sprintf("Служба установлена, но статус: %s", status))
 	}
 
 	return nil
