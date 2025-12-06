@@ -223,36 +223,36 @@ func (dm *DistroManager) uninstallOldVersion(h brandHandler, component config.Di
 	tui.InfoF("Подготовка к удалению версии %s...", version)
 	slog.Info("Начало процедуры удаления старой версии", "version", version)
 
-	// --- ПОПЫТКА 1: Системное удаление через реестр ---
+	// --- ПОПЫТКА 1: Системное удаление через реестр --- (не работает и можно допилить, но пока не нужно)
 	// Нам нужно сопоставить ID компонента с именем в "Установке и удалении программ"
-	var systemAppName string
-	switch component.ID {
-	case "iiko_front":
-		systemAppName = "iikoRMS Front"
-	case "iiko_rms_back":
-		systemAppName = "iikoRMS BackOffice"
-	case "iiko_chain_back":
-		systemAppName = "iikoChain"
-	case "syrve_front":
-		systemAppName = "SyrveRMS Front"
-	case "syrve_rms_back":
-		systemAppName = "SyrveRMS BackOffice"
-	case "syrve_chain_back":
-		systemAppName = "SyrveChain"
-	}
+	// var systemAppName string
+	// switch component.ID {
+	// case "iiko_front":
+	// 	systemAppName = "iikoRMS Front"
+	// case "iiko_rms_back":
+	// 	systemAppName = "iikoRMS BackOffice"
+	// case "iiko_chain_back":
+	// 	systemAppName = "iikoChain"
+	// case "syrve_front":
+	// 	systemAppName = "SyrveRMS Front"
+	// case "syrve_rms_back":
+	// 	systemAppName = "SyrveRMS BackOffice"
+	// case "syrve_chain_back":
+	// 	systemAppName = "SyrveChain"
+	// }
 
-	if systemAppName != "" {
-		tui.InfoF("Попытка системного удаления через реестр для '%s'...", systemAppName)
-		err := dm.WU.UninstallSystemApp(systemAppName)
-		if err == nil {
-			tui.Success("Системное удаление успешно инициировано.")
-			return nil
-		}
-		slog.Warn("Системное удаление не удалось или приложение не найдено", "app", systemAppName, "error", err)
-		tui.Warn(fmt.Sprintf("Системное удаление не удалось (%v). Переходим к варианту с деинсталлятором.", err))
-	} else {
-		slog.Debug("Системное имя не определено для компонента, пропуск шага реестра", "id", component.ID)
-	}
+	// if systemAppName != "" {
+	// 	tui.InfoF("Попытка системного удаления через реестр для '%s'...", systemAppName)
+	// 	err := dm.WU.UninstallSystemApp(systemAppName)
+	// 	if err == nil {
+	// 		tui.Success("Системное удаление успешно инициировано.")
+	// 		return nil
+	// 	}
+	// 	slog.Warn("Системное удаление не удалось или приложение не найдено", "app", systemAppName, "error", err)
+	// 	tui.Warn(fmt.Sprintf("Системное удаление не удалось (%v). Переходим к варианту с деинсталлятором.", err))
+	// } else {
+	// 	slog.Debug("Системное имя не определено для компонента, пропуск шага реестра", "id", component.ID)
+	// }
 
 	// --- ПОПЫТКА 2: Использование установщика (с проверкой кэша) ---
 
@@ -265,7 +265,7 @@ func (dm *DistroManager) uninstallOldVersion(h brandHandler, component config.Di
 
 	// Путь, где должен лежать дистрибутив этой версии
 	// C:\MH\iiko_9.X.X\Setup.Front.exe
-	versionDir := filepath.Join(dm.AM.Cfg().RootPath, fmt.Sprintf("%s_%s", strings.Split(component.ID, "_")[0], version)) // iiko_9.2.0 или syrve_9.2.0 - грубая эвристика, лучше использовать brandName, но он тут недоступен напрямую, используем префикс ID
+	versionDir := filepath.Join(dm.AM.Cfg().RootPath, fmt.Sprintf("%s_%s", strings.Split(component.ID, "_")[0], version)) // iiko_9.2.0 или syrve_9.2.0
 
 	// Уточним префикс папки. iikoHandler создает "iiko_%s", syrveHandler создает "syrve_%s"
 	if strings.HasPrefix(component.ID, "iiko") {

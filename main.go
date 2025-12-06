@@ -12,6 +12,7 @@ import (
 	"goMH/modules/frpc"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
+	"goMH/modules/selfupdate"
 	"goMH/modules/serviceutils"
 	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
@@ -308,7 +309,16 @@ func main() {
 
 	// --- САМООБНОВЛЕНИЕ ---
 	if cfg.SelfUpdateConfig.Enabled {
-		// ... (update logic) ...
+		slog.Info("Запуск проверки обновлений...")
+		updater := selfupdate.New(cfg.SelfUpdateConfig, RealWinUtils)
+		updated, err := updater.CheckAndPerformUpdate()
+		if err != nil {
+			slog.Error("Ошибка при самообновлении", "error", err)
+			tui.Warn(fmt.Sprintf("Ошибка проверки обновлений: %v", err))
+		} else if updated {
+			slog.Info("Приложение было обновлено, завершение работы старой версии")
+			return
+		}
 	}
 
 	// Инициализация менеджера ресурсов
