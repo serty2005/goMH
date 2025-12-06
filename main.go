@@ -6,6 +6,7 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
+	"goMH/gui"
 	"goMH/logging"
 	"goMH/modules/distro"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
@@ -273,6 +274,7 @@ func main() {
 
 	// Предварительный парсинг флагов, чтобы понять контекст (но конфиг грузим позже)
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
+	guiFlag := flag.Bool("gui", false, "Запустить в графическом режиме")
 	flag.Parse()
 
 	// Проверка прав администратора
@@ -326,6 +328,13 @@ func main() {
 	if err != nil {
 		slog.Error("Критическая ошибка assetmgr", "error", err)
 		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
+	}
+
+	// --- ЗАПУСК GUI ---
+	if *guiFlag {
+		slog.Info("Запуск в режиме GUI")
+		gui.Run(cfg, assetManager, RealWinUtils)
+		return // Завершаем main после закрытия окна
 	}
 
 	// Регистрация модулей
