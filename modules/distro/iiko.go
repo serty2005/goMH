@@ -1,10 +1,12 @@
 package distro
 
 import (
+	"errors"
 	"fmt"
 	"goMH/config"
-	iikoplugins "goMH/modules/iiko-plugins"
-	"os"
+	"goMH/core"
+	"goMH/tui"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -12,10 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"goMH/tui"
-	"log/slog" // Импорт логгера
-
 	"github.com/jlaffaye/ftp"
+	"github.com/manifoldco/promptui"
 )
 
 const (
@@ -29,258 +29,267 @@ var (
 	iikoFtpPass  = "partners#iiko"
 )
 
-type iikoHandler struct {
-	dm *DistroManager
+type iikoHandler struct{}
+
+// ConfigureBrand реализует логику меню iiko
+func (h *iikoHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
+	// 1. Выбор действия (Компоненты / Плагины / Патчи)
+	components := am.Cfg().DistroConfig.Iiko.Components
+	var menuItems []string
+	for _, c := range components {
+		menuItems = append(menuItems, c.MenuText)
+	}
+	menuItems = append(menuItems, "Установка плагинов iikoFront")
+	menuItems = append(menuItems, "Установка патчей iikoFront (вручную)")
+
+	selectedIdx := -1
+	selectedText, err := tui.SelectSimple(menuItems, "\n--- Меню iiko ---")
+	if err != nil {
+		return nil, err
+	}
+
+	// Ищем индекс выбора
+	for i, item := range menuItems {
+		if item == selectedText {
+			selectedIdx = i
+			break
+		}
+	}
+
+	// Обработка выбора
+	if selectedIdx < len(components) {
+		// Выбран компонент
+		return h.configureComponent(ctx, am, wu, components[selectedIdx])
+	} else if selectedText == "Установка плагинов iikoFront" {
+		return &DistroInstallConfig{Action: ActionPlugins, Brand: "iiko"}, nil
+	} else if selectedText == "Установка патчей iikoFront (вручную)" {
+		return h.configureManualPatch(ctx, am, wu)
+	}
+
+	return nil, nil
 }
 
-// Run - единое меню для iiko (дистрибутивы, плагины, патчи)
-func (h *iikoHandler) Run() error {
-	for {
-		tui.ClearScreen()
-		tui.Title("\n--- Меню продуктов iiko ---")
+func (h *iikoHandler) configureComponent(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, comp config.DistroComponent) (*DistroInstallConfig, error) {
+	cfg := &DistroInstallConfig{
+		Brand:     "iiko",
+		Component: comp,
+		Action:    ActionInstallComponent,
+	}
 
-		// 1. Получаем список компонентов из конфига
-		components := h.dm.AM.Cfg().DistroConfig.Iiko.Components
+	// Если в URLTemplate нет плейсхолдера версии, значит это компонент с одной версией (например, iikoCard)
+	// Сразу возвращаем конфиг для установки
+	if !strings.Contains(comp.URLTemplate, "{{VERSION}}") {
+		slog.Debug("Компонент без версионирования, пропуск выбора версии", "id", comp.ID)
+		return cfg, nil
+	}
 
-		// 2. Выводим дистрибутивы
-		for i, comp := range components {
-			fmt.Printf(" %d. %s\n", i+1, comp.MenuText)
+	// Определяем установленную версию
+	var installedVer string
+	if comp.RunAfter != "" {
+		if ver, err := wu.GetFileVersion(comp.RunAfter); err == nil {
+			installedVer = ver
+			tui.InfoF("Установлена версия: %s", installedVer)
 		}
+	}
 
-		// 3. Выводим дополнительные опции с продолжением нумерации
-		pluginsIdx := len(components) + 1
-		patchesIdx := len(components) + 2
-
-		fmt.Printf(" %d. Установка плагинов iikoFront\n", pluginsIdx)
-		fmt.Printf(" %d. Установка патчей iikoFront\n", patchesIdx)
-
-		fmt.Println("\n 0. Назад к выбору бренда")
-		fmt.Print("Ваш выбор: ")
-
-		key, err := tui.ReadKey()
+	// Выбор режима (Portable / Install)
+	if comp.PortableArchiveKey != "" {
+		mode, err := tui.SelectSimple([]string{"Стандартная установка", "Портативная версия"}, "Выберите режим")
 		if err != nil {
-			return nil
+			return nil, err
 		}
-
-		if key == "0" {
-			return nil
+		if mode == "Портативная версия" {
+			return h.configurePortable(ctx, am, comp)
 		}
+	}
 
-		choiceInt, err := strconv.Atoi(key)
+	// Получение списка версий
+	ctx.Info("Получение списка версий с FTP...")
+	versions, err := h.fetchOfficialVersions()
+	if err != nil {
+		return nil, err
+	}
+	if len(versions) == 0 {
+		return nil, errors.New("список версий пуст")
+	}
+
+	// Выбор версии
+	promptLabel := "Выберите версию"
+	if installedVer != "" {
+		promptLabel += fmt.Sprintf(" (Текущая: %s)", installedVer)
+	}
+	version, err := tui.SelectWithSearch(versions, promptLabel)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Version = version
+
+	// Проверка даунгрейда
+	if installedVer != "" && compareSemanticVersions(version, installedVer) < 0 {
+		tui.Warn(fmt.Sprintf("\nВНИМАНИЕ: Понижение версии с %s до %s.", installedVer, version))
+		tui.Warn("Требуется удаление старой версии.")
+
+		confirm := promptui.Prompt{
+			Label:     "Удалить старую версию автоматически? (Y/N)",
+			IsConfirm: true,
+		}
+		if _, err := confirm.Run(); err != nil {
+			return nil, nil // Отмена
+		}
+		cfg.UninstallOldVersion = true
+		cfg.OldVersionString = installedVer
+	}
+
+	// Для iikoFront: Выбор патча
+	if comp.ID == "iiko_front" {
+		patches, err := FindPatches(am.Cfg().DistroConfig.Iiko.PatchesBaseURL, version)
 		if err != nil {
-			continue // Игнорируем не-цифры
-		}
-
-		// Обработка выбора
-		if choiceInt >= 1 && choiceInt <= len(components) {
-			// Выбран дистрибутив
-			selectedComp := components[choiceInt-1]
-			slog.Info("Выбран дистрибутив", "name", selectedComp.MenuText)
-			if err := h.dm.StartInstallFlow(h, selectedComp); err != nil {
-				tui.Error(fmt.Sprintf("Ошибка установки: %v", err))
-			}
-		} else if choiceInt == pluginsIdx {
-			// Выбраны плагины
-			slog.Info("Выбрана установка плагинов")
-			pluginModule := &iikoplugins.Module{}
-			if err := pluginModule.MenuInstallPlugins(h.dm.AM, h.dm.WU); err != nil {
-				tui.Error(fmt.Sprintf("Ошибка в модуле плагинов: %v", err))
-			}
-		} else if choiceInt == patchesIdx {
-			// Выбраны патчи
-			slog.Info("Выбрана установка патчей")
-			if err := h.runManualPatching(); err != nil {
-				tui.Error(fmt.Sprintf("Ошибка установки патча: %v", err))
-			}
-		} else {
-			// Неверный номер
-			continue
-		}
-
-		// Вместо fmt.Scanln используем ожидание любой клавиши
-		tui.WaitForAnyKey()
-	}
-}
-
-// runManualPatching запускает логику выбора и установки патча вручную
-func (h *iikoHandler) runManualPatching() error {
-	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
-	const iikoFrontExe = `iikoFront.Net.exe`
-	frontExePath := filepath.Join(iikoFrontDir, iikoFrontExe)
-
-	if _, err := os.Stat(frontExePath); os.IsNotExist(err) {
-		return fmt.Errorf("установка iikoFront не найдена по пути: %s", iikoFrontDir)
-	}
-
-	tui.Info("Определение версии установленного iikoFront...")
-	fullVersion, err := h.dm.WU.GetFileVersion(frontExePath)
-	if err != nil {
-		return fmt.Errorf("не удалось определить версию файла %s: %w", iikoFrontExe, err)
-	}
-	tui.SuccessF("Найдена версия: %s", fullVersion)
-
-	// Находим патчи
-	patch, patchFound, err := FindAndSelectPatch(h.dm.AM, fullVersion)
-	if err != nil {
-		return err
-	}
-
-	if !patchFound {
-		return nil // Пользователь отменил или патчи не найдены (сообщение уже выведено внутри FindAndSelectPatch)
-	}
-
-	backupDir := filepath.Join(h.dm.AM.Cfg().RootPath, fmt.Sprintf("iiko_%s", fullVersion))
-	tui.InfoF("Применение патча %s...", patch.ShortName)
-
-	if err := ApplyPatch(h.dm.AM, h.dm.WU, patch, iikoFrontDir, backupDir); err != nil {
-		return fmt.Errorf("ошибка при применении патча: %w", err)
-	}
-
-	tui.Success("Патч успешно установлен.")
-	return nil
-}
-
-// Эти методы остаются для удовлетворения интерфейса brandHandler
-func (h *iikoHandler) getAvailableVersions() ([]string, error) {
-	slog.Info("Запуск поиска официальных версий iiko на FTP")
-	return discoverIikoOfficialVersions()
-}
-
-func (h *iikoHandler) getAvailablePortableVersions(component config.DistroComponent) ([]string, error) {
-	tui.Info("Поиск доступных портативных версий iiko...")
-	slog.Info("Поиск доступных портативных версий iiko", "archive_key", component.PortableArchiveKey)
-
-	cfg := h.dm.AM.Cfg().DistroConfig.IikoPortable
-	archiveNameTemplate := cfg.FtpSource.ArchiveNames[component.PortableArchiveKey]
-	if archiveNameTemplate == "" {
-		slog.Error("Шаблон архива не найден", "archive_key", component.PortableArchiveKey)
-		return nil, fmt.Errorf("не найден шаблон имени архива для ключа %s", component.PortableArchiveKey)
-	}
-
-	// 1. Получаем список файлов с нашего FTP.
-	ftpCfg := h.dm.AM.Cfg().FTP[0]
-	slog.Debug("Подключение к FTP для поиска портативных версий", "host", ftpCfg.Host, "path", cfg.FtpSource.Directory)
-
-	entries, err := h.dm.AM.ListFTP(ftpCfg, cfg.FtpSource.Directory)
-	if err != nil {
-		slog.Error("Ошибка листинга FTP", "host", ftpCfg.Host, "error", err)
-		return nil, fmt.Errorf("не удалось получить список файлов с FTP %s: %w", ftpCfg.Host, err)
-	}
-
-	// 2. Извлекаем версии из имен файлов.
-	rePattern := strings.Replace(archiveNameTemplate, "{{version}}", `([\d\.]+)`, 1)
-	re := regexp.MustCompile(rePattern)
-
-	var foundVersions []string
-	for _, entry := range entries {
-		if entry.Type == 0 {
-			matches := re.FindStringSubmatch(entry.Name)
-			if len(matches) > 1 {
-				foundVersions = append(foundVersions, matches[1])
+			tui.Warn(fmt.Sprintf("Ошибка поиска патчей: %v", err))
+		} else if len(patches) > 0 {
+			patch, err := SelectPatchMenu(patches)
+			if err == nil && patch.ShortName != "SKIP" {
+				cfg.Patch = &patch
 			}
 		}
+		// Автообновление плагинов
+		cfg.RunAutoUpdatePlugins = true
 	}
 
-	slog.Info("Найдены портативные версии", "count", len(foundVersions), "versions", foundVersions)
-
-	if len(foundVersions) == 0 {
-		tui.Warn("На FTP не найдено ни одного файла, соответствующего шаблону портативной версии.")
-	}
-
-	sort.Slice(foundVersions, func(i, j int) bool {
-		return compareSemanticVersions(foundVersions[i], foundVersions[j]) > 0
-	})
-
-	return foundVersions, nil
+	return cfg, nil
 }
 
-func (h *iikoHandler) installComponent(component config.DistroComponent, version string) error {
-	slog.Info("Начало установки компонента iiko", "component", component.ID, "version", version)
-
-	var downloadURL string
-
-	if component.URLTemplate != "" {
-		downloadURL = strings.Replace(component.URLTemplate, "{{VERSION}}", version, 1)
+func (h *iikoHandler) configurePortable(ctx core.TaskContext, am core.AssetManager, comp config.DistroComponent) (*DistroInstallConfig, error) {
+	cfg := &DistroInstallConfig{
+		Brand:     "iiko",
+		Component: comp,
+		Action:    ActionInstallPortable,
 	}
-	slog.Debug("Сформирован URL загрузки", "url", downloadURL)
 
-	// Создаем путь для версии дистрибутива
-	versionDir := filepath.Join(h.dm.AM.Cfg().RootPath, fmt.Sprintf("iiko_%s", version))
-	installerPath := filepath.Join(versionDir, filepath.Base(downloadURL))
-
-	slog.Debug("Целевой путь для установщика", "path", installerPath)
-
-	if strings.HasPrefix(downloadURL, "http") {
-		if _, err := h.dm.AM.DownloadHTTPWithProgress(downloadURL, installerPath); err != nil {
-			slog.Error("Ошибка загрузки по HTTP", "url", downloadURL, "error", err)
-			return err
-		}
-		return h.dm.runInstaller(installerPath, component.InstallArgs)
+	pCfg := am.Cfg().DistroConfig.IikoPortable
+	tpl := ""
+	if pCfg.HttpSource.Enabled {
+		cfg.PortableSourceType = "http"
+		tpl = pCfg.HttpSource.ArchiveNames[comp.PortableArchiveKey]
+	} else if pCfg.FtpSource.Enabled {
+		cfg.PortableSourceType = "ftp"
+		tpl = pCfg.FtpSource.ArchiveNames[comp.PortableArchiveKey]
+		cfg.PortableFTPConfig = am.Cfg().FTP[0]
 	} else {
-		ftpCfg := h.dm.AM.Cfg().FTP[0]
-		slog.Debug("Загрузка по FTP (внутренний источник)", "host", ftpCfg.Host)
-		if _, err := h.dm.AM.DownloadFTPWithProgress(ftpCfg, downloadURL, installerPath); err != nil {
-			slog.Error("Ошибка загрузки по FTP", "url", downloadURL, "error", err)
-			return err
-		}
-		return h.dm.runInstaller(installerPath, component.InstallArgs)
+		return nil, errors.New("нет источников portable")
 	}
+
+	if tpl == "" {
+		return nil, fmt.Errorf("шаблон архива не найден для %s", comp.PortableArchiveKey)
+	}
+
+	ctx.Info("Поиск portable версий...")
+	ftpCfg := am.Cfg().FTP[0]
+	dir := pCfg.FtpSource.Directory
+
+	entries, err := am.ListFTP(ftpCfg, dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Парсинг версий
+	rePattern := strings.Replace(tpl, "{{version}}", `([\d\.]+)`, 1)
+	re := regexp.MustCompile(rePattern)
+	var versions []string
+
+	for _, e := range entries {
+		matches := re.FindStringSubmatch(e.Name)
+		if len(matches) > 1 {
+			versions = append(versions, matches[1])
+		}
+	}
+	sortVersionsDesc(versions)
+
+	ver, err := tui.SelectWithSearch(versions, "Выберите версию portable")
+	if err != nil {
+		return nil, err
+	}
+	cfg.Version = ver
+
+	archiveName := strings.Replace(tpl, "{{version}}", ver, 1)
+	cfg.PortableArchiveName = archiveName
+
+	if cfg.PortableSourceType == "http" {
+		cfg.PortableDownloadURL = fmt.Sprintf("%s/%s", strings.TrimSuffix(pCfg.HttpSource.URL, "/"), archiveName)
+	} else {
+		cfg.PortableFTPPath = fmt.Sprintf("%s/%s", strings.TrimSuffix(pCfg.FtpSource.Directory, "/"), archiveName)
+	}
+
+	return cfg, nil
 }
 
-func (h *iikoHandler) installPortable(component config.DistroComponent, version string) error {
-	return h.dm.installPortable(h, "iiko", component, version)
+func (h *iikoHandler) configureManualPatch(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
+	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
+	exePath := filepath.Join(iikoFrontDir, "iikoFront.Net.exe")
+
+	ver, err := wu.GetFileVersion(exePath)
+	if err != nil {
+		return nil, fmt.Errorf("iikoFront не найден: %w", err)
+	}
+	tui.InfoF("Версия iikoFront: %s", ver)
+
+	patches, err := FindPatches(am.Cfg().DistroConfig.Iiko.PatchesBaseURL, ver)
+	if err != nil || len(patches) == 0 {
+		return nil, errors.New("патчи не найдены")
+	}
+
+	patch, err := SelectPatchMenu(patches)
+	if err != nil || patch.ShortName == "SKIP" {
+		return nil, nil
+	}
+
+	return &DistroInstallConfig{
+		Action:  ActionManualPatch,
+		Brand:   "iiko",
+		Version: ver,
+		Patch:   &patch,
+	}, nil
 }
 
-func discoverIikoOfficialVersions() ([]string, error) {
+func (h *iikoHandler) fetchOfficialVersions() ([]string, error) {
 	var allErrors []string
 	for _, host := range iikoFtpHosts {
-		slog.Debug("Попытка подключения к официальному FTP iiko", "host", host)
-
-		c, err := ftp.Dial(host, ftp.DialWithTimeout(15*time.Second))
+		c, err := ftp.Dial(host, ftp.DialWithTimeout(10*time.Second))
 		if err != nil {
-			slog.Debug("Не удалось подключиться к FTP", "host", host, "error", err)
-			allErrors = append(allErrors, fmt.Sprintf("ошибка подключения к %s: %v", host, err))
+			allErrors = append(allErrors, err.Error())
 			continue
 		}
-
-		err = c.Login(iikoFtpUser, iikoFtpPass)
-		if err != nil {
-			slog.Debug("Ошибка авторизации на FTP", "host", host, "error", err)
-			_ = c.Quit()
-			allErrors = append(allErrors, fmt.Sprintf("ошибка входа на %s: %v", host, err))
+		if err := c.Login(iikoFtpUser, iikoFtpPass); err != nil {
+			c.Quit()
+			allErrors = append(allErrors, err.Error())
 			continue
 		}
 
 		entries, err := c.List(iikoReleasesPath)
-		_ = c.Quit()
-
+		c.Quit()
 		if err != nil {
-			slog.Debug("Ошибка получения списка папок", "host", host, "path", iikoReleasesPath, "error", err)
-			allErrors = append(allErrors, fmt.Sprintf("ошибка получения списка с %s: %v", host, err))
+			allErrors = append(allErrors, err.Error())
 			continue
 		}
 
 		versionRegex := regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`)
 		var versions []string
-		for _, entry := range entries {
-			if entry.Type == ftp.EntryTypeFolder && versionRegex.MatchString(entry.Name) {
-				if compareSemanticVersions(entry.Name, iikoMinVersion) >= 0 {
-					versions = append(versions, entry.Name)
+		for _, e := range entries {
+			if e.Type == ftp.EntryTypeFolder && versionRegex.MatchString(e.Name) {
+				if compareSemanticVersions(e.Name, iikoMinVersion) >= 0 {
+					versions = append(versions, e.Name)
 				}
 			}
 		}
-
-		sort.Slice(versions, func(i, j int) bool {
-			return compareSemanticVersions(versions[i], versions[j]) > 0
-		})
-
-		slog.Info("Успешно получен список версий с FTP iiko", "host", host, "count", len(versions))
+		sortVersionsDesc(versions)
 		return versions, nil
 	}
+	return nil, fmt.Errorf("ошибка FTP: %s", strings.Join(allErrors, "; "))
+}
 
-	finalErr := fmt.Errorf("не удалось получить данные ни с одного из FTP-серверов iiko: %s", strings.Join(allErrors, "; "))
-	slog.Error("Критическая ошибка поиска версий iiko", "error", finalErr)
-	return nil, finalErr
+func sortVersionsDesc(versions []string) {
+	sort.Slice(versions, func(i, j int) bool {
+		return compareSemanticVersions(versions[i], versions[j]) > 0
+	})
 }
 
 func compareSemanticVersions(v1, v2 string) int {

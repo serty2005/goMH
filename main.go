@@ -6,12 +6,14 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
+	"goMH/gui"
 	"goMH/logging"
 	"goMH/modules/distro"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/frpc"
 	"goMH/modules/regime"
 	"goMH/modules/remoteaccess"
+	"goMH/modules/selfupdate"
 	"goMH/modules/serviceutils"
 	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
@@ -272,6 +274,7 @@ func main() {
 
 	// Предварительный парсинг флагов, чтобы понять контекст (но конфиг грузим позже)
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
+	guiFlag := flag.Bool("gui", false, "Запустить в графическом режиме")
 	flag.Parse()
 
 	// Проверка прав администратора
@@ -308,7 +311,16 @@ func main() {
 
 	// --- САМООБНОВЛЕНИЕ ---
 	if cfg.SelfUpdateConfig.Enabled {
-		// ... (update logic) ...
+		slog.Info("Запуск проверки обновлений...")
+		updater := selfupdate.New(cfg.SelfUpdateConfig, RealWinUtils)
+		updated, err := updater.CheckAndPerformUpdate()
+		if err != nil {
+			slog.Error("Ошибка при самообновлении", "error", err)
+			tui.Warn(fmt.Sprintf("Ошибка проверки обновлений: %v", err))
+		} else if updated {
+			slog.Info("Приложение было обновлено, завершение работы старой версии")
+			return
+		}
 	}
 
 	// Инициализация менеджера ресурсов
@@ -316,6 +328,13 @@ func main() {
 	if err != nil {
 		slog.Error("Критическая ошибка assetmgr", "error", err)
 		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
+	}
+
+	// --- ЗАПУСК GUI ---
+	if *guiFlag {
+		slog.Info("Запуск в режиме GUI")
+		gui.Run(cfg, assetManager, RealWinUtils)
+		return // Завершаем main после закрытия окна
 	}
 
 	// Регистрация модулей

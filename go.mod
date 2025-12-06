@@ -6,6 +6,7 @@ require (
 	github.com/beevik/etree v1.5.1
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e
 	github.com/jlaffaye/ftp v0.2.0
+	github.com/lxn/walk v0.0.0-20210112085537-c389da54e794
 	github.com/manifoldco/promptui v0.9.0
 	github.com/mholt/archives v0.1.3
 	github.com/schollz/progressbar/v3 v3.18.0
@@ -29,6 +30,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
+	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
 	github.com/mikelolasagasti/xz v1.0.1 // indirect
 	github.com/minio/minlz v1.0.0 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
@@ -39,4 +41,5 @@ require (
 	github.com/ulikunitz/xz v0.5.12 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	golang.org/x/text v0.20.0 // indirect
+	gopkg.in/Knetic/govaluate.v3 v3.0.0 // indirect
 )
