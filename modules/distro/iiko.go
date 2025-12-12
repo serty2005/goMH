@@ -6,7 +6,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/tui"
-	"log/slog"
+	"log/slog" // Импорт логгера
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -36,33 +36,41 @@ func (h *iikoHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager,
 	// 1. Выбор действия (Компоненты / Плагины / Патчи)
 	components := am.Cfg().DistroConfig.Iiko.Components
 	var menuItems []string
+
+	// Добавляем компоненты
 	for _, c := range components {
-		menuItems = append(menuItems, c.MenuText)
+		menuText := c.MenuText
+		if c.PortableArchiveKey != "" {
+			menuText += " (portable)"
+		}
+		menuItems = append(menuItems, menuText)
 	}
+
+	// Добавляем доп. опции
 	menuItems = append(menuItems, "Установка плагинов iikoFront")
 	menuItems = append(menuItems, "Установка патчей iikoFront (вручную)")
 
-	selectedIdx := -1
-	selectedText, err := tui.SelectSimple(menuItems, "\n--- Меню iiko ---")
+	// Используем PrintMenu вместо SelectSimple
+	selectedIdx, err := tui.PrintMenu("\n--- Меню iiko ---", menuItems)
 	if err != nil {
 		return nil, err
 	}
-
-	// Ищем индекс выбора
-	for i, item := range menuItems {
-		if item == selectedText {
-			selectedIdx = i
-			break
-		}
+	if selectedIdx == -1 {
+		return nil, nil // Назад
 	}
 
 	// Обработка выбора
 	if selectedIdx < len(components) {
 		// Выбран компонент
 		return h.configureComponent(ctx, am, wu, components[selectedIdx])
-	} else if selectedText == "Установка плагинов iikoFront" {
+	}
+
+	// Определяем, что выбрано из доп. опций
+	// Индекс плагинов = len(components)
+	// Индекс патчей = len(components) + 1
+	if selectedIdx == len(components) {
 		return &DistroInstallConfig{Action: ActionPlugins, Brand: "iiko"}, nil
-	} else if selectedText == "Установка патчей iikoFront (вручную)" {
+	} else if selectedIdx == len(components)+1 {
 		return h.configureManualPatch(ctx, am, wu)
 	}
 

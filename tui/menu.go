@@ -3,7 +3,6 @@ package tui
 import (
 	"errors"
 	"fmt"
-	"goMH/config"
 	"goMH/core"
 	"io"
 	"os"
@@ -27,7 +26,7 @@ type noBellWriter struct {
 func (n *noBellWriter) Write(b []byte) (int, error) {
 	filtered := make([]byte, 0, len(b))
 	for _, ch := range b {
-		if ch != 7 {
+		if ch != 7 { // ASCII 7 = bell
 			filtered = append(filtered, ch)
 		}
 	}
@@ -70,6 +69,7 @@ func ClearScreen() {
 	}
 }
 
+// ShowMenu - Главное меню (возвращает интерфейс модуля)
 func ShowMenu(modules []Installer) (Installer, error) {
 	for {
 		ClearScreen()
@@ -112,7 +112,42 @@ func ShowMenu(modules []Installer) (Installer, error) {
 	}
 }
 
+// PrintMenu - Универсальное текстовое меню для выбора из списка строк.
+// Возвращает индекс выбранного элемента (0..N-1) или -1, если выбрано "Назад" (0).
+func PrintMenu(title string, items []string) (int, error) {
+	for {
+		ClearScreen()
+		if title != "" {
+			Title(title)
+		}
+
+		for i, item := range items {
+			// i+1 для отображения (1..N)
+			fmt.Printf(" %d. %s\n", i+1, item)
+		}
+		fmt.Println("\n 0. Назад")
+		fmt.Print("Выберите пункт: ")
+
+		key, err := ReadKey()
+		if err != nil {
+			return -1, err
+		}
+
+		if key == "0" {
+			return -1, nil // Назад
+		}
+
+		choice, err := strconv.Atoi(key)
+		if err != nil || choice < 1 || choice > len(items) {
+			continue
+		}
+
+		return choice - 1, nil
+	}
+}
+
 // SelectWithSearch создает стрелочный интерфейс с умным поиском (игнорирует точки для версий)
+// ОСТАВЛЯЕМ ДЛЯ ВЫБОРА ВЕРСИЙ
 func SelectWithSearch(items []string, label string) (string, error) {
 	if len(items) == 0 {
 		return "", errors.New("список элементов пуст")
@@ -156,6 +191,8 @@ func SelectWithSearch(items []string, label string) (string, error) {
 	return result, nil
 }
 
+// SelectSimple создает простой стрелочный интерфейс.
+// Оставляем для простых выборов (Да/Нет), но не для главных меню.
 func SelectSimple(items []string, label string) (string, error) {
 	if len(items) == 0 {
 		return "", errors.New("список элементов пуст")
@@ -180,60 +217,7 @@ func SelectSimple(items []string, label string) (string, error) {
 	return result, nil
 }
 
-func SelectComponent(components []config.DistroComponent, label string) (config.DistroComponent, error) {
-	if len(components) == 0 {
-		return config.DistroComponent{}, errors.New("список компонентов пуст")
-	}
-
-	type ComponentDisplay struct {
-		Component   config.DistroComponent
-		DisplayText string
-	}
-
-	var displayItems []ComponentDisplay
-	for _, comp := range components {
-		displayText := comp.MenuText
-		if comp.PortableArchiveKey != "" {
-			displayText += " (portable)"
-		}
-		displayItems = append(displayItems, ComponentDisplay{
-			Component:   comp,
-			DisplayText: displayText,
-		})
-	}
-
-	itemStrings := make([]string, len(displayItems))
-	for i, item := range displayItems {
-		itemStrings[i] = item.DisplayText
-	}
-
-	searcher := func(input string, index int) bool {
-		comp := displayItems[index].Component
-		return strings.Contains(strings.ToLower(comp.MenuText), strings.ToLower(input)) ||
-			strings.Contains(strings.ToLower(comp.ID), strings.ToLower(input))
-	}
-
-	DisableConsoleBeep()
-	defer RestoreConsoleBeep()
-
-	prompt := promptui.Select{
-		Label:             label + " (Ctrl+C для выхода в главное меню)",
-		Items:             itemStrings,
-		StartInSearchMode: true,
-		Searcher:          searcher,
-	}
-
-	index, _, err := prompt.Run()
-	if err != nil {
-		if strings.Contains(err.Error(), "interrupt") {
-			return config.DistroComponent{}, ErrExitToMainMenu
-		}
-		return config.DistroComponent{}, errors.New("выбор отменен")
-	}
-
-	return displayItems[index].Component, nil
-}
-
+// SelectPatch создает стрелочный интерфейс для выбора патча с поиском
 func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error) {
 	if len(patches) == 0 {
 		return core.PatchInfo{}, errors.New("список патчей пуст")
@@ -253,6 +237,7 @@ func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error)
 		itemStrings[i] = info.DisplayText
 	}
 
+	// Функция поиска по патчам
 	searcher := func(input string, index int) bool {
 		patch := patchInfos[index].Patch
 		inputLower := strings.ToLower(input)

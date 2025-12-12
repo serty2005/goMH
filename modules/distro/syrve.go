@@ -7,7 +7,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/tui"
-	"io"
+	"io" // Импорт
 	"net/http"
 	"regexp"
 	"strings"
@@ -16,17 +16,32 @@ import (
 type syrveHandler struct{}
 
 type syrveVersionInfo struct {
-	FullVersion string `json: "full_version"`
+	FullVersion string `json:"full_version"`
 }
 
 func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
 	components := am.Cfg().DistroConfig.Syrve.Components
 
-	// Выбор компонента
-	comp, err := tui.SelectComponent(components, "\n--- Выберите дистрибутив Syrve ---")
+	// Подготавливаем список строк для меню
+	var menuItems []string
+	for _, c := range components {
+		menuText := c.MenuText
+		if c.PortableArchiveKey != "" {
+			menuText += " (portable)"
+		}
+		menuItems = append(menuItems, menuText)
+	}
+
+	// Используем классическое текстовое меню
+	selectedIdx, err := tui.PrintMenu("\n--- Выберите дистрибутив Syrve ---", menuItems)
 	if err != nil {
 		return nil, err
 	}
+	if selectedIdx == -1 {
+		return nil, nil // Назад
+	}
+
+	comp := components[selectedIdx]
 
 	cfg := &DistroInstallConfig{
 		Brand:     "syrve",
@@ -48,7 +63,7 @@ func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager
 		}
 	}
 
-	// Выбор режима (Portable)
+	// Выбор режима (Portable) - здесь можно оставить SelectSimple, т.к. всего 2 варианта
 	if comp.PortableArchiveKey != "" {
 		mode, err := tui.SelectSimple([]string{"Стандартная установка", "Портативная версия"}, "Выберите режим")
 		if err != nil {
@@ -66,7 +81,7 @@ func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager
 		return nil, err
 	}
 
-	// Выбор версии
+	// Выбор версии - ОСТАВЛЯЕМ SelectWithSearch для длинных списков
 	promptLabel := "Выберите версию"
 	if installedVer != "" {
 		promptLabel += fmt.Sprintf(" (Текущая: %s)", installedVer)
@@ -77,11 +92,10 @@ func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager
 	}
 	cfg.Version = version
 
-	// Проверка даунгрейда (Syrve редко даунгрейдят, но логика та же)
+	// Проверка даунгрейда
 	if installedVer != "" && compareSemanticVersions(version, installedVer) < 0 {
 		tui.Warn(fmt.Sprintf("\nВНИМАНИЕ: Понижение версии с %s до %s.", installedVer, version))
 		tui.Warn("Рекомендуется удаление старой версии.")
-		// Тут можно добавить prompt как в iiko, если нужно
 	}
 
 	return cfg, nil
