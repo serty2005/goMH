@@ -73,8 +73,8 @@ func (rw *RealWinUtils) IsProcessRunning(processName string) (bool, error) {
 func (rw *RealWinUtils) GracefulShutdownProcess(processName string) error {
 	return winutils.GracefulShutdownProcess(processName)
 }
-func (rw *RealWinUtils) CreateScheduledTask(taskName, executablePath, workingDir string) error {
-	return winutils.CreateScheduledTask(taskName, executablePath, workingDir)
+func (rw *RealWinUtils) CreateScheduledTask(taskName, executablePath, arguments, workingDir string) error {
+	return winutils.CreateScheduledTask(taskName, executablePath, arguments, workingDir)
 }
 func (rw *RealWinUtils) RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error) {
 	return winutils.RunCommandWithEnv(env, name, args...)
@@ -138,6 +138,9 @@ func (rw *RealWinUtils) GetDesktopDir() (string, error) {
 }
 func (rw *RealWinUtils) CreateShortcut(targetPath, shortcutPath, arguments string) error {
 	return winutils.CreateShortcut(targetPath, shortcutPath, arguments)
+}
+func (rw *RealWinUtils) Reboot() error {
+	return winutils.Reboot()
 }
 
 // getConfigPath определяет, какой путь к конфигурации использовать:
@@ -272,9 +275,12 @@ func main() {
 	// 0. Очистка старых версий при запуске
 	cleanupOldExecutable()
 
-	// Предварительный парсинг флагов, чтобы понять контекст (но конфиг грузим позже)
+	// Предварительный парсинг флагов
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
 	guiFlag := flag.Bool("gui", false, "Запустить в графическом режиме")
+	// Новые флаги для режима возобновления
+	moduleFlag := flag.String("module", "", "Прямой запуск модуля (Regime)")
+	resumeFlag := flag.String("resume", "", "Путь к файлу конфигурации возобновления")
 	flag.Parse()
 
 	// Проверка прав администратора
@@ -309,8 +315,9 @@ func main() {
 	// Инициализация утилит
 	RealWinUtils := &RealWinUtils{}
 
-	// --- САМООБНОВЛЕНИЕ ---
-	if cfg.SelfUpdateConfig.Enabled {
+	// --- САМООБНОВЛЕНИЕ ---\
+	// Пропускаем при режиме возобновления
+	if *resumeFlag == "" && cfg.SelfUpdateConfig.Enabled {
 		slog.Info("Запуск проверки обновлений...")
 		updater := selfupdate.New(cfg.SelfUpdateConfig, RealWinUtils)
 		updated, err := updater.CheckAndPerformUpdate()
@@ -328,6 +335,30 @@ func main() {
 	if err != nil {
 		slog.Error("Критическая ошибка assetmgr", "error", err)
 		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
+	}
+
+	// --- РЕЖИМ ВОЗОБНОВЛЕНИЯ / ПРЯМОГО ЗАПУСКА ---
+	if *moduleFlag == "Regime" && *resumeFlag != "" {
+		slog.Info("Запуск в режиме возобновления Regime", "config", *resumeFlag)
+		mod := &regime.Module{}
+		// В режиме возобновления мы передаем путь к временному конфигу через Run,
+		// так как интерфейс Run не поддерживает произвольные аргументы.
+		// Модуль Regime сам распознает, что это resume, если ему передать управление.
+		// Но лучше вызвать Resume явно.
+		// Однако интерфейс Installer имеет только Run.
+		// Для простоты, мы добавим логику в Regime.Resume(), который мы вызовем напрямую,
+		// так как мы знаем конкретный тип модуля здесь.
+
+		if err := mod.Resume(assetManager, RealWinUtils, *resumeFlag); err != nil {
+			slog.Error("Ошибка возобновления Regime", "error", err)
+			tui.Error(fmt.Sprintf("Ошибка возобновления установки: %v", err))
+			tui.WaitForAnyKey()
+		} else {
+			tui.Success("\n--- Операция завершена успешно. ---")
+			// Даем пользователю прочитать сообщение перед закрытием
+			time.Sleep(5 * time.Second)
+		}
+		return
 	}
 
 	// --- ЗАПУСК GUI ---

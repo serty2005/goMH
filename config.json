@@ -214,19 +214,19 @@
 	"fiscal_drivers_config": [
 		{
 			"id": "atol",
-			"menu_text": "Драйверы АТОЛ",
+			"menu_text": "АТОЛ",
 			"asset_id": "DTO_Installer",
 			"install_args": "/S /AcceptLicense /WithAssistant /WithEOU"
 		},
 		{
 			"id": "poscenter",
-			"menu_text": "Драйверы Ритейл-* (poscenter)",
+			"menu_text": "Ритейл-* (poscenter)",
 			"asset_id": "Poscenter_Driver_x32",
 			"install_args": "/COMPONENTS=\"usbdrv,kktproxy\" /VERYSILENT /TASKS=\"desktopicon\""
 		},
 		{
 			"id": "kktlab",
-			"menu_text": "Драйверы Штрих/Элвес-* (kktlab)",
+			"menu_text": "Штрих/Элвес-* (kktlab)",
 			"asset_id": "KKTlab_Driver_x32",
 			"install_args": "/COMPONENTS=\"main,usbdrivers,kktproxy\" /VERYSILENT /TASKS=\"desktopicon\""
 		}
@@ -236,6 +236,11 @@
 		"install_args": ""
 	},
 	"asset_catalog": {
+		"DotNet48_Installer": {
+			"url": "https://f.serty.top/distr/installer/assets/NDP48-x86-x64-AllOS-ENU.exe",
+			"type": "file",
+			"download_method": "HTTP"
+		},
 		"7zip_installer": {
 			"url": "https://f.serty.top/distr/installer/assets/7z1900-x64.exe",
 			"type": "file",

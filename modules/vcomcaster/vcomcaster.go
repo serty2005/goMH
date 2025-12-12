@@ -276,7 +276,7 @@ func (m *Module) install(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	// 4. Финальная настройка
 	ctx.Info("Настройка автозапуска...")
 	vcomcasterExePath := filepath.Join(vcomcasterDestPath, "vcomcaster.exe")
-	if err := wu.CreateScheduledTask(taskName, vcomcasterExePath, vcomcasterDestPath); err != nil {
+	if err := wu.CreateScheduledTask(taskName, vcomcasterExePath, "", vcomcasterDestPath); err != nil {
 		ctx.Warn(fmt.Sprintf("Не удалось создать задачу планировщика: %v", err))
 	} else {
 		ctx.Success("Задача автозапуска создана.")

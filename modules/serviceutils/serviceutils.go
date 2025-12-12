@@ -586,7 +586,7 @@ func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, w
 		ctx.Warn("Попытка запуска через Планировщик (требуются права)...")
 		slog.Info("Запуск FrontTools через TaskScheduler", "path", exePath)
 		taskName := "goMH_FrontTools_Run"
-		if err := wu.CreateScheduledTask(taskName, exePath, filepath.Dir(exePath)); err != nil {
+		if err := wu.CreateScheduledTask(taskName, exePath, "", filepath.Dir(exePath)); err != nil {
 			return err
 		}
 		_, err := wu.RunCommand("schtasks", "/Run", "/TN", taskName)

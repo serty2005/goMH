@@ -58,11 +58,11 @@ func RunCommandWithEnv(env map[string]string, name string, args ...string) (stri
 }
 
 // CreateScheduledTask создает или обновляет задачу в Планировщике Windows через импорт XML.
-func CreateScheduledTask(taskName, executablePath, workingDir string) error {
+func CreateScheduledTask(taskName, executablePath, arguments, workingDir string) error {
 	fmt.Printf("Создание/обновление задачи '%s' через XML...\n", taskName)
 
 	// 1. Генерируем XML-содержимое для задачи
-	xmlContent, err := generateTaskXML(taskName, executablePath, workingDir)
+	xmlContent, err := generateTaskXML(taskName, executablePath, arguments, workingDir)
 	if err != nil {
 		return fmt.Errorf("не удалось сгенерировать XML для задачи: %w", err)
 	}
@@ -98,7 +98,7 @@ func CreateScheduledTask(taskName, executablePath, workingDir string) error {
 }
 
 // generateTaskXML создает строку с XML-описанием задачи.
-func generateTaskXML(taskName, executablePath, workingDir string) (string, error) {
+func generateTaskXML(taskName, executablePath, arguments, workingDir string) (string, error) {
 	currentUser, err := user.Current()
 	if err != nil {
 		return "", fmt.Errorf("не удалось определить текущего пользователя: %w", err)
@@ -151,6 +151,7 @@ func generateTaskXML(taskName, executablePath, workingDir string) (string, error
   <Actions Context="Author">
     <Exec>
       <Command>"%s"</Command>
+      <Arguments>%s</Arguments>
       <WorkingDirectory>%s</WorkingDirectory>
     </Exec>
   </Actions>
@@ -165,8 +166,15 @@ func generateTaskXML(taskName, executablePath, workingDir string) (string, error
 		userID,
 		userID,
 		absExecutablePath, // Команда
+		arguments,         // Аргументы
 		absWorkingDir,     // Рабочая директория
 	), nil
+}
+
+// Reboot перезагружает компьютер с задержкой 5 секунд
+func Reboot() error {
+	_, err := RunCommand("shutdown", "/r", "/t", "5", "/c", "Перезагрузка для продолжения установки")
+	return err
 }
 
 // GetComPorts остается без изменений

@@ -40,7 +40,7 @@ type WinUtils interface {
 	GracefulShutdownProcess(processName string) error
 	GetFileVersion(filePath string) (string, error)
 	ListArchiveContents(archivePath string) ([]string, error)
-	CreateScheduledTask(taskName, executablePath, workingDir string) error
+	CreateScheduledTask(taskName, executablePath, arguments, workingDir string) error
 	FindFileRecursive(root, pattern string) (string, error)
 	FindNewestFileByPattern(root, pattern string) (string, error)
 	GetStartupFolders() (user, common string, err error)
@@ -59,6 +59,7 @@ type WinUtils interface {
 	ExtractArchive(archivePath, destDir string, fullPaths bool) error
 	GetDesktopDir() (string, error)
 	CreateShortcut(targetPath, shortcutPath, arguments string) error
+	Reboot() error
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.
@@ -80,7 +81,6 @@ type AssetManager interface {
 type Installer interface {
 	ID() string
 	MenuText() string
-	// Сигнатура Run теперь принимает интерфейсы, а не конкретные типы.
 	Run(am AssetManager, wu WinUtils) error
 }
 
