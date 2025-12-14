@@ -106,17 +106,19 @@ jobs:
         name: goMH-windows
         path: ./release-assets/
 
-    # --- ГЕНЕРАЦИЯ MD5 ХЕШЕЙ ---
-    - name: Generate MD5 Hashes
+    # ГЕНЕРАЦИЯ MD5 И КОПИРОВАНИЕ КОНФИГА
+    - name: Prepare Assets (Hash & Config)
       working-directory: ./release-assets/
       run: |
+        # 1. Считаем хеши
         md5sum goMH.exe | awk '{print $1}' > goMH.md5
         md5sum goMH_x86.exe | awk '{print $1}' > goMH_x86.md5
         
-        echo "=== Checksums generated ==="
+        # 2. Копируем config.json из корня репозитория в папку ассетов
+        cp ../config.json .
+        
+        echo "=== Assets prepared ==="
         ls -la
-        cat goMH.md5
-        cat goMH_x86.md5
 
     # --- ЗАГРУЗКА НА FTP ---
     - name: Deploy to FTP
