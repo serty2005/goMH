@@ -514,7 +514,7 @@ func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, w
 	ctx.SetStatus("Запуск OrderCheck")
 	slog.Info("Начало процесса запуска OrderCheck")
 
-	// Проверка наличия ассета
+	// 1. Проверка наличия ассета
 	if _, ok := am.Cfg().AssetCatalog["ordercheck"]; !ok {
 		return errors.New("ассет ordercheck не найден в конфиге")
 	}
@@ -536,7 +536,59 @@ func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, w
 		}
 	}
 
-	ctx.Info(fmt.Sprintf("Запуск с БД: %s", cfg.TargetDatabasePath))
+	// 2. Логика Graceful Shutdown (ТОЛЬКО для entities.db/sdf)
+	dbFileName := strings.ToLower(filepath.Base(cfg.TargetDatabasePath))
+	if dbFileName == "entities.db" || dbFileName == "entities.sdf" {
+		slog.Info("Выбрана основная БД iikoFront (entities), проверка запущенных процессов", "db", dbFileName)
+		const iikoProcessName = "iikoFront"
+
+		isRunning, err := wu.IsProcessRunning(iikoProcessName)
+		if err != nil {
+			slog.Warn("Не удалось проверить статус процесса iikoFront", "error", err)
+		}
+
+		if isRunning {
+			ctx.Info("ВНИМАНИЕ: Обнаружен запущенный iikoFront.")
+			ctx.Info("Для работы с entities требуется завершение кассовой программы.")
+			ctx.Info("Попытка корректного завершения...")
+
+			if err := wu.GracefulShutdownProcess(iikoProcessName); err != nil {
+				slog.Warn("Ошибка отправки команды закрытия", "error", err)
+			}
+
+			// Цикл ожидания (30 сек)
+			const maxRetries = 6
+			const retryInterval = 5 * time.Second
+			stopped := false
+
+			for i := 0; i < maxRetries; i++ {
+				running, _ := wu.IsProcessRunning(iikoProcessName)
+				if !running {
+					stopped = true
+					break
+				}
+				// Индикация ожидания в статусе
+				ctx.SetStatus(fmt.Sprintf("Ожидание закрытия iikoFront (%d/%d)...", i+1, maxRetries))
+				time.Sleep(retryInterval)
+			}
+
+			if !stopped {
+				// Не прерываем выполнение, просто предупреждаем
+				ctx.Warn("Не удалось автоматически закрыть iikoFront за отведенное время.")
+				ctx.Warn("OrderCheck попытается закрыть процесс самостоятельно при запуске.")
+				slog.Warn("Таймаут ожидания закрытия iikoFront, продолжение запуска OrderCheck")
+			} else {
+				ctx.Success("iikoFront успешно остановлен.")
+				slog.Info("iikoFront остановлен перед запуском OrderCheck")
+			}
+		}
+	} else {
+		slog.Info("Выбрана БД, отличная от entities, остановка iikoFront не требуется", "db", dbFileName)
+	}
+
+	// 3. Запуск OrderCheck
+	ctx.SetStatus("Запуск OrderCheck...")
+	ctx.Info(fmt.Sprintf("Открытие БД: %s", cfg.TargetDatabasePath))
 	slog.Info("Выполнение команды", "exe", exePath, "arg", cfg.TargetDatabasePath)
 
 	_, err = wu.RunCommand(exePath, cfg.TargetDatabasePath)

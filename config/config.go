@@ -12,10 +12,12 @@ import (
 )
 
 type SelfUpdateConfig struct {
-	Enabled      bool   `json:"enabled"`
-	ReferenceURL string `json:"reference_url"`
-	HashURL      string `json:"hash_url"`
-	TempDir      string `json:"temp_dir"`
+	Enabled         bool   `json:"enabled"`
+	ReferenceURL    string `json:"reference_url"`     // Default (x64)
+	HashURL         string `json:"hash_url"`          // Default (x64)
+	ReferenceURLX86 string `json:"reference_url_x86"` // Specific for 32-bit
+	HashURLX86      string `json:"hash_url_x86"`      // Specific for 32-bit
+	TempDir         string `json:"temp_dir"`
 }
 
 // DistroComponent описывает компонент для установки (Front, BackOffice и т.д.).

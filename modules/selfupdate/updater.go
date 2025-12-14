@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -33,8 +34,22 @@ func New(cfg config.SelfUpdateConfig, wu core.WinUtils) *Updater {
 func (u *Updater) CheckAndPerformUpdate() (bool, error) {
 	tui.Info("Проверка наличия новой версии...")
 
+	// Определение архитектуры и выбор URL
+	refURL := u.Cfg.ReferenceURL
+	hashURL := u.Cfg.HashURL
+
+	if runtime.GOARCH == "386" {
+		if u.Cfg.ReferenceURLX86 != "" && u.Cfg.HashURLX86 != "" {
+			slog.Info("Обнаружена 32-битная архитектура, используется URL для x86")
+			refURL = u.Cfg.ReferenceURLX86
+			hashURL = u.Cfg.HashURLX86
+		} else {
+			slog.Warn("Запущена 32-битная версия, но URL для x86 не заданы в конфиге. Используются стандартные (x64)")
+		}
+	}
+
 	// 1. Получаем MD5 хэш удаленного файла
-	remoteHash, err := u.fetchRemoteHash()
+	remoteHash, err := u.fetchRemoteHash(hashURL)
 	if err != nil {
 		return false, fmt.Errorf("не удалось получить удаленный хэш: %w", err)
 	}
@@ -67,7 +82,7 @@ func (u *Updater) CheckAndPerformUpdate() (bool, error) {
 	_ = os.MkdirAll(tempDir, 0755)
 
 	newExePath := filepath.Join(tempDir, "goMH_new.exe")
-	if err := u.downloadFile(u.Cfg.ReferenceURL, newExePath); err != nil {
+	if err := u.downloadFile(refURL, newExePath); err != nil {
 		return false, fmt.Errorf("ошибка скачивания обновления: %w", err)
 	}
 
@@ -116,8 +131,8 @@ func (u *Updater) CheckAndPerformUpdate() (bool, error) {
 	return true, nil
 }
 
-func (u *Updater) fetchRemoteHash() (string, error) {
-	resp, err := http.Get(u.Cfg.HashURL)
+func (u *Updater) fetchRemoteHash(hashURL string) (string, error) {
+	resp, err := http.Get(hashURL)
 	if err != nil {
 		return "", err
 	}
