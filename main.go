@@ -368,6 +368,12 @@ func main() {
 		return // Завершаем main после закрытия окна
 	}
 
+	// --- КОНСОЛЬНЫЙ РЕЖИМ ---
+	// Устанавливаем комфортный размер окна (поуже и повыше стандартного)
+	if err := winutils.SetConsoleSize(80, 20); err != nil {
+		slog.Warn("Не удалось изменить размер консоли", "error", err)
+	}
+
 	// Регистрация модулей
 	registeredModules := map[string]core.Installer{
 		"VComCaster":    &vcomcaster.Module{},
