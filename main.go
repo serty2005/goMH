@@ -370,7 +370,7 @@ func main() {
 
 	// --- КОНСОЛЬНЫЙ РЕЖИМ ---
 	// Устанавливаем комфортный размер окна (поуже и повыше стандартного)
-	if err := winutils.SetConsoleSize(80, 20); err != nil {
+	if err := winutils.SetConsoleSize(120, 20); err != nil {
 		slog.Warn("Не удалось изменить размер консоли", "error", err)
 	}
 

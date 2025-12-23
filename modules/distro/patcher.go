@@ -92,6 +92,7 @@ func SelectPatchMenu(patches []core.PatchInfo) (core.PatchInfo, error) {
 // ApplyPatch применяет выбранный патч
 func ApplyPatch(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, patch core.PatchInfo, installDir, backupBaseDir string) error {
 	ctx.Info("Начало применения патча...")
+	slog.Info("ApplyPatch started", "patch", patch.ShortName, "installDir", installDir)
 
 	sevenZip, err := dependencies.NewClient(am, wu)
 	if err != nil {
@@ -115,59 +116,80 @@ func ApplyPatch(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, pa
 		return err
 	}
 
-	// 3. Распаковка во временную
+	// 3. Распаковка во временную (stage 1)
 	tempRoot := filepath.Join(am.Cfg().RootPath, "temp")
 	_ = os.MkdirAll(tempRoot, 0755)
-	extractDir, _ := os.MkdirTemp(tempRoot, "patch-*")
-	defer os.RemoveAll(extractDir)
 
-	if err := sevenZip.Extract(patchCachePath, extractDir, false); err != nil {
+	stage1Dir, _ := os.MkdirTemp(tempRoot, "patch_s1_*")
+	defer os.RemoveAll(stage1Dir)
+
+	ctx.Info("Распаковка основного архива...")
+	if err := sevenZip.Extract(patchCachePath, stage1Dir, true); err != nil {
 		return fmt.Errorf("ошибка извлечения архива: %w", err)
 	}
 
-	// 4. Поиск контента
-	var sourceDir string
-	if nested, err := findNestedFrontArchive(extractDir); err == nil {
-		finalDir := filepath.Join(extractDir, "final")
-		_ = os.MkdirAll(finalDir, 0755)
-		if err := sevenZip.Extract(nested, finalDir, true); err != nil {
-			return err
+	// 4. Поиск вложенного архива (рекурсивно)
+	// Ищем zip/7z, в названии которого есть "front"
+	var workDir string
+
+	nestedArchive, err := findNestedArchiveRecursive(stage1Dir, "front")
+	if err == nil && nestedArchive != "" {
+		ctx.Info(fmt.Sprintf("Найден вложенный архив: %s", filepath.Base(nestedArchive)))
+
+		stage2Dir, _ := os.MkdirTemp(tempRoot, "patch_s2_*")
+		defer os.RemoveAll(stage2Dir)
+
+		if err := sevenZip.Extract(nestedArchive, stage2Dir, true); err != nil {
+			return fmt.Errorf("ошибка распаковки вложенного архива: %w", err)
 		}
-		sourceDir = finalDir
+		// Теперь работаем с распакованным вложенным архивом
+		workDir = stage2Dir
 	} else {
-		finalDir := filepath.Join(extractDir, "final_direct")
-		_ = os.MkdirAll(finalDir, 0755)
-		if err := sevenZip.Extract(patchCachePath, finalDir, true); err != nil {
-			return err
-		}
-		sourceDir = finalDir
+		// Вложенного архива нет, работаем с результатом первой распаковки
+		workDir = stage1Dir
 	}
 
-	realContentDir, err := findContentRoot(sourceDir)
+	// 5. Определение "корня контента" (Content Root)
+	// Нам нужно найти папку, где лежат сами файлы (dll, exe), игнорируя Backoffice и обертки
+	contentDir, err := resolveContentRoot(workDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("не удалось определить структуру патча: %w", err)
 	}
 
-	// 5. Бэкап
-	ctx.Info("Бэкапирование файлов...")
-	if err := createBackupFromDir(wu, realContentDir, installDir, backupBaseDir, patch.BuildNumber); err != nil {
+	// Финальная проверка на адекватность
+	if !containsDll(contentDir) {
+		ctx.Warn("Внимание: В итоговой папке патча не обнаружены .dll файлы. Структура может быть неверной.")
+		slog.Warn("DLL not found in final content dir", "dir", contentDir)
+	} else {
+		slog.Info("Content dir validated (contains DLLs)", "dir", contentDir)
+	}
+
+	// 6. Бэкап
+	ctx.Info("Создание бэкапа...")
+	if err := createBackupFromDir(wu, contentDir, installDir, backupBaseDir, patch.BuildNumber); err != nil {
 		return fmt.Errorf("ошибка бэкапа: %w", err)
 	}
 
-	// 6. Копирование
-	ctx.Info("Копирование файлов патча...")
-	if err := wu.CopyDir(realContentDir, installDir); err != nil {
+	// 7. Копирование
+	ctx.Info("Применение патча...")
+	if err := wu.CopyDir(contentDir, installDir); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// Вспомогательные функции (оставляем без изменений логику)
-
-func findContentRoot(startDir string) (string, error) {
+// resolveContentRoot ищет "настоящую" папку с файлами фронта.
+// Логика:
+// 1. Если есть папка "Front", "iikoFront" — заходим в неё.
+// 2. Если есть "BackOffice", но нет "Front" рядом — это ошибка (патч не для того?).
+// 3. Если только одна папка внутри — заходим в неё.
+// 4. Иначе возвращаем текущую.
+func resolveContentRoot(startDir string) (string, error) {
 	currentDir := startDir
-	for {
+
+	// Ограничим глубину поиска, чтобы не зациклиться
+	for i := 0; i < 3; i++ {
 		entries, err := os.ReadDir(currentDir)
 		if err != nil {
 			return "", err
@@ -175,14 +197,77 @@ func findContentRoot(startDir string) (string, error) {
 		if len(entries) == 0 {
 			return "", fmt.Errorf("пустая папка патча")
 		}
+
+		// 1. Ищем явную папку Front
+		for _, e := range entries {
+			if e.IsDir() {
+				name := strings.ToLower(e.Name())
+				// Если нашли папку с именем front - это то, что нам нужно
+				if strings.Contains(name, "front") && !strings.Contains(name, "back") {
+					slog.Debug("Найдена папка Front, проваливаемся", "name", e.Name())
+					return filepath.Join(currentDir, e.Name()), nil
+				}
+			}
+		}
+
+		// 2. Если явной папки нет, но есть только одна папка — заходим в неё
 		if len(entries) == 1 && entries[0].IsDir() {
+			slog.Debug("Проваливаемся в единственную подпапку", "name", entries[0].Name())
 			currentDir = filepath.Join(currentDir, entries[0].Name())
 			continue
 		}
-		return currentDir, nil
+
+		// 3. Если папок несколько, но нет явного Front, и есть DLL в корне — считаем, что мы на месте
+		if containsDll(currentDir) {
+			return currentDir, nil
+		}
+
+		// Если мы здесь, значит у нас куча файлов/папок, нет явного Front и нет DLL.
+		// Скорее всего это корень, где лежат папки Front и BackOffice, но почему-то имя папки Front не сматчилось.
+		// Попробуем еще раз поискать, может имя было специфичное.
+		break
 	}
+	return currentDir, nil
 }
 
+// findNestedArchiveRecursive рекурсивно ищет архив по ключевому слову
+func findNestedArchiveRecursive(root, keyword string) (string, error) {
+	var found string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			lower := strings.ToLower(d.Name())
+			if strings.Contains(lower, keyword) && (strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".7z")) {
+				found = path
+				return io.EOF // Нашли - прерываем
+			}
+		}
+		return nil
+	})
+
+	if err == io.EOF {
+		return found, nil
+	}
+	if found != "" {
+		return found, nil
+	}
+	return "", os.ErrNotExist
+}
+
+// containsDll проверяет наличие .dll файлов
+func containsDll(dir string) bool {
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".dll") {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreFromBackup восстанавливает из бэкапа (файлы копируются обратно)
 func restoreFromBackup(wu core.WinUtils, installDir, backupBaseDir string) error {
 	backups, err := filepath.Glob(filepath.Join(backupBaseDir, "backup_*"))
 	if err != nil || len(backups) == 0 {
@@ -203,8 +288,15 @@ func restoreFromBackup(wu core.WinUtils, installDir, backupBaseDir string) error
 	})
 }
 
+// createBackupFromDir копирует существующие файлы из installDir в бэкап,
+// если такие же файлы есть в patchDir (чтобы бэкапить только то, что заменяем)
 func createBackupFromDir(wu core.WinUtils, patchDir, installDir, backupBaseDir string, buildNumber int) error {
 	backupDir := filepath.Join(backupBaseDir, fmt.Sprintf("backup_%d", buildNumber))
+
+	// Если бэкап уже есть, не перезаписываем (защита от повторного запуска на уже патченой версии)
+	if _, err := os.Stat(backupDir); err == nil {
+		return nil
+	}
 	_ = os.MkdirAll(backupDir, 0755)
 
 	return filepath.Walk(patchDir, func(path string, info os.FileInfo, err error) error {
@@ -239,24 +331,4 @@ func getPatchesPath(baseURL, version string) string {
 		return fmt.Sprintf("%s/%s", baseURL, version)
 	}
 	return fmt.Sprintf("%s/%s/Patches", baseURL, version)
-}
-
-func findNestedFrontArchive(dir string) (string, error) {
-	var found string
-	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if found != "" || err != nil {
-			return nil
-		}
-		if !d.IsDir() {
-			l := strings.ToLower(d.Name())
-			if strings.Contains(l, "front") && (strings.HasSuffix(l, ".zip") || strings.HasSuffix(l, ".7z")) {
-				found = path
-			}
-		}
-		return nil
-	})
-	if found != "" {
-		return found, nil
-	}
-	return "", os.ErrNotExist
 }
