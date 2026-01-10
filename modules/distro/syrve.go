@@ -175,7 +175,7 @@ func (h *syrveHandler) configurePortable(ctx core.TaskContext, am core.AssetMana
 }
 
 func (h *syrveHandler) fetchVersions() ([]string, error) {
-	const manifestURL = "http://176.98.191.43/Syrve/manifest.json"
+	const manifestURL = "http://f.serty.top/distr/installer/syrve-manifest.json"
 	resp, err := http.Get(manifestURL)
 	if err != nil {
 		return nil, err
