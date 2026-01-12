@@ -126,7 +126,7 @@ func (h *syrveHandler) configurePortable(ctx core.TaskContext, am core.AssetMana
 
 	// Для Syrve поиск версий сложнее, так как portable лежат на FTP, а список для обычных - в JSON.
 	// Используем FTP листинг.
-	syrveFTPs := am.Cfg().FTP[1:] // Обычно второй сервер
+	syrveFTPs := am.Cfg().FTP[0:] // Обычно второй сервер
 	if len(syrveFTPs) == 0 {
 		return nil, errors.New("FTP для Syrve не настроен")
 	}

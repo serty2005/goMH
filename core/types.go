@@ -69,7 +69,7 @@ type AssetManager interface {
 	DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error)
 	GetFastestFTP(ftpConfigs []config.FTPConfig, testFilePath string) (config.FTPConfig, error)
 	ExtractFile(zipPath, pathInZip, destPath string) error
-	ListFTP(ftpCfg config.FTPConfig, path string) ([]FTPEntry, error) // <-- Сигнатура изменена
+	ListFTP(ftpCfg config.FTPConfig, path string) ([]FTPEntry, error)
 	DownloadToCache(assetName string) (string, error)
 	ProcessFromCache(assetName, cachePath string) error
 	PurgeAsset(assetName string) error
