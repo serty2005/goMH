@@ -161,8 +161,8 @@
 		},
 		"syrve_portable_sources": {
 			"http_source": {
-				"enabled": false,
-				"url": "176.98.191.43/Syrve",
+				"enabled": true,
+				"url": "https://f.serty.top/iikoBacks/Syrve",
 				"archive_names": {
 					"syrve_rms": "RMSSOffice{{version}}.zip",
 					"syrve_chain": "ChainSOffice{{version}}.zip"
@@ -170,7 +170,7 @@
 			},
 			"ftp_source": {
 				"enabled": true,
-				"directory": "/Syrve",
+				"directory": "iikoBacks/Syrve",
 				"archive_names": {
 					"syrve_rms": "RMSSOffice{{version}}.zip",
 					"syrve_chain": "ChainSOffice{{version}}.zip"

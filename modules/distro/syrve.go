@@ -124,22 +124,19 @@ func (h *syrveHandler) configurePortable(ctx core.TaskContext, am core.AssetMana
 		return nil, fmt.Errorf("шаблон архива не найден для %s", comp.PortableArchiveKey)
 	}
 
-	// Для Syrve поиск версий сложнее, так как portable лежат на FTP, а список для обычных - в JSON.
-	// Используем FTP листинг.
-	syrveFTPs := am.Cfg().FTP[0:] // Обычно второй сервер
-	if len(syrveFTPs) == 0 {
-		return nil, errors.New("FTP для Syrve не настроен")
+	// Изменение: всегда используем первый FTP сервер из конфигурации
+	ftpList := am.Cfg().FTP
+	if len(ftpList) == 0 {
+		return nil, errors.New("список FTP серверов в конфигурации пуст")
 	}
 
-	ctx.Info("Определение быстрого FTP...")
-	fastest, err := am.GetFastestFTP(syrveFTPs, "/speedtest.txt")
-	if err != nil {
-		return nil, err
-	}
-	cfg.PortableFTPConfig = fastest
+	selectedFTP := ftpList[0]
+	cfg.PortableFTPConfig = selectedFTP
 
+	ctx.Info(fmt.Sprintf("Использование FTP источника: %s", selectedFTP.Host))
 	ctx.Info("Поиск portable версий на FTP...")
-	entries, err := am.ListFTP(fastest, pCfg.FtpSource.Directory)
+
+	entries, err := am.ListFTP(selectedFTP, pCfg.FtpSource.Directory)
 	if err != nil {
 		return nil, err
 	}
