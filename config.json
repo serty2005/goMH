@@ -255,10 +255,10 @@
 			"type": "file",
 			"download_method": "HTTP"
 		},
-		"Getad_Agent": {
-			"url": "https://f.serty.top/distr/installer/assets/getad.zip",
+		"POSRelayd_Agent": {
+			"url": "https://f.serty.top/distr/installer/assets/POSRelayd.zip",
 			"type": "zip",
-			"destination": "getad",
+			"destination": "POSRelayd",
 			"download_method": "HTTP"
 		},
 		"VComCaster_Package": {
@@ -295,7 +295,7 @@
 			"download_method": "HTTP"
 		},
 		"UTM_Installer": {
-			"url": "https://f.serty.top/silent-setup-4.2.0-b2660.exe",
+			"url": "https://f.serty.top/silent-setup-4.2.0-b2678.exe",
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "HTTP"

@@ -2,6 +2,7 @@ package remoteaccess
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"goMH/core"
@@ -20,7 +21,7 @@ type Module struct{}
 
 func (m *Module) ID() string { return "RemoteAccess" }
 func (m *Module) MenuText() string {
-	return "Установить средства удаленного доступа (TV, LM, Getad)"
+	return "Установить средства удаленного доступа (TV, LM, POSRelayd)"
 }
 
 // ToolType определяет тип инструмента
@@ -29,7 +30,7 @@ type ToolType int
 const (
 	ToolTeamViewer ToolType = iota
 	ToolLiteManager
-	ToolGetad
+	ToolPOSRelayd
 )
 
 // RemoteAccessConfig хранит выбор пользователя
@@ -73,7 +74,7 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 	// Определяем статусы служб
 	tvInstalled, _ := wu.ServiceExists("TeamViewer")
 	lmInstalled, _ := wu.ServiceExists("ROMService")
-	getadInstalled, _ := wu.ServiceExists("MH_Getad")
+	posrelaydInstalled, _ := wu.ServiceExists("MH_POSRelayd")
 
 	tui.ClearScreen()
 	tui.Title("\n--- Меню установки средств удаленного доступа ---")
@@ -87,7 +88,7 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 
 	fmt.Printf(" 1. TeamViewer %s\n", printStatus(tvInstalled))
 	fmt.Printf(" 2. LiteManager %s\n", printStatus(lmInstalled))
-	fmt.Printf(" 3. Getad Agent %s (возможна переустановка)\n", printStatus(getadInstalled))
+	fmt.Printf(" 3. POSRelayd Agent %s (возможна переустановка)\n", printStatus(posrelaydInstalled))
 	fmt.Println("\n 0. Назад в главное меню")
 	fmt.Print("Выберите пункт: ")
 
@@ -112,8 +113,8 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		}
 		return &RemoteAccessConfig{Tool: ToolLiteManager}, nil
 	case "3":
-		// Getad можно переустанавливать
-		return &RemoteAccessConfig{Tool: ToolGetad}, nil
+		// POSRelayd можно переустанавливать
+		return &RemoteAccessConfig{Tool: ToolPOSRelayd}, nil
 	case "0":
 		return nil, nil
 	default:
@@ -130,9 +131,9 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	case ToolLiteManager:
 		ctx.SetStatus("Установка LiteManager")
 		return m.installLiteManager(ctx, am, wu)
-	case ToolGetad:
-		ctx.SetStatus("Установка Getad Agent")
-		return m.installGetad(ctx, am, wu)
+	case ToolPOSRelayd:
+		ctx.SetStatus("Установка POSRelayd Agent")
+		return m.installPOSRelayd(ctx, am, wu)
 	}
 	return nil
 }
@@ -232,15 +233,18 @@ func (m *Module) installLiteManager(ctx core.TaskContext, am core.AssetManager, 
 	return err
 }
 
-func (m *Module) installGetad(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
-	slog.Info("Начало установки Getad")
-	const assetName = "Getad_Agent"
-	const serviceName = "MH_Getad"
-	installDir := filepath.Join(am.Cfg().RootPath, "getad")
+func (m *Module) installPOSRelayd(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Начало установки POSRelayd")
+	const assetName = "POSRelayd_Agent"
+	const serviceName = "MH_POSRelayd"
+	installDir := filepath.Join(am.Cfg().RootPath, "POSRelayd")
+
+	// cleanup legacy getad artifacts before install
+	m.cleanupLegacyGetad(ctx, am, wu)
 
 	// 1. Очистка старого
 	ctx.Info("Поиск и удаление старых версий...")
-	oldExePath, err := wu.FindFileRecursive(am.Cfg().RootPath, "getad*.exe")
+	oldExePath, err := wu.FindFileRecursive(am.Cfg().RootPath, "posrelayd*.exe")
 	if err == nil {
 		slog.Info("Найдена старая версия", "path", oldExePath)
 		if exists, _ := wu.ServiceExists(serviceName); exists {
@@ -253,7 +257,7 @@ func (m *Module) installGetad(ctx core.TaskContext, am core.AssetManager, wu cor
 		// Очистка автозагрузки
 		userStartup, commonStartup, _ := wu.GetStartupFolders()
 		for _, dir := range []string{userStartup, commonStartup} {
-			if matches, _ := filepath.Glob(filepath.Join(dir, "getad*.lnk")); len(matches) > 0 {
+			if matches, _ := filepath.Glob(filepath.Join(dir, "posrelayd*.lnk")); len(matches) > 0 {
 				for _, match := range matches {
 					_ = os.Remove(match)
 				}
@@ -289,7 +293,7 @@ func (m *Module) installGetad(ctx core.TaskContext, am core.AssetManager, wu cor
 		return err
 	}
 
-	serviceExe := filepath.Join(installDir, "getadsc.exe")
+	serviceExe := filepath.Join(installDir, "posrelaydsc.exe")
 	if _, err := os.Stat(serviceExe); os.IsNotExist(err) {
 		return fmt.Errorf("файл %s не найден", serviceExe)
 	}
@@ -308,10 +312,101 @@ func (m *Module) installGetad(ctx core.TaskContext, am core.AssetManager, wu cor
 	time.Sleep(3 * time.Second)
 	status, _ := wu.GetServiceStatus(serviceName)
 	if status == "RUNNING" {
-		ctx.Success("Служба Getad успешно запущена.")
+		ctx.Success("Служба POSRelayd успешно запущена.")
 	} else {
 		ctx.Warn(fmt.Sprintf("Служба установлена, но статус: %s", status))
 	}
 
 	return nil
+}
+
+func (m *Module) cleanupLegacyGetad(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) {
+	rootPath := am.Cfg().RootPath
+
+	// remove old getad folders
+	for _, dir := range []string{
+		filepath.Join(rootPath, "getad"),
+		filepath.Join(rootPath, "Getad"),
+	} {
+		if _, err := os.Stat(dir); err == nil {
+			_ = wu.CleanDirectory(dir)
+			_ = os.RemoveAll(dir)
+		}
+	}
+
+	// remove old getad shortcuts from startup and desktop
+	var linkDirs []string
+	userStartup, commonStartup, err := wu.GetStartupFolders()
+	if err == nil {
+		linkDirs = append(linkDirs, userStartup, commonStartup)
+	}
+	if desktopDir, err := wu.GetDesktopDir(); err == nil {
+		linkDirs = append(linkDirs, desktopDir)
+	}
+	for _, dir := range linkDirs {
+		for _, pattern := range []string{"getad*.lnk", "Getad*.lnk"} {
+			if matches, _ := filepath.Glob(filepath.Join(dir, pattern)); len(matches) > 0 {
+				for _, match := range matches {
+					_ = os.Remove(match)
+				}
+			}
+		}
+	}
+
+	// remove scheduler tasks related to getad
+	taskNames := map[string]struct{}{}
+	exeCandidates := []string{
+		filepath.Join(rootPath, "getad", "getad.exe"),
+		filepath.Join(rootPath, "getad", "getadsc.exe"),
+		filepath.Join(rootPath, "Getad", "getad.exe"),
+		filepath.Join(rootPath, "Getad", "getadsc.exe"),
+	}
+	if oldExePath, err := wu.FindFileRecursive(rootPath, "getad*.exe"); err == nil {
+		exeCandidates = append(exeCandidates, oldExePath)
+	}
+	for _, exePath := range exeCandidates {
+		if taskName, _ := wu.FindScheduledTaskByPath(exePath); taskName != "" {
+			taskNames[taskName] = struct{}{}
+		}
+	}
+	for _, taskName := range m.findScheduledTasksByKeyword(wu, "getad") {
+		taskNames[taskName] = struct{}{}
+	}
+	for taskName := range taskNames {
+		_ = wu.DeleteScheduledTaskByName(taskName)
+	}
+
+	ctx.Info("Legacy getad cleanup complete.")
+}
+
+func (m *Module) findScheduledTasksByKeyword(wu core.WinUtils, keyword string) []string {
+	out, err := wu.RunCommand("schtasks", "/Query", "/V", "/FO", "CSV")
+	if err != nil {
+		return nil
+	}
+
+	reader := csv.NewReader(strings.NewReader(out))
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil
+	}
+
+	needle := strings.ToLower(keyword)
+	taskNames := map[string]struct{}{}
+	for _, record := range records {
+		if len(record) <= 8 {
+			continue
+		}
+		taskName := record[0]
+		taskToRun := record[8]
+		if strings.Contains(strings.ToLower(taskName), needle) || strings.Contains(strings.ToLower(taskToRun), needle) {
+			taskNames[taskName] = struct{}{}
+		}
+	}
+
+	result := make([]string, 0, len(taskNames))
+	for taskName := range taskNames {
+		result = append(result, taskName)
+	}
+	return result
 }
