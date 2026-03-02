@@ -1,6 +1,7 @@
 package remoteaccess
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,7 +23,7 @@ type Module struct{}
 
 func (m *Module) ID() string { return "RemoteAccess" }
 func (m *Module) MenuText() string {
-	return "Установить средства удаленного доступа (TV, LM, POSRelayd)"
+	return "Установить средства удаленного доступа (TV, LM, RustDesk, POSRelayd)"
 }
 
 // ToolType определяет тип инструмента
@@ -30,7 +32,14 @@ type ToolType int
 const (
 	ToolTeamViewer ToolType = iota
 	ToolLiteManager
+	ToolRustDesk
 	ToolPOSRelayd
+)
+
+const (
+	rustDeskLatestReleaseURL = "https://github.com/rustdesk/rustdesk/releases/latest"
+	rustDeskInstallArg       = "--silent-install"
+	rustDeskExePath          = `C:\Program Files\RustDesk\rustdesk.exe`
 )
 
 // RemoteAccessConfig хранит выбор пользователя
@@ -74,6 +83,7 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 	// Определяем статусы служб
 	tvInstalled, _ := wu.ServiceExists("TeamViewer")
 	lmInstalled, _ := wu.ServiceExists("ROMService")
+	rustDeskInstalled := isRustDeskInstalled()
 	posrelaydInstalled, _ := wu.ServiceExists("MH_POSRelayd")
 
 	tui.ClearScreen()
@@ -88,7 +98,8 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 
 	fmt.Printf(" 1. TeamViewer %s\n", printStatus(tvInstalled))
 	fmt.Printf(" 2. LiteManager %s\n", printStatus(lmInstalled))
-	fmt.Printf(" 3. POSRelayd Agent %s (возможна переустановка)\n", printStatus(posrelaydInstalled))
+	fmt.Printf(" 3. RustDesk %s\n", printStatus(rustDeskInstalled))
+	fmt.Printf(" 4. POSRelayd Agent %s (возможна переустановка)\n", printStatus(posrelaydInstalled))
 	fmt.Println("\n 0. Назад в главное меню")
 	fmt.Print("Выберите пункт: ")
 
@@ -113,6 +124,13 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		}
 		return &RemoteAccessConfig{Tool: ToolLiteManager}, nil
 	case "3":
+		if rustDeskInstalled {
+			tui.Warn("RustDesk уже установлен.")
+			tui.WaitForAnyKey()
+			return m.Configure(ctx, am, wu)
+		}
+		return &RemoteAccessConfig{Tool: ToolRustDesk}, nil
+	case "4":
 		// POSRelayd можно переустанавливать
 		return &RemoteAccessConfig{Tool: ToolPOSRelayd}, nil
 	case "0":
@@ -131,6 +149,9 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	case ToolLiteManager:
 		ctx.SetStatus("Установка LiteManager")
 		return m.installLiteManager(ctx, am, wu)
+	case ToolRustDesk:
+		ctx.SetStatus("Установка RustDesk")
+		return m.installRustDesk(ctx, am, wu)
 	case ToolPOSRelayd:
 		ctx.SetStatus("Установка POSRelayd Agent")
 		return m.installPOSRelayd(ctx, am, wu)
@@ -233,6 +254,46 @@ func (m *Module) installLiteManager(ctx core.TaskContext, am core.AssetManager, 
 	return err
 }
 
+func (m *Module) installRustDesk(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
+	slog.Info("Начало установки RustDesk")
+
+	setPassword, password, err := askRustDeskPassword()
+	if err != nil {
+		return err
+	}
+
+	ctx.Info("Получение актуального релиза RustDesk...")
+	installerURL, err := resolveRustDeskInstallerURL()
+	if err != nil {
+		return err
+	}
+
+	installerPath := filepath.Join(am.Cfg().AssetsCachePath, "rustdesk-latest.exe")
+	ctx.Info("Скачивание дистрибутива RustDesk...")
+	if _, err := am.DownloadHTTPWithProgress(installerURL, installerPath); err != nil {
+		return err
+	}
+
+	ctx.Info("Тихая установка RustDesk...")
+	installCmd := fmt.Sprintf(`start "" /B "%s" %s`, installerPath, rustDeskInstallArg)
+	if _, err := wu.RunCommand("cmd", "/C", installCmd); err != nil {
+		return err
+	}
+	if err := waitForRustDeskExecutable(2 * time.Minute); err != nil {
+		return err
+	}
+
+	if setPassword {
+		ctx.Info("Установка пароля RustDesk...")
+		if _, err := wu.RunCommand(rustDeskExePath, "--password", password); err != nil {
+			return fmt.Errorf("не удалось установить пароль RustDesk: %w", err)
+		}
+	}
+
+	ctx.Success("RustDesk успешно установлен.")
+	return nil
+}
+
 func (m *Module) installPOSRelayd(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Начало установки POSRelayd")
 	const assetName = "POSRelayd_Agent"
@@ -318,6 +379,91 @@ func (m *Module) installPOSRelayd(ctx core.TaskContext, am core.AssetManager, wu
 	}
 
 	return nil
+}
+
+func isRustDeskInstalled() bool {
+	_, err := os.Stat(rustDeskExePath)
+	return err == nil
+}
+
+func waitForRustDeskExecutable(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(rustDeskExePath); err == nil {
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("rustdesk.exe не появился после установки: %s", rustDeskExePath)
+}
+
+func askRustDeskPassword() (bool, string, error) {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Установить пароль? (y/n): ")
+	answer, err := reader.ReadString('\n')
+	if err != nil {
+		return false, "", err
+	}
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer != "y" && answer != "yes" {
+		return false, "", nil
+	}
+
+	for {
+		fmt.Print("Введите пароль RustDesk: ")
+		password, err := reader.ReadString('\n')
+		if err != nil {
+			return false, "", err
+		}
+		password = strings.TrimSpace(password)
+		if password == "" {
+			tui.Warn("Пароль не может быть пустым.")
+			continue
+		}
+		return true, password, nil
+	}
+}
+
+func resolveRustDeskInstallerURL() (string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	req, err := http.NewRequest(http.MethodGet, rustDeskLatestReleaseURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "goMH/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ошибка получения страницы релиза RustDesk: %s", resp.Status)
+	}
+
+	finalURL := resp.Request.URL.String()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	re := regexp.MustCompile(`(?i)href=["']([^"']*rustdesk/rustdesk/releases/download/[^"']*rustdesk-[^"']*-x86_64\.exe)["']`)
+	matches := re.FindStringSubmatch(string(body))
+	if len(matches) < 2 {
+		return "", fmt.Errorf("не удалось определить ссылку на rustdesk x86_64 installer с %s", finalURL)
+	}
+
+	baseURL, err := url.Parse(finalURL)
+	if err != nil {
+		return "", err
+	}
+	hrefURL, err := url.Parse(matches[1])
+	if err != nil {
+		return "", err
+	}
+	return baseURL.ResolveReference(hrefURL).String(), nil
 }
 
 func (m *Module) cleanupLegacyGetad(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) {

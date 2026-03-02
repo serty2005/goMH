@@ -8,11 +8,13 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/tui"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +22,8 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
 )
+
+var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
 
 type Manager struct {
 	cfg *config.Config
@@ -119,7 +123,7 @@ func (m *Manager) Get(assetName string) (string, error) {
 // ftpCfg - конфигурация конкретного FTP-сервера для подключения.
 // ftpPath - это путь на сервере, например /distr/iiko/Setup.Front.exe
 func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error) {
-	fileName := filepath.Base(ftpPath)
+	fileName := sanitizeProgressLabel(filepath.Base(ftpPath))
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
@@ -177,7 +181,7 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 
 // DownloadHTTPWithProgress скачивает файл по HTTP с проверкой размера и прогресс-баром.
 func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, error) {
-	fileName := filepath.Base(httpURL)
+	fileName := sanitizeProgressLabel(filepath.Base(httpURL))
 
 	// Убедимся, что директория для сохранения файла существует
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
@@ -259,6 +263,7 @@ func (m *Manager) UnpackToFlatDir(assetName, cachePath, destDir string) error {
 
 // createProgressBar создает и настраивает общий прогресс-бар для скачиваний.
 func CreateProgressBar(totalSize int64, description string) *progressbar.ProgressBar {
+	description = sanitizeProgressLabel(description)
 	return progressbar.NewOptions64(
 		totalSize,
 		progressbar.OptionSetDescription(fmt.Sprintf("Скачивание %s", description)),
@@ -272,6 +277,22 @@ func CreateProgressBar(totalSize int64, description string) *progressbar.Progres
 		progressbar.OptionFullWidth(),
 		progressbar.OptionClearOnFinish(),
 	)
+}
+
+func sanitizeProgressLabel(label string) string {
+	label = html.UnescapeString(label)
+	label = htmlTagRegex.ReplaceAllString(label, "")
+	label = strings.Join(strings.Fields(label), " ")
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "file"
+	}
+
+	runes := []rune(label)
+	if len(runes) > 50 {
+		return string(runes[:47]) + "..."
+	}
+	return label
 }
 
 func (m *Manager) ListFTP(ftpCfg config.FTPConfig, path string) ([]core.FTPEntry, error) {

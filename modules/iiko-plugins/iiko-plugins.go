@@ -17,12 +17,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // Constants
 const (
 	DefaultIikoPluginsDir = `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
 	ManifestURL           = "https://f.serty.top/distr/installer/plugins-manifest.json"
+	RapidPluginsBaseURL   = "https://rapid.iiko.ru/plugins/"
+	maxScanDepth          = 10
+)
+
+var (
+	apiVersionRe = regexp.MustCompile(`(V\d+(?:Preview\d+)?)`)
 )
 
 // Plugin представляет информацию о плагине
@@ -89,6 +97,15 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 		slog.Error("Ошибка загрузки манифеста", "error", err)
 		return err
 	}
+	if len(manifest.ApiVersions) == 0 {
+		return fmt.Errorf("в манифесте нет таблицы api_compatibility: невозможно определить совместимость API для iikoFront")
+	}
+	livePlugins, err := LoadLivePlugins()
+	if err != nil {
+		slog.Error("Ошибка загрузки актуального списка плагинов", "error", err)
+		return err
+	}
+	manifest.Plugins = livePlugins
 
 	// 3. Фильтрация доступных плагинов
 	compatibleApiVersions := getCompatibleApiVersions(manifest, version)
@@ -182,6 +199,14 @@ func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error
 	if err != nil {
 		return err
 	}
+	if len(manifest.ApiVersions) == 0 {
+		return fmt.Errorf("в манифесте нет таблицы api_compatibility: невозможно определить совместимость API для iikoFront")
+	}
+	livePlugins, err := LoadLivePlugins()
+	if err != nil {
+		return err
+	}
+	manifest.Plugins = livePlugins
 
 	compatibleApiVersions := getCompatibleApiVersions(manifest, version)
 	installed, err := GetInstalledPlugins()
@@ -448,6 +473,206 @@ func LoadManifest() (*Manifest, error) {
 		return nil, fmt.Errorf("ошибка JSON: %w", err)
 	}
 	return &manifest, nil
+}
+
+func LoadLivePlugins() ([]Plugin, error) {
+	zipURLs, err := scanPluginZipFiles(RapidPluginsBaseURL, maxScanDepth)
+	if err != nil {
+		return nil, err
+	}
+
+	plugins := make([]Plugin, 0, len(zipURLs))
+	seen := make(map[string]struct{}, len(zipURLs))
+	for _, zipURL := range zipURLs {
+		plugin, ok := parsePluginFromZipURL(zipURL)
+		if !ok {
+			continue
+		}
+		if _, exists := seen[plugin.DownloadUrl]; exists {
+			continue
+		}
+		seen[plugin.DownloadUrl] = struct{}{}
+		plugins = append(plugins, plugin)
+	}
+
+	if len(plugins) == 0 {
+		return nil, fmt.Errorf("не удалось получить список плагинов с %s", RapidPluginsBaseURL)
+	}
+	return plugins, nil
+}
+
+func scanPluginZipFiles(startURL string, depthLimit int) ([]string, error) {
+	type queueItem struct {
+		url   string
+		depth int
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	queue := []queueItem{{url: startURL, depth: 0}}
+	visited := map[string]struct{}{}
+	zipSet := map[string]struct{}{}
+
+	for len(queue) > 0 {
+		item := queue[0]
+		queue = queue[1:]
+
+		if item.depth > depthLimit {
+			continue
+		}
+		if _, ok := visited[item.url]; ok {
+			continue
+		}
+		visited[item.url] = struct{}{}
+
+		dirs, zips, err := readDirectoryListing(client, item.url)
+		if err != nil {
+			slog.Warn("Не удалось прочитать каталог плагинов", "url", item.url, "error", err)
+			continue
+		}
+		for _, zipURL := range zips {
+			zipSet[zipURL] = struct{}{}
+		}
+		for _, dirURL := range dirs {
+			if _, ok := visited[dirURL]; ok {
+				continue
+			}
+			queue = append(queue, queueItem{url: dirURL, depth: item.depth + 1})
+		}
+	}
+
+	if len(zipSet) == 0 {
+		return nil, fmt.Errorf("не найдено ни одного zip-плагина по адресу %s", startURL)
+	}
+
+	zips := make([]string, 0, len(zipSet))
+	for zipURL := range zipSet {
+		zips = append(zips, zipURL)
+	}
+	sort.Strings(zips)
+	return zips, nil
+}
+
+func readDirectoryListing(client *http.Client, pageURL string) ([]string, []string, error) {
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("User-Agent", "goMH/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	var dirs []string
+	var zips []string
+	root, err := html.Parse(resp.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "a") {
+			href := ""
+			for _, attr := range n.Attr {
+				if strings.EqualFold(attr.Key, "href") {
+					href = strings.TrimSpace(attr.Val)
+					break
+				}
+			}
+
+			label := strings.ToLower(strings.TrimSpace(nodeText(n)))
+			if href != "" && label != "parent directory" {
+				fullURL, err := resolveURL(pageURL, href)
+				if err == nil {
+					if strings.HasSuffix(href, "/") {
+						dirs = append(dirs, fullURL)
+					} else if strings.HasSuffix(strings.ToLower(href), ".zip") {
+						zips = append(zips, fullURL)
+					}
+				}
+			}
+		}
+
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+
+	return dirs, zips, nil
+}
+
+func nodeText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			b.WriteString(node.Data)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(n)
+	return b.String()
+}
+
+func resolveURL(base, href string) (string, error) {
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	parsedHref, err := url.Parse(href)
+	if err != nil {
+		return "", err
+	}
+	return baseURL.ResolveReference(parsedHref).String(), nil
+}
+
+func parsePluginFromZipURL(zipURL string) (Plugin, bool) {
+	parsed, err := url.Parse(zipURL)
+	if err != nil {
+		return Plugin{}, false
+	}
+
+	filename := filepath.Base(parsed.Path)
+	if !strings.HasSuffix(strings.ToLower(filename), ".zip") {
+		return Plugin{}, false
+	}
+	if !strings.HasPrefix(filename, "Resto.Front.Api.") {
+		return Plugin{}, false
+	}
+
+	core := strings.TrimSuffix(strings.TrimPrefix(filename, "Resto.Front.Api."), ".zip")
+	match := apiVersionRe.FindStringSubmatchIndex(core)
+	if len(match) < 4 {
+		return Plugin{}, false
+	}
+
+	apiVersion := core[match[2]:match[3]]
+	name := strings.TrimRight(core[:match[0]], ".")
+	pluginVersion := strings.TrimLeft(core[match[1]:], ".")
+	if name == "" {
+		return Plugin{}, false
+	}
+
+	return Plugin{
+		Name:          name,
+		ApiVersion:    apiVersion,
+		PluginVersion: pluginVersion,
+		DownloadUrl:   zipURL,
+	}, true
 }
 
 func GetInstalledPlugins() ([]string, error) {
