@@ -275,15 +275,14 @@ func (m *Module) installRustDesk(ctx core.TaskContext, am core.AssetManager, wu 
 	}
 
 	ctx.Info("Тихая установка RustDesk...")
-	installCmd := fmt.Sprintf(`start "" /B "%s" %s`, installerPath, rustDeskInstallArg)
-	if _, err := wu.RunCommand("cmd", "/C", installCmd); err != nil {
-		return err
-	}
-	if err := waitForRustDeskExecutable(2 * time.Minute); err != nil {
+	if _, err := wu.RunCommand(installerPath, rustDeskInstallArg); err != nil {
 		return err
 	}
 
 	if setPassword {
+		if err := waitForRustDeskExecutable(30 * time.Second); err != nil {
+			return err
+		}
 		ctx.Info("Установка пароля RustDesk...")
 		if _, err := wu.RunCommand(rustDeskExePath, "--password", password); err != nil {
 			return fmt.Errorf("не удалось установить пароль RustDesk: %w", err)

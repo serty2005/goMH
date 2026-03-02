@@ -510,7 +510,10 @@ func scanPluginZipFiles(startURL string, depthLimit int) ([]string, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	queue := []queueItem{{url: startURL, depth: 0}}
 	visited := map[string]struct{}{}
+	discovered := map[string]struct{}{startURL: {}}
 	zipSet := map[string]struct{}{}
+	totalPages := 1
+	processedPages := 0
 
 	for len(queue) > 0 {
 		item := queue[0]
@@ -523,6 +526,8 @@ func scanPluginZipFiles(startURL string, depthLimit int) ([]string, error) {
 			continue
 		}
 		visited[item.url] = struct{}{}
+		processedPages++
+		tui.InfoF("Парсинг плагинов: страница %d/%d -> %s", processedPages, totalPages, item.url)
 
 		dirs, zips, err := readDirectoryListing(client, item.url)
 		if err != nil {
@@ -533,9 +538,11 @@ func scanPluginZipFiles(startURL string, depthLimit int) ([]string, error) {
 			zipSet[zipURL] = struct{}{}
 		}
 		for _, dirURL := range dirs {
-			if _, ok := visited[dirURL]; ok {
+			if _, ok := discovered[dirURL]; ok {
 				continue
 			}
+			discovered[dirURL] = struct{}{}
+			totalPages++
 			queue = append(queue, queueItem{url: dirURL, depth: item.depth + 1})
 		}
 	}
