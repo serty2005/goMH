@@ -17,7 +17,7 @@
 		}
 	],
 	"self_update_config": {
-		"enabled": false,
+		"enabled": true,
 		"reference_url": "https://f.serty.top/distr/installer/goMH.exe",
 		"hash_url": "https://f.serty.top/distr/installer/goMH.md5",
 		"reference_url_x86": "https://f.serty.top/distr/installer/goMH_x86.exe",
@@ -271,13 +271,13 @@
 			"type": "file"
 		},
 		"Regime_Installer": {
-			"url": "https://f.serty.top/regime-1.5.1-523.msi",
+			"url": "https://f.serty.top/regime-1.5.2-600.msi",
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "HTTP"
 		},
 		"DTO_Installer": {
-			"url": "ftp://ftp.serty.top/KKT10-10.10.7.0-windows32-setup.exe",
+			"url": "ftp://ftp.serty.top/KKT10-10.10.8.0-windows32-setup.exe",
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "FTP"
