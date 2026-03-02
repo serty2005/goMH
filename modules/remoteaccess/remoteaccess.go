@@ -275,7 +275,10 @@ func (m *Module) installRustDesk(ctx core.TaskContext, am core.AssetManager, wu 
 	}
 
 	ctx.Info("Тихая установка RustDesk...")
-	if _, err := wu.RunCommand(installerPath, rustDeskInstallArg); err != nil {
+	if err := startRustDeskInstaller(installerPath, wu); err != nil {
+		return err
+	}
+	if err := waitForRustDeskExecutable(2 * time.Minute); err != nil {
 		return err
 	}
 
@@ -290,6 +293,24 @@ func (m *Module) installRustDesk(ctx core.TaskContext, am core.AssetManager, wu 
 	}
 
 	ctx.Success("RustDesk успешно установлен.")
+	return nil
+}
+
+func startRustDeskInstaller(installerPath string, wu core.WinUtils) error {
+	psScript := fmt.Sprintf(
+		"Start-Process -FilePath '%s' -ArgumentList '%s' -WindowStyle Hidden",
+		strings.ReplaceAll(installerPath, "'", "''"),
+		rustDeskInstallArg,
+	)
+	if _, err := wu.RunCommand(
+		"powershell",
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy", "Bypass",
+		"-Command", psScript,
+	); err != nil {
+		return fmt.Errorf("не удалось запустить установщик RustDesk: %w", err)
+	}
 	return nil
 }
 

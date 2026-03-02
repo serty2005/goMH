@@ -137,6 +137,7 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 
 	// 4. UI Выбора имени плагина
 	// selectPluginWithSearch возвращает ВСЕ доступные версии для выбранного имени
+	tui.ClearScreen()
 	selectedVersions, err := selectPluginWithSearch(pluginGroups, installed)
 	if err != nil {
 		if err == tui.ErrExitToMainMenu {
@@ -858,62 +859,34 @@ func formatVersionsInfo(versions []Plugin, installed bool) string {
 	return fmt.Sprintf("%s(%d версий)", status, len(versions))
 }
 
-// selectPluginVersion запрашивает у пользователя выбор между Stable и Latest версиями
+// selectPluginVersion запрашивает у пользователя выбор среди всех доступных версий
 func selectPluginVersion(versions []Plugin) (*Plugin, error) {
 	if len(versions) == 0 {
 		return nil, nil
 	}
 
-	// 1. Определяем "Стабильную" версию (без Preview в API)
-	var stable *Plugin
-	var stableVersions []Plugin
-	for _, v := range versions {
-		if !strings.Contains(strings.ToLower(v.ApiVersion), "preview") {
-			stableVersions = append(stableVersions, v)
+	sorted := append([]Plugin(nil), versions...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if cmp := compareSemanticVersions(sorted[i].PluginVersion, sorted[j].PluginVersion); cmp != 0 {
+			return cmp > 0
 		}
-	}
-	if len(stableVersions) > 0 {
-		// Ищем макс plugin_version среди стабильных API
-		stable = &stableVersions[0]
-		for i := range stableVersions {
-			// Сначала сравниваем API версии, если равны - версии плагина
-			if compareApiVersions(stableVersions[i].ApiVersion, stable.ApiVersion) > 0 {
-				stable = &stableVersions[i]
-			} else if stableVersions[i].ApiVersion == stable.ApiVersion {
-				if compareSemanticVersions(stableVersions[i].PluginVersion, stable.PluginVersion) > 0 {
-					stable = &stableVersions[i]
-				}
-			}
-		}
-	}
+		return compareApiVersions(sorted[i].ApiVersion, sorted[j].ApiVersion) > 0
+	})
 
-	// 2. Определяем "Последнюю" версию (вообще самую свежую, включая Preview)
-	latest := &versions[0]
-	for i := range versions {
-		if compareSemanticVersions(versions[i].PluginVersion, latest.PluginVersion) > 0 {
-			latest = &versions[i]
-		}
-	}
-
-	// Если стабильной нет, то последняя и есть единственная опция (она же "стабильная" в контексте выбора)
-	if stable == nil {
-		stable = latest
-	}
-
-	// Если версии совпадают, выбора нет
-	if stable.PluginVersion == latest.PluginVersion && stable.ApiVersion == latest.ApiVersion {
-		return stable, nil
-	}
-
-	// 3. Интерактивный выбор
+	latestVersion := sorted[0].PluginVersion
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		tui.ClearScreen()
 		tui.Title("\n--- Выберите версию плагина ---")
-		fmt.Printf("Плагин: %s\n\n", versions[0].Name)
+		fmt.Printf("Плагин: %s\n\n", sorted[0].Name)
 
-		fmt.Printf(" 1. Стабильная (API: %s, v%s)\n", stable.ApiVersion, stable.PluginVersion)
-		fmt.Printf(" 2. Новейшая/Preview (API: %s, v%s)\n", latest.ApiVersion, latest.PluginVersion)
+		for i, p := range sorted {
+			flags := ""
+			if p.PluginVersion == latestVersion {
+				flags += " [НОВЕЙШАЯ]"
+			}
+			fmt.Printf(" %d. v%s (API: %s)%s\n", i+1, p.PluginVersion, p.ApiVersion, flags)
+		}
 
 		fmt.Println("\n 0. Отмена")
 		fmt.Print("Ваш выбор: ")
@@ -921,17 +894,17 @@ func selectPluginVersion(versions []Plugin) (*Plugin, error) {
 		choiceStr, _ := reader.ReadString('\n')
 		choiceStr = strings.TrimSpace(choiceStr)
 
-		switch choiceStr {
-		case "1":
-			return stable, nil
-		case "2":
-			return latest, nil
-		case "0":
+		if choiceStr == "0" {
 			return nil, nil
-		default:
+		}
+
+		index, err := strconv.Atoi(choiceStr)
+		if err != nil || index < 1 || index > len(sorted) {
 			tui.Error("Неверный выбор.")
 			time.Sleep(1 * time.Second)
+			continue
 		}
+		return &sorted[index-1], nil
 	}
 }
 
