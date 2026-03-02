@@ -1,17 +1,19 @@
 package gui
 
 import (
+	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"time"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 )
 
-// GuiModuleItem описывает пункт меню в GUI
 type GuiModuleItem struct {
-	ID    string
-	Title string
+	ID      string
+	Title   string
+	Enabled bool
 }
 
 func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) {
@@ -21,25 +23,27 @@ func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) {
 	var progressBar *walk.ProgressBar
 	var contentArea *walk.Composite
 	var modulesList *walk.ListBox
+	var taskTable *walk.TableView
+	var runningLabel *walk.Label
+	var queuedLabel *walk.Label
 
-	// Формируем список модулей специально для GUI
-	// Мы игнорируем порядок в config.json и строим удобное меню
 	guiModules := []GuiModuleItem{
-		{ID: "iiko", Title: "iiko / Syrve (Дистрибутивы)"},
-		{ID: "CombinedInstallers", Title: "Установка ДТО, УТМ, ЛМ ЧЗ"},
-		{ID: "VComCaster", Title: "Сканеры ШК (VComCaster)"},
-		{ID: "RemoteAccess", Title: "Удаленный доступ"},
-		{ID: "FRPC", Title: "Проброс портов (FRPC)"},
-		{ID: "ServiceUtils", Title: "Утилиты обслуживания"},
+		{ID: "iiko", Title: "iiko / Syrve (Дистрибутивы)", Enabled: true},
+		{ID: "CombinedInstallers", Title: "Установка ДТО, УТМ, ЛМ ЧЗ", Enabled: false},
+		{ID: "VComCaster", Title: "Сканеры ШК (VComCaster)", Enabled: false},
+		{ID: "RemoteAccess", Title: "Удаленный доступ", Enabled: false},
+		{ID: "FRPC", Title: "Проброс портов (FRPC)", Enabled: false},
+		{ID: "ServiceUtils", Title: "Утилиты обслуживания", Enabled: false},
 	}
 
 	modListModel := NewModuleListModel(guiModules)
+	taskModel := NewTaskListModel()
 
 	if err := (MainWindow{
 		AssignTo: &mw,
 		Title:    "goMH - MyHoreca Tool (GUI Mode)",
-		MinSize:  Size{Width: 600, Height: 600}, // Чуть увеличим минимальный размер
-		Size:     Size{Width: 600, Height: 600},
+		MinSize:  Size{Width: 980, Height: 760},
+		Size:     Size{Width: 1080, Height: 800},
 		Layout:   VBox{},
 		Children: []Widget{
 			HSplitter{
@@ -47,58 +51,156 @@ func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) {
 					ListBox{
 						AssignTo: &modulesList,
 						Model:    modListModel,
-						// Увеличиваем шрифт, чтобы элементы были крупнее (x3 визуально от стандарта)
-						Font: Font{PointSize: 14, Family: "Segoe UI"},
-						// MaxSize: Size{Width: 300}, // Немного шире панель меню
+						Font:     Font{PointSize: 11, Family: "Segoe UI"},
+						MinSize:  Size{Width: 280},
 					},
 					Composite{
 						AssignTo: &contentArea,
-						Layout:   HBox{},
+						Layout:   VBox{},
 						Children: []Widget{
 							Label{Text: "Выберите модуль слева"},
 						},
 					},
 				},
 			},
+			GroupBox{
+				Title:   "Очередь задач",
+				Layout:  VBox{},
+				MinSize: Size{Height: 180},
+				Children: []Widget{
+					TableView{
+						AssignTo:            &taskTable,
+						Model:               taskModel,
+						AlternatingRowBG:    true,
+						ColumnsOrderable:    false,
+						LastColumnStretched: true,
+						MultiSelection:      false,
+						ColumnsSizable:      true,
+						Columns: []TableViewColumn{
+							{Title: "Статус", Width: 90},
+							{Title: "Модуль", Width: 90},
+							{Title: "Задача", Width: 260},
+							{Title: "Этап", Width: 320},
+							{Title: "Прогресс", Width: 90},
+							{Title: "Время", Width: 120},
+						},
+					},
+					Composite{
+						Layout: HBox{MarginsZero: true},
+						Children: []Widget{
+							Label{AssignTo: &runningLabel, Text: "Running: 0"},
+							Label{AssignTo: &queuedLabel, Text: "Queued: 0"},
+						},
+					},
+				},
+			},
 			Composite{
-				// Фиксированная высота для лога (150px)
-				MinSize: Size{Height: 150},
-				MaxSize: Size{Height: 150},
+				MinSize: Size{Height: 170},
 				Layout:  VBox{Margins: Margins{Top: 5, Bottom: 5, Left: 5, Right: 5}},
 				Children: []Widget{
 					Label{Text: "Журнал операций:"},
-					TextEdit{
-						AssignTo: &logText,
-						ReadOnly: true,
-						VScroll:  true,
-					},
-					ProgressBar{
-						AssignTo: &progressBar,
-						MaxValue: 100,
-					},
+					TextEdit{AssignTo: &logText, ReadOnly: true, VScroll: true},
+					ProgressBar{AssignTo: &progressBar, MinValue: 0, MaxValue: 100, Value: 0},
 				},
 			},
 		},
 		StatusBarItems: []StatusBarItem{
-			{AssignTo: &statusBar, Text: "Готов к работе", Width: 300},
+			{AssignTo: &statusBar, Text: "Готов к работе", Width: 500},
 		},
 	}.Create()); err != nil {
 		panic(err)
 	}
 
 	ctx := NewGuiContext(mw, logText, statusBar, progressBar)
-	tm := NewTaskManager(mw, progressBar)
+	tm := NewTaskManager()
+
+	refreshQueue := func() {
+		taskModel.Replace(tm.Snapshots())
+		running, queued := tm.Stats()
+		runningLabel.SetText(fmt.Sprintf("Running: %d", running))
+		queuedLabel.SetText(fmt.Sprintf("Queued: %d", queued))
+	}
+
+	tm.OnTaskEnqueued(func(s TaskSnapshot) {
+		mw.Synchronize(func() {
+			ctx.AppendRawLog(fmt.Sprintf("[%s][%s][%s][QUEUE] %s", time.Now().Format("15:04:05"), s.ModuleID, s.ID, s.Title))
+			refreshQueue()
+		})
+	})
+	tm.OnTaskStarted(func(s TaskSnapshot) {
+		mw.Synchronize(func() {
+			ctx.SetStatus(fmt.Sprintf("Выполняется: %s", s.Title))
+			progressBar.SetValue(0)
+			refreshQueue()
+		})
+	})
+	tm.OnTaskProgress(func(s TaskSnapshot) {
+		mw.Synchronize(func() {
+			ctx.SetStatus(s.StageText)
+			progressBar.SetValue(s.Progress)
+			refreshQueue()
+		})
+	})
+	tm.OnTaskLog(func(_ TaskSnapshot, line string) {
+		mw.Synchronize(func() {
+			ctx.AppendRawLog(line)
+		})
+	})
+	tm.OnTaskFinished(func(s TaskSnapshot) {
+		mw.Synchronize(func() {
+			if s.State == TaskSuccess {
+				ctx.SetStatus("Задача завершена успешно")
+			} else {
+				ctx.SetStatus("Задача завершена с ошибкой")
+			}
+			progressBar.SetValue(s.Progress)
+			refreshQueue()
+		})
+	})
+
 	tm.Start()
 
 	modulesList.CurrentIndexChanged().Attach(func() {
 		idx := modulesList.CurrentIndex()
-		if idx >= 0 {
-			modItem := guiModules[idx]
-			loadModuleForm(contentArea, modItem.ID, am, wu, tm, ctx)
+		if idx < 0 || idx >= len(guiModules) {
+			return
 		}
+		modItem := guiModules[idx]
+		if !modItem.Enabled {
+			loadDisabledModuleForm(contentArea, modItem)
+			ctx.Warn("Раздел пока недоступен в GUI: " + modItem.Title)
+			return
+		}
+		loadModuleForm(contentArea, modItem.ID, am, wu, tm, ctx)
 	})
 
+	if len(guiModules) > 0 {
+		modulesList.SetCurrentIndex(0)
+	}
+
 	mw.Run()
+}
+
+func loadDisabledModuleForm(parent *walk.Composite, item GuiModuleItem) {
+	parent.SetSuspended(true)
+	defer parent.SetSuspended(false)
+
+	children := parent.Children()
+	var toDispose []walk.Widget
+	for i := 0; i < children.Len(); i++ {
+		toDispose = append(toDispose, children.At(i))
+	}
+	for _, w := range toDispose {
+		w.Dispose()
+	}
+
+	_ = Composite{
+		Layout: VBox{},
+		Children: []Widget{
+			Label{Text: item.Title, Font: Font{PointSize: 12, Bold: true}},
+			Label{Text: "Скоро: модуль пока доступен только в TUI режиме."},
+		},
+	}.Create(NewBuilder(parent))
 }
 
 func loadModuleForm(parent *walk.Composite, moduleID string, am core.AssetManager, wu core.WinUtils, tm *TaskManager, ctx *GuiContext) {
@@ -126,8 +228,6 @@ func loadModuleForm(parent *walk.Composite, moduleID string, am core.AssetManage
 	}
 }
 
-// --- Module List Model ---
-
 type ModuleListModel struct {
 	walk.ListModelBase
 	Items []GuiModuleItem
@@ -142,5 +242,9 @@ func (m *ModuleListModel) ItemCount() int {
 }
 
 func (m *ModuleListModel) Value(index int) interface{} {
-	return m.Items[index].Title // Теперь отображаем Title
+	item := m.Items[index]
+	if item.Enabled {
+		return item.Title
+	}
+	return item.Title + " (скоро)"
 }
