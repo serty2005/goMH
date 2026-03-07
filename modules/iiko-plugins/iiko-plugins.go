@@ -1,7 +1,6 @@
 package iikoplugins
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"goMH/core"
@@ -65,6 +64,12 @@ type Manifest struct {
 // Module реализует интерфейс core.Installer
 type Module struct{}
 
+type InstallSelection struct {
+	Plugin            *Plugin
+	CurrentFolderName string
+	IsUpdate          bool
+}
+
 func (m *Module) ID() string       { return "iiko-plugins" }
 func (m *Module) MenuText() string { return "Установка плагинов iiko" }
 
@@ -75,35 +80,38 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		slog.Warn("Попытка запуска без прав администратора")
 		return fmt.Errorf("для установки плагинов требуются права администратора")
 	}
-	return m.MenuInstallPlugins(am, wu)
+	selection, err := m.ConfigureInstall(am, wu)
+	if err != nil {
+		return err
+	}
+	if selection == nil {
+		return nil
+	}
+	return m.ExecuteInstall(am, wu, selection)
 }
 
-// MenuInstallPlugins выполняет интерактивную установку плагинов через меню
-func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) error {
-	slog.Info("Начало процедуры выбора и установки плагина")
+func (m *Module) ConfigureInstall(am core.AssetManager, wu core.WinUtils) (*InstallSelection, error) {
+	slog.Info("Подготовка выбора плагина iiko")
 	cfg := am.Cfg()
 
 	// 1. Получение версии iikoFront
 	version, err := GetIikoFrontVersion(wu)
 	if err != nil {
 		slog.Error("Ошибка определения версии iikoFront", "error", err)
-		return fmt.Errorf("не удалось определить версию iikoFront: %w", err)
+		return nil, fmt.Errorf("не удалось определить версию iikoFront: %w", err)
 	}
-	tui.InfoF("Обнаружена версия iikoFront: %s", version)
-
-	// 2. Загрузка манифеста
 	manifest, err := LoadManifest()
 	if err != nil {
 		slog.Error("Ошибка загрузки манифеста", "error", err)
-		return err
+		return nil, err
 	}
 	if len(manifest.ApiVersions) == 0 {
-		return fmt.Errorf("в манифесте нет таблицы api_compatibility: невозможно определить совместимость API для iikoFront")
+		return nil, fmt.Errorf("в манифесте нет таблицы api_compatibility: невозможно определить совместимость API для iikoFront")
 	}
 	livePlugins, err := LoadLivePlugins()
 	if err != nil {
 		slog.Error("Ошибка загрузки актуального списка плагинов", "error", err)
-		return err
+		return nil, err
 	}
 	manifest.Plugins = livePlugins
 
@@ -135,25 +143,21 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 		installed = []string{}
 	}
 
-	// 4. UI Выбора имени плагина
-	// selectPluginWithSearch возвращает ВСЕ доступные версии для выбранного имени
-	tui.ClearScreen()
 	selectedVersions, err := selectPluginWithSearch(pluginGroups, installed)
 	if err != nil {
 		if err == tui.ErrExitToMainMenu {
 			slog.Info("Пользователь вышел в главное меню")
-			return err
+			return nil, err
 		}
-		return err
+		return nil, err
 	}
 	if len(selectedVersions) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	// 5. UI Выбора конкретной версии (Stable vs Preview)
 	selectedPlugin, err := selectPluginVersion(selectedVersions)
 	if err != nil || selectedPlugin == nil {
-		return nil // Отмена или ошибка
+		return nil, err
 	}
 
 	slog.Info("Выбран плагин для установки", "name", selectedPlugin.Name, "version", selectedPlugin.PluginVersion)
@@ -162,27 +166,30 @@ func (m *Module) MenuInstallPlugins(am core.AssetManager, wu core.WinUtils) erro
 	folderName := findInstalledFolderName(installed, selectedPlugin.Name)
 	isUpdate := folderName != ""
 
-	if isUpdate {
-		tui.InfoF("Плагин %s уже установлен (папка: %s), выполняем обновление...", selectedPlugin.Name, folderName)
-	} else {
-		tui.InfoF("Устанавливаем новый плагин: %s", selectedPlugin.Name)
+	return &InstallSelection{
+		Plugin:            selectedPlugin,
+		CurrentFolderName: folderName,
+		IsUpdate:          isUpdate,
+	}, nil
+}
+
+func (m *Module) ExecuteInstall(am core.AssetManager, wu core.WinUtils, selection *InstallSelection) error {
+	if selection == nil || selection.Plugin == nil {
+		return fmt.Errorf("не выбрана конфигурация установки плагина")
 	}
 
-	// 6. Установка / Обновление (Единая точка входа)
 	opts := deployOptions{
-		Plugin:            selectedPlugin,
-		RootPath:          cfg.RootPath,
+		Plugin:            selection.Plugin,
+		RootPath:          am.Cfg().RootPath,
 		PluginsDir:        DefaultIikoPluginsDir,
-		IsUpdate:          isUpdate,
-		CurrentFolderName: folderName,
+		IsUpdate:          selection.IsUpdate,
+		CurrentFolderName: selection.CurrentFolderName,
 	}
 
 	if err := deployPlugin(am, wu, opts); err != nil {
-		slog.Error("Ошибка при развертывании плагина", "plugin", selectedPlugin.Name, "error", err)
+		slog.Error("Ошибка при развертывании плагина", "plugin", selection.Plugin.Name, "error", err)
 		return err
 	}
-
-	tui.SuccessF("Плагин %s успешно %s", selectedPlugin.Name, map[bool]string{true: "обновлен", false: "установлен"}[isUpdate])
 	return nil
 }
 
@@ -874,38 +881,31 @@ func selectPluginVersion(versions []Plugin) (*Plugin, error) {
 	})
 
 	latestVersion := sorted[0].PluginVersion
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		tui.ClearScreen()
-		tui.Title("\n--- Выберите версию плагина ---")
-		fmt.Printf("Плагин: %s\n\n", sorted[0].Name)
-
-		for i, p := range sorted {
-			flags := ""
-			if p.PluginVersion == latestVersion {
-				flags += " [НОВЕЙШАЯ]"
-			}
-			fmt.Printf(" %d. v%s (API: %s)%s\n", i+1, p.PluginVersion, p.ApiVersion, flags)
+	items := make([]tui.ChoiceItem, 0, len(sorted))
+	for _, plugin := range sorted {
+		description := fmt.Sprintf("API %s", plugin.ApiVersion)
+		if plugin.PluginVersion == latestVersion {
+			description += " | новейшая"
 		}
-
-		fmt.Println("\n 0. Отмена")
-		fmt.Print("Ваш выбор: ")
-
-		choiceStr, _ := reader.ReadString('\n')
-		choiceStr = strings.TrimSpace(choiceStr)
-
-		if choiceStr == "0" {
-			return nil, nil
-		}
-
-		index, err := strconv.Atoi(choiceStr)
-		if err != nil || index < 1 || index > len(sorted) {
-			tui.Error("Неверный выбор.")
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		return &sorted[index-1], nil
+		items = append(items, tui.ChoiceItem{
+			Title:       "v" + plugin.PluginVersion,
+			Description: description,
+			Meta:        plugin.Name,
+			FilterValue: strings.ToLower(plugin.Name + " " + plugin.PluginVersion + " " + plugin.ApiVersion),
+		})
 	}
+
+	index, err := tui.SelectItem(items, tui.SelectionConfig{
+		Title:    "Выберите версию плагина",
+		Subtitle: sorted[0].Name,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(sorted) {
+		return nil, nil
+	}
+	return &sorted[index], nil
 }
 
 // selectBestPluginVersion (для автообновления) - предпочитает Stable, иначе берет Latest

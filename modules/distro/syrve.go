@@ -59,13 +59,16 @@ func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager
 	if comp.RunAfter != "" {
 		if ver, err := wu.GetFileVersion(comp.RunAfter); err == nil {
 			installedVer = ver
-			tui.InfoF("Установлена версия: %s", installedVer)
 		}
 	}
 
 	// Выбор режима (Portable) - здесь можно оставить SelectSimple, т.к. всего 2 варианта
 	if comp.PortableArchiveKey != "" {
-		mode, err := tui.SelectSimple([]string{"Стандартная установка", "Портативная версия"}, "Выберите режим")
+		label := "Выберите режим"
+		if installedVer != "" {
+			label = fmt.Sprintf("Выберите режим (установлена %s)", installedVer)
+		}
+		mode, err := tui.SelectSimple([]string{"Стандартная установка", "Портативная версия"}, label)
 		if err != nil {
 			return nil, err
 		}
@@ -75,8 +78,11 @@ func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager
 	}
 
 	// Получение версий (JSON manifest)
-	ctx.Info("Получение списка версий Syrve...")
-	versions, err := h.fetchVersions()
+	versions, err := tui.RunWithSpinner(
+		"Версии Syrve",
+		"Загрузка списка доступных версий...",
+		h.fetchVersions,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -91,12 +97,6 @@ func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager
 		return nil, err
 	}
 	cfg.Version = version
-
-	// Проверка даунгрейда
-	if installedVer != "" && compareSemanticVersions(version, installedVer) < 0 {
-		tui.Warn(fmt.Sprintf("\nВНИМАНИЕ: Понижение версии с %s до %s.", installedVer, version))
-		tui.Warn("Рекомендуется удаление старой версии.")
-	}
 
 	return cfg, nil
 }
@@ -133,10 +133,13 @@ func (h *syrveHandler) configurePortable(ctx core.TaskContext, am core.AssetMana
 	selectedFTP := ftpList[0]
 	cfg.PortableFTPConfig = selectedFTP
 
-	ctx.Info(fmt.Sprintf("Использование FTP источника: %s", selectedFTP.Host))
-	ctx.Info("Поиск portable версий на FTP...")
-
-	entries, err := am.ListFTP(selectedFTP, pCfg.FtpSource.Directory)
+	entries, err := tui.RunWithSpinner(
+		"Portable Syrve",
+		fmt.Sprintf("Чтение каталога FTP %s...", selectedFTP.Host),
+		func() ([]core.FTPEntry, error) {
+			return am.ListFTP(selectedFTP, pCfg.FtpSource.Directory)
+		},
+	)
 	if err != nil {
 		return nil, err
 	}

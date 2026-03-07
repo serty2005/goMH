@@ -1,7 +1,6 @@
 package remoteaccess
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -80,63 +79,56 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 // Configure - показывает меню со статусами и возвращает выбор
 func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*RemoteAccessConfig, error) {
-	// Определяем статусы служб
 	tvInstalled, _ := wu.ServiceExists("TeamViewer")
 	lmInstalled, _ := wu.ServiceExists("ROMService")
 	rustDeskInstalled := isRustDeskInstalled()
 	posrelaydInstalled, _ := wu.ServiceExists("MH_POSRelayd")
 
-	tui.ClearScreen()
-	tui.Title("\n--- Меню установки средств удаленного доступа ---")
-
-	printStatus := func(installed bool) string {
-		if installed {
-			return tui.ColorGreen + "[установлено]" + tui.ColorReset
-		}
-		return tui.ColorRed + "[не установлено]" + tui.ColorReset
+	items := []tui.ChoiceItem{
+		{
+			Title:       "TeamViewer",
+			Description: stateText(tvInstalled, "уже установлен", "будет установлен"),
+			Meta:        statusBadge(tvInstalled),
+			Disabled:    tvInstalled,
+		},
+		{
+			Title:       "LiteManager",
+			Description: stateText(lmInstalled, "уже установлен", "будет установлен"),
+			Meta:        statusBadge(lmInstalled),
+			Disabled:    lmInstalled,
+		},
+		{
+			Title:       "RustDesk",
+			Description: stateText(rustDeskInstalled, "уже установлен", "будет установлен"),
+			Meta:        statusBadge(rustDeskInstalled),
+			Disabled:    rustDeskInstalled,
+		},
+		{
+			Title:       "POSRelayd Agent",
+			Description: stateText(posrelaydInstalled, "доступна переустановка", "будет установлен"),
+			Meta:        statusBadge(posrelaydInstalled),
+		},
 	}
 
-	fmt.Printf(" 1. TeamViewer %s\n", printStatus(tvInstalled))
-	fmt.Printf(" 2. LiteManager %s\n", printStatus(lmInstalled))
-	fmt.Printf(" 3. RustDesk %s\n", printStatus(rustDeskInstalled))
-	fmt.Printf(" 4. POSRelayd Agent %s (возможна переустановка)\n", printStatus(posrelaydInstalled))
-	fmt.Println("\n 0. Назад в главное меню")
-	fmt.Print("Выберите пункт: ")
-
-	key, err := tui.ReadKey()
+	choice, err := tui.SelectItem(items, tui.SelectionConfig{
+		Title:    "Средства удаленного доступа",
+		Subtitle: "Недоступные варианты уже установлены",
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	switch key {
-	case "1":
-		if tvInstalled {
-			tui.Warn("TeamViewer уже установлен.")
-			tui.WaitForAnyKey()
-			return m.Configure(ctx, am, wu) // Рекурсия для перерисовки меню (можно просто continue в цикле Run, но это не красиво)
-		}
+	switch choice {
+	case 0:
 		return &RemoteAccessConfig{Tool: ToolTeamViewer}, nil
-	case "2":
-		if lmInstalled {
-			tui.Warn("LiteManager уже установлен.")
-			tui.WaitForAnyKey()
-			return m.Configure(ctx, am, wu)
-		}
+	case 1:
 		return &RemoteAccessConfig{Tool: ToolLiteManager}, nil
-	case "3":
-		if rustDeskInstalled {
-			tui.Warn("RustDesk уже установлен.")
-			tui.WaitForAnyKey()
-			return m.Configure(ctx, am, wu)
-		}
+	case 2:
 		return &RemoteAccessConfig{Tool: ToolRustDesk}, nil
-	case "4":
-		// POSRelayd можно переустанавливать
+	case 3:
 		return &RemoteAccessConfig{Tool: ToolPOSRelayd}, nil
-	case "0":
-		return nil, nil
 	default:
-		return m.Configure(ctx, am, wu) // Повтор при неверном вводе
+		return nil, nil
 	}
 }
 
@@ -418,30 +410,49 @@ func waitForRustDeskExecutable(timeout time.Duration) error {
 }
 
 func askRustDeskPassword() (bool, string, error) {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Установить пароль? (y/n): ")
-	answer, err := reader.ReadString('\n')
+	confirmed, err := tui.Confirm("Пароль RustDesk", "Добавить пароль после установки?", "Да, задать пароль")
 	if err != nil {
 		return false, "", err
 	}
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	if answer != "y" && answer != "yes" {
+	if !confirmed {
 		return false, "", nil
 	}
 
 	for {
-		fmt.Print("Введите пароль RustDesk: ")
-		password, err := reader.ReadString('\n')
+		password, err := tui.PromptText(tui.InputConfig{
+			Title:       "Пароль RustDesk",
+			Subtitle:    "Пароль будет применен после тихой установки",
+			Placeholder: "Введите пароль",
+			Password:    true,
+			Validate: func(value string) error {
+				if strings.TrimSpace(value) == "" {
+					return fmt.Errorf("пароль не может быть пустым")
+				}
+				return nil
+			},
+		})
 		if err != nil {
 			return false, "", err
 		}
-		password = strings.TrimSpace(password)
-		if password == "" {
-			tui.Warn("Пароль не может быть пустым.")
-			continue
+		if strings.TrimSpace(password) == "" {
+			return false, "", nil
 		}
-		return true, password, nil
+		return true, strings.TrimSpace(password), nil
 	}
+}
+
+func statusBadge(installed bool) string {
+	if installed {
+		return "установлено"
+	}
+	return "доступно"
+}
+
+func stateText(installed bool, present string, absent string) string {
+	if installed {
+		return present
+	}
+	return absent
 }
 
 func resolveRustDeskInstallerURL() (string, error) {

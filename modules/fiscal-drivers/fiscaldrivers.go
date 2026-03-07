@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -60,32 +59,28 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager) (*DriverI
 		return nil, errors.New("в конфигурации не определено ни одного драйвера")
 	}
 
-	for {
-		tui.ClearScreen()
-		tui.Title("\n--- Выберите драйвер для установки ---")
-		for i, driver := range drivers {
-			fmt.Printf(" %d. %s\n", i+1, driver.MenuText)
-		}
-		fmt.Println("\n 0. Назад")
-		fmt.Print("Выберите пункт: ")
-
-		key, err := tui.ReadKey()
-		if err != nil {
-			return nil, err
-		}
-		if key == "0" {
-			return nil, nil // Назад
-		}
-
-		choice, err := strconv.Atoi(key)
-		if err != nil || choice < 1 || choice > len(drivers) {
-			continue // Игнорируем неверный ввод
-		}
-
-		selected := drivers[choice-1]
-		slog.Info("Пользователь выбрал драйвер", "name", selected.MenuText, "id", selected.ID)
-		return &DriverInstallConfig{Driver: selected}, nil
+	items := make([]tui.ChoiceItem, 0, len(drivers))
+	for _, driver := range drivers {
+		items = append(items, tui.ChoiceItem{
+			Title: driver.MenuText,
+			Meta:  driver.ID,
+		})
 	}
+
+	choice, err := tui.SelectItem(items, tui.SelectionConfig{
+		Title:    "Выберите драйвер",
+		Subtitle: "Esc для возврата в меню",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if choice < 0 || choice >= len(drivers) {
+		return nil, nil
+	}
+
+	selected := drivers[choice]
+	slog.Info("Пользователь выбрал драйвер", "name", selected.MenuText, "id", selected.ID)
+	return &DriverInstallConfig{Driver: selected}, nil
 }
 
 // Execute - скачивание и установка (фоновый процесс)

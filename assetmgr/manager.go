@@ -26,7 +26,17 @@ import (
 var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
 
 type Manager struct {
-	cfg *config.Config
+	cfg     *config.Config
+	runtime runtimeHooks
+}
+
+type runtimeHooks struct {
+	stdout          io.Writer
+	progress        io.Writer
+	statusFn        func(string)
+	percentFn       func(string, int)
+	downloadCtx     context.Context
+	downloadStateFn func(bool, string)
 }
 
 func New(cfg *config.Config) (*Manager, error) {
@@ -36,12 +46,40 @@ func New(cfg *config.Config) (*Manager, error) {
 	if err := os.MkdirAll(cfg.AssetsCachePath, 0755); err != nil {
 		return nil, fmt.Errorf("не удалось создать директорию кэша %s: %w", cfg.AssetsCachePath, err)
 	}
-	return &Manager{cfg: cfg}, nil
+	return &Manager{
+		cfg: cfg,
+		runtime: runtimeHooks{
+			stdout:   os.Stdout,
+			progress: os.Stderr,
+		},
+	}, nil
 }
 
 // Cfg предоставляет доступ к конфигурации из других пакетов.
 func (m *Manager) Cfg() *config.Config {
 	return m.cfg
+}
+
+func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn func(string), percentFn func(string, int), downloadCtx context.Context, downloadStateFn func(bool, string)) *Manager {
+	cloned := *m
+	cloned.runtime = runtimeHooks{
+		stdout:          stdout,
+		progress:        progress,
+		statusFn:        statusFn,
+		percentFn:       percentFn,
+		downloadCtx:     downloadCtx,
+		downloadStateFn: downloadStateFn,
+	}
+	if cloned.runtime.stdout == nil {
+		cloned.runtime.stdout = io.Discard
+	}
+	if cloned.runtime.progress == nil {
+		cloned.runtime.progress = io.Discard
+	}
+	if cloned.runtime.downloadCtx == nil {
+		cloned.runtime.downloadCtx = context.Background()
+	}
+	return &cloned
 }
 
 func (m *Manager) DownloadToCache(assetName string) (string, error) {
@@ -100,7 +138,7 @@ func (m *Manager) ProcessFromCache(assetName, cachePath string) error {
 		return fmt.Errorf("неизвестный тип ресурса: %s", assetInfo.Type)
 	}
 
-	fmt.Printf("Ресурс '%s' успешно обработан из кэша в '%s'.\n", assetName, finalDestPath)
+	m.consolePrintf("Ресурс '%s' успешно обработан из кэша в '%s'.\n", assetName, finalDestPath)
 	return nil
 }
 
@@ -124,6 +162,10 @@ func (m *Manager) Get(assetName string) (string, error) {
 // ftpPath - это путь на сервере, например /distr/iiko/Setup.Front.exe
 func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error) {
 	fileName := sanitizeProgressLabel(filepath.Base(ftpPath))
+	m.reportStatus("Скачивание " + fileName)
+	m.reportProgress(fileName, 0)
+	m.reportDownloadState(true, fileName)
+	defer m.reportDownloadState(false, fileName)
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
@@ -146,16 +188,17 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 
 	remoteSize, err := c.FileSize(ftpPath)
 	if err != nil {
-		fmt.Printf("Предупреждение: не удалось получить размер файла '%s' на FTP: %v. Загрузка будет выполнена без проверки.\n", fileName, err)
+		m.consolePrintf("Предупреждение: не удалось получить размер файла '%s' на FTP: %v. Загрузка будет выполнена без проверки.\n", fileName, err)
 		remoteSize = -1
 	}
 
 	if fi, err := os.Stat(localPath); err == nil {
 		if remoteSize > 0 && fi.Size() == remoteSize {
-			fmt.Printf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+			m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+			m.reportProgress(fileName, 100)
 			return true, nil
 		}
-		fmt.Printf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
+		m.consolePrintf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
 	}
 
 	resp, err := c.Retr(ftpPath)
@@ -163,6 +206,7 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 		return false, fmt.Errorf("не удалось начать скачивание с FTP: %w", err)
 	}
 	defer resp.Close()
+	m.cancelFTPDownload(c, resp)
 
 	destFile, err := os.Create(localPath)
 	if err != nil {
@@ -170,11 +214,15 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 	}
 	defer destFile.Close()
 
-	bar := CreateProgressBar(remoteSize, fileName)
-	if _, err := io.Copy(io.MultiWriter(destFile, bar), resp); err != nil {
+	bar := m.createProgressBar(remoteSize, fileName)
+	tracker := newProgressTracker(remoteSize, fileName)
+	tracker.report = m.reportProgress
+	reader := m.wrapDownloadReader(resp)
+	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
 		os.Remove(localPath)
 		return false, fmt.Errorf("ошибка во время копирования потока: %w", err)
 	}
+	m.reportProgress(fileName, 100)
 
 	return false, nil
 }
@@ -182,13 +230,17 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 // DownloadHTTPWithProgress скачивает файл по HTTP с проверкой размера и прогресс-баром.
 func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, error) {
 	fileName := sanitizeProgressLabel(filepath.Base(httpURL))
+	m.reportStatus("Скачивание " + fileName)
+	m.reportProgress(fileName, 0)
+	m.reportDownloadState(true, fileName)
+	defer m.reportDownloadState(false, fileName)
 
 	// Убедимся, что директория для сохранения файла существует
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
 	}
 
-	req, err := http.NewRequest("GET", httpURL, nil)
+	req, err := http.NewRequestWithContext(m.downloadContext(), "GET", httpURL, nil)
 	if err != nil {
 		return false, err
 	}
@@ -207,10 +259,11 @@ func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, err
 
 	if fi, err := os.Stat(localPath); err == nil {
 		if remoteSize > 0 && fi.Size() == remoteSize {
-			fmt.Printf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+			m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+			m.reportProgress(fileName, 100)
 			return true, nil
 		}
-		fmt.Printf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
+		m.consolePrintf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
 	}
 
 	destFile, err := os.Create(localPath)
@@ -219,11 +272,15 @@ func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, err
 	}
 	defer destFile.Close()
 
-	bar := CreateProgressBar(remoteSize, fileName)
-	if _, err := io.Copy(io.MultiWriter(destFile, bar), resp.Body); err != nil {
+	bar := m.createProgressBar(remoteSize, fileName)
+	tracker := newProgressTracker(remoteSize, fileName)
+	tracker.report = m.reportProgress
+	reader := m.wrapDownloadReader(resp.Body)
+	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
 		os.Remove(localPath)
 		return false, err
 	}
+	m.reportProgress(fileName, 100)
 
 	return false, nil
 }
@@ -262,17 +319,17 @@ func (m *Manager) UnpackToFlatDir(assetName, cachePath, destDir string) error {
 // --- Вспомогательные функции ---
 
 // createProgressBar создает и настраивает общий прогресс-бар для скачиваний.
-func CreateProgressBar(totalSize int64, description string) *progressbar.ProgressBar {
+func (m *Manager) createProgressBar(totalSize int64, description string) *progressbar.ProgressBar {
 	description = sanitizeProgressLabel(description)
 	return progressbar.NewOptions64(
 		totalSize,
 		progressbar.OptionSetDescription(fmt.Sprintf("Скачивание %s", description)),
-		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionSetWriter(m.progressWriter()),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(40),
 		progressbar.OptionThrottle(100*time.Millisecond),
 		progressbar.OptionShowCount(),
-		progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }),
+		progressbar.OptionOnCompletion(func() { m.consoleFprintProgress("\n") }),
 		progressbar.OptionSpinnerType(14),
 		progressbar.OptionFullWidth(),
 		progressbar.OptionClearOnFinish(),
@@ -293,6 +350,41 @@ func sanitizeProgressLabel(label string) string {
 		return string(runes[:47]) + "..."
 	}
 	return label
+}
+
+type progressTracker struct {
+	total       int64
+	written     int64
+	description string
+	lastPercent int
+	report      func(string, int)
+}
+
+func newProgressTracker(total int64, description string) *progressTracker {
+	return &progressTracker{
+		total:       total,
+		description: description,
+		lastPercent: -1,
+	}
+}
+
+func (w *progressTracker) Write(p []byte) (int, error) {
+	if w.total <= 0 {
+		return len(p), nil
+	}
+
+	w.written += int64(len(p))
+	percent := int((w.written * 100) / w.total)
+	if percent > 100 {
+		percent = 100
+	}
+	if percent != w.lastPercent {
+		w.lastPercent = percent
+		if w.report != nil {
+			w.report(w.description, percent)
+		}
+	}
+	return len(p), nil
 }
 
 func (m *Manager) ListFTP(ftpCfg config.FTPConfig, path string) ([]core.FTPEntry, error) {
@@ -527,10 +619,10 @@ func (m *Manager) PurgeAsset(assetName string) error {
 	fileName := filepath.Base(assetInfo.URL)
 	localCachePath := filepath.Join(m.cfg.AssetsCachePath, fileName)
 	if _, err := os.Stat(localCachePath); err == nil {
-		fmt.Printf("Удаление файла из кэша: %s\n", localCachePath)
+		m.consolePrintf("Удаление файла из кэша: %s\n", localCachePath)
 		if err := os.Remove(localCachePath); err != nil {
 			// Не критичная ошибка, просто предупреждаем
-			fmt.Printf("Предупреждение: не удалось удалить файл из кэша %s: %v\n", localCachePath, err)
+			m.consolePrintf("Предупреждение: не удалось удалить файл из кэша %s: %v\n", localCachePath, err)
 		}
 	}
 
@@ -538,13 +630,96 @@ func (m *Manager) PurgeAsset(assetName string) error {
 	if assetInfo.Destination != "" {
 		finalDestPath := filepath.Join(m.cfg.RootPath, assetInfo.Destination)
 		if _, err := os.Stat(finalDestPath); err == nil {
-			fmt.Printf("Удаление директории назначения: %s\n", finalDestPath)
+			m.consolePrintf("Удаление директории назначения: %s\n", finalDestPath)
 			if err := os.RemoveAll(finalDestPath); err != nil {
 				// Тоже не критично, но нужно предупредить
-				fmt.Printf("Предупреждение: не удалось удалить директорию назначения %s: %v\n", finalDestPath, err)
+				m.consolePrintf("Предупреждение: не удалось удалить директорию назначения %s: %v\n", finalDestPath, err)
 			}
 		}
 	}
 
 	return nil
+}
+
+func (m *Manager) consolePrintf(format string, args ...interface{}) {
+	writer := m.runtime.stdout
+	if writer == nil {
+		writer = io.Discard
+	}
+	fmt.Fprintf(writer, format, args...)
+}
+
+func (m *Manager) consoleFprintProgress(text string) {
+	writer := m.runtime.progress
+	if writer == nil {
+		writer = io.Discard
+	}
+	fmt.Fprint(writer, text)
+}
+
+func (m *Manager) progressWriter() io.Writer {
+	if m.runtime.progress == nil {
+		return io.Discard
+	}
+	return m.runtime.progress
+}
+
+func (m *Manager) reportStatus(text string) {
+	if m.runtime.statusFn != nil {
+		m.runtime.statusFn(text)
+	}
+}
+
+func (m *Manager) reportProgress(description string, percent int) {
+	if m.runtime.percentFn != nil {
+		m.runtime.percentFn(description, percent)
+	}
+}
+
+func (m *Manager) reportDownloadState(active bool, description string) {
+	if m.runtime.downloadStateFn != nil {
+		m.runtime.downloadStateFn(active, description)
+	}
+}
+
+func (m *Manager) downloadContext() context.Context {
+	if m.runtime.downloadCtx == nil {
+		return context.Background()
+	}
+	return m.runtime.downloadCtx
+}
+
+func (m *Manager) wrapDownloadReader(reader io.Reader) io.Reader {
+	return &downloadReader{
+		ctx:    m.downloadContext(),
+		reader: reader,
+	}
+}
+
+func (m *Manager) cancelFTPDownload(conn *ftp.ServerConn, reader io.Closer) {
+	if m.runtime.downloadCtx == nil {
+		return
+	}
+	ctx := m.runtime.downloadCtx
+	go func() {
+		<-ctx.Done()
+		_ = reader.Close()
+		_ = conn.Quit()
+	}()
+}
+
+type downloadReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *downloadReader) Read(p []byte) (int, error) {
+	if r.ctx != nil {
+		select {
+		case <-r.ctx.Done():
+			return 0, r.ctx.Err()
+		default:
+		}
+	}
+	return r.reader.Read(p)
 }

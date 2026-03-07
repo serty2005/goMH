@@ -2,7 +2,6 @@ package frpc
 
 import (
 	"archive/zip"
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"goMH/config"
@@ -98,23 +97,31 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 	var action ActionType
 
 	if isInstalled {
-		tui.Info("Обнаружена существующая установка FRPC.")
-		fmt.Print("Введите 'R' для добавления порта, 'C' для полной переустановки или 'U' для удаления (R/C/U): ")
-		reader := bufio.NewReader(os.Stdin)
-		choice, _ := reader.ReadString('\n')
-		choice = strings.TrimSpace(strings.ToUpper(choice))
+		choice, err := tui.SelectItem([]tui.ChoiceItem{
+			{Title: "Добавить порт", Description: "Сохранит текущую установку и расширит конфиг"},
+			{Title: "Переустановить", Description: "Удалит FRPC и развернет заново"},
+			{Title: "Удалить", Description: "Полностью удалит FRPC и службу"},
+		}, tui.SelectionConfig{
+			Title:    "FRPC уже установлен",
+			Subtitle: "Выберите дальнейшее действие",
+		})
+		if err != nil {
+			return nil, err
+		}
 
 		slog.Info("Выбор действия в меню FRPC", "choice", choice)
 
 		switch choice {
-		case "R":
+		case 0:
 			action = ActionAddPort
-		case "C":
+		case 1:
 			action = ActionReinstall
-		case "U":
-			fmt.Print("ВНИМАНИЕ: Это полностью удалит FRPC. Вы уверены? (y/n): ")
-			confirm, _ := reader.ReadString('\n')
-			if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+		case 2:
+			confirmed, err := tui.Confirm("Удаление FRPC", "Будут удалены служба, конфиг и файлы FRPC.", "Удалить")
+			if err != nil {
+				return nil, err
+			}
+			if !confirmed {
 				slog.Info("Удаление отменено пользователем")
 				return nil, nil
 			}
@@ -129,17 +136,44 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 
 	// Если нужно добавить порт или установить с нуля -> спрашиваем параметры
 	if action == ActionInstall || action == ActionAddPort || action == ActionReinstall {
-		reader := bufio.NewReader(os.Stdin)
-
-		fmt.Print("Введите локальный порт для туннеля (например, 5985 для WinRM): ")
-		localPort, _ := reader.ReadString('\n')
+		localPort, err := tui.PromptText(tui.InputConfig{
+			Title:        "Локальный порт",
+			Subtitle:     "Например, 5985 для WinRM",
+			Placeholder:  "5985",
+			InitialValue: "5985",
+			Validate: func(value string) error {
+				if strings.TrimSpace(value) == "" {
+					return nil
+				}
+				port, err := strconv.Atoi(strings.TrimSpace(value))
+				if err != nil || port <= 0 || port > 65535 {
+					return fmt.Errorf("укажите корректный TCP-порт")
+				}
+				return nil
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
 		localPort = strings.TrimSpace(localPort)
 		if localPort == "" {
 			localPort = "5985"
 		}
 
-		fmt.Print("Введите имя этого узла (например, SRV-BACKOFFICE-01): ")
-		alias, _ := reader.ReadString('\n')
+		alias, err := tui.PromptText(tui.InputConfig{
+			Title:       "Имя узла",
+			Subtitle:    "Например, SRV-BACKOFFICE-01",
+			Placeholder: "SRV-BACKOFFICE-01",
+			Validate: func(value string) error {
+				if strings.TrimSpace(value) == "" {
+					return fmt.Errorf("имя узла не может быть пустым")
+				}
+				return nil
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
 		alias = strings.TrimSpace(alias)
 		if alias == "" {
 			return nil, fmt.Errorf("имя узла не может быть пустым")
@@ -148,13 +182,11 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		slog.Info("Введены параметры туннеля", "localPort", localPort, "alias", alias)
 
 		// Поиск свободного порта
-		ctx.Info("Поиск свободного порта на сервере...")
 		remotePort, err := m.findFreePort()
 		if err != nil {
 			slog.Error("Не удалось найти свободный порт", "error", err)
 			return nil, err
 		}
-		ctx.Success(fmt.Sprintf("Выбран удаленный порт: %d", remotePort))
 		slog.Info("Автоматически выбран удаленный порт", "remotePort", remotePort)
 
 		return &FrpcInstallConfig{
@@ -348,39 +380,42 @@ func (m *Module) findFreePort() (int, error) {
 	// 2. Если есть оффлайн прокси - выводим полную картину
 	if len(offlineProxies) > 0 {
 		slog.Warn("Обнаружены оффлайн-прокси", "count", len(offlineProxies))
-		tui.Warn("\nВНИМАНИЕ: Обнаружены оффлайн-прокси. Сервер не сообщает их порты, поэтому автоматический выбор небезопасен.")
-
-		// Сортируем онлайн по портам для удобства
 		sort.Slice(onlineProxies, func(i, j int) bool {
 			return onlineProxies[i].Port < onlineProxies[j].Port
 		})
 
-		tui.Info("--- Текущее состояние сети FRPC ---")
-
-		// Вывод занятых портов
+		lines := []string{"Есть оффлайн-прокси, поэтому порт нужно указать вручную."}
 		if len(onlineProxies) > 0 {
-			fmt.Println(" [Занятые порты (Online)]")
+			lines = append(lines, "Online:")
 			for _, p := range onlineProxies {
-				fmt.Printf("  %d - %s\n", p.Port, p.Name)
+				lines = append(lines, fmt.Sprintf("%d - %s", p.Port, p.Name))
 			}
 		}
-
-		// Вывод оффлайн
-		fmt.Println(" [Статус неизвестен (Offline)]")
+		lines = append(lines, "Offline:")
 		for _, name := range offlineProxies {
-			fmt.Printf("  OFFLINE - %s\n", name)
+			lines = append(lines, "OFFLINE - "+name)
 		}
-		fmt.Println("-----------------------------------")
 
-		reader := bufio.NewReader(os.Stdin)
 		for {
-			fmt.Print("\nПожалуйста, введите желаемый удаленный порт вручную: ")
-			portStr, _ := reader.ReadString('\n')
+			portStr, err := tui.PromptText(tui.InputConfig{
+				Title:       "Удаленный порт FRPC",
+				Subtitle:    strings.Join(lines, "\n"),
+				Placeholder: "Например, 17001",
+				Validate: func(value string) error {
+					port, err := strconv.Atoi(strings.TrimSpace(value))
+					if err != nil || port <= 0 || port > 65535 {
+						return fmt.Errorf("укажите корректный номер порта")
+					}
+					return nil
+				},
+			})
+			if err != nil {
+				return 0, err
+			}
 			port, err := strconv.Atoi(strings.TrimSpace(portStr))
 			if err == nil {
 				return port, nil
 			}
-			fmt.Println("Некорректный ввод. Введите число.")
 		}
 	}
 
@@ -434,7 +469,6 @@ func (m *Module) updateFrpcIni(alias, localPort, remotePort string) error {
 	for _, line := range lines {
 		if strings.TrimSpace(line) == newSectionName {
 			slog.Warn("Секция уже существует, пропускаем запись", "section", newSectionName)
-			fmt.Printf("Секция '%s' уже существует. Пропускаем.\n", newSectionName)
 			return nil
 		}
 	}

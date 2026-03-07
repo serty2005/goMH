@@ -82,14 +82,14 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils) (string, error) {
 	}
 
 	// 3. Если 7z не найден, пытаемся скачать и установить
-	fmt.Println("7z.exe не найден в системе. Попытка автоматической установки...")
+	consolePrintln("7z.exe не найден в системе. Попытка автоматической установки...")
 
 	cfg := am.Cfg()
 	if cfg == nil || cfg.MaintenanceConfig.SevenZipAssetID == "" {
 		return "", errors.New("в конфигурации не указан '7zipAssetID' для автоматической установки 7-Zip")
 	}
 
-	fmt.Printf("Попытка скачивания 7-Zip через AssetManager с ID: %s...\n", cfg.MaintenanceConfig.SevenZipAssetID)
+	consolePrintf("Попытка скачивания 7-Zip через AssetManager с ID: %s...\n", cfg.MaintenanceConfig.SevenZipAssetID)
 
 	cachePath, err := am.DownloadToCache(cfg.MaintenanceConfig.SevenZipAssetID)
 	if err != nil {
@@ -97,7 +97,7 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils) (string, error) {
 	}
 	defer os.Remove(cachePath)
 
-	fmt.Println("Установка 7-Zip...")
+	consolePrintln("Установка 7-Zip...")
 	_, err = wu.RunCommand(cachePath, "/S")
 	if err != nil {
 		return "", fmt.Errorf("не удалось установить 7-Zip: %w", err)
@@ -107,7 +107,7 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils) (string, error) {
 
 	installPath := `C:\Program Files\7-Zip\7z.exe`
 	if _, err := os.Stat(installPath); err == nil {
-		fmt.Println("7-Zip успешно установлен.")
+		consolePrintln("7-Zip успешно установлен.")
 		return installPath, nil
 	}
 

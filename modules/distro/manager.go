@@ -32,6 +32,7 @@ type DistroInstallConfig struct {
 	Component            config.DistroComponent
 	Version              string
 	Patch                *core.PatchInfo // Может быть nil
+	PluginSelection      *iikoplugins.InstallSelection
 	RunAutoUpdatePlugins bool
 	UninstallOldVersion  bool
 	OldVersionString     string // Версия для удаления (если UninstallOldVersion=true)
@@ -86,14 +87,13 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 // Configure управляет выбором бренда и передает управление хендлеру бренда.
 func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
 	for {
-		tui.ClearScreen()
-		tui.Title("\n--- Выберите продукт ---")
-		fmt.Println(" 1. iiko")
-		fmt.Println(" 2. Syrve")
-		fmt.Println("\n 0. Назад в главное меню")
-		fmt.Print("Ваш выбор: ")
-
-		key, err := tui.ReadKey()
+		choice, err := tui.SelectItem([]tui.ChoiceItem{
+			{Title: "iiko", Description: "Дистрибутивы, плагины и патчи"},
+			{Title: "Syrve", Description: "Дистрибутивы и portable-сборки"},
+		}, tui.SelectionConfig{
+			Title:    "Выберите продукт",
+			Subtitle: "Esc для возврата в главное меню",
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -101,17 +101,15 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		var handler brandHandler
 		var brandName string
 
-		switch key {
-		case "1":
+		switch choice {
+		case 0:
 			brandName = "iiko"
 			handler = &iikoHandler{}
-		case "2":
+		case 1:
 			brandName = "syrve"
 			handler = &syrveHandler{}
-		case "0":
-			return nil, nil
 		default:
-			continue
+			return nil, nil
 		}
 
 		slog.Info("Выбран бренд", "brand", brandName)
@@ -137,9 +135,8 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *DistroInstallConfig) error {
 	switch cfg.Action {
 	case ActionPlugins:
-		// Делегируем модулю плагинов
 		pluginMod := &iikoplugins.Module{}
-		return pluginMod.Run(am, wu)
+		return pluginMod.ExecuteInstall(am, wu, cfg.PluginSelection)
 
 	case ActionManualPatch:
 		return m.executeManualPatch(ctx, am, wu, cfg)

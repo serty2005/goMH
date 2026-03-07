@@ -17,6 +17,7 @@ import (
 	"goMH/modules/serviceutils"
 	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
+	"goMH/taskqueue"
 	"goMH/tui"
 	"goMH/winutils"
 	"io"
@@ -26,13 +27,38 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
 
-type RealWinUtils struct{}
+var realWinUtilsConsoleMu sync.Mutex
+
+type RealWinUtils struct {
+	stdout io.Writer
+	stderr io.Writer
+}
+
+func (rw *RealWinUtils) WithConsoleOutput(stdout io.Writer, stderr io.Writer) *RealWinUtils {
+	cloned := *rw
+	cloned.stdout = stdout
+	cloned.stderr = stderr
+	return &cloned
+}
+
+func (rw *RealWinUtils) withConsoleCapture(fn func() error) error {
+	if rw == nil || (rw.stdout == nil && rw.stderr == nil) {
+		return fn()
+	}
+
+	realWinUtilsConsoleMu.Lock()
+	restore := winutils.SetConsoleOutput(rw.stdout, rw.stderr)
+	defer realWinUtilsConsoleMu.Unlock()
+	defer restore()
+	return fn()
+}
 
 func (rw *RealWinUtils) RunCommand(name string, args ...string) (string, error) {
 	return winutils.RunCommand(name, args...)
@@ -41,10 +67,14 @@ func (rw *RealWinUtils) ServiceExists(serviceName string) (bool, error) {
 	return winutils.ServiceExists(serviceName)
 }
 func (rw *RealWinUtils) AddDefenderExclusion(path string) error {
-	return winutils.AddDefenderExclusion(path)
+	return rw.withConsoleCapture(func() error {
+		return winutils.AddDefenderExclusion(path)
+	})
 }
 func (rw *RealWinUtils) SetServiceTriggers(serviceName string, triggers []string) error {
-	return winutils.SetServiceTriggers(serviceName, triggers)
+	return rw.withConsoleCapture(func() error {
+		return winutils.SetServiceTriggers(serviceName, triggers)
+	})
 }
 func (rw *RealWinUtils) Is64BitOS() bool {
 	return winutils.Is64BitOS()
@@ -74,7 +104,9 @@ func (rw *RealWinUtils) GracefulShutdownProcess(processName string) error {
 	return winutils.GracefulShutdownProcess(processName)
 }
 func (rw *RealWinUtils) CreateScheduledTask(taskName, executablePath, arguments, workingDir string) error {
-	return winutils.CreateScheduledTask(taskName, executablePath, arguments, workingDir)
+	return rw.withConsoleCapture(func() error {
+		return winutils.CreateScheduledTask(taskName, executablePath, arguments, workingDir)
+	})
 }
 func (rw *RealWinUtils) RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error) {
 	return winutils.RunCommandWithEnv(env, name, args...)
@@ -128,7 +160,9 @@ func (rw *RealWinUtils) ReadRegistryKey(rootKey registry.Key, path, valueName st
 	return winutils.ReadRegistryKey(rootKey, path, valueName)
 }
 func (rw *RealWinUtils) UninstallSystemApp(partialName string) error {
-	return winutils.UninstallSystemApp(partialName)
+	return rw.withConsoleCapture(func() error {
+		return winutils.UninstallSystemApp(partialName)
+	})
 }
 func (rw *RealWinUtils) ExtractArchive(archivePath, destDir string, fullPaths bool) error {
 	return winutils.ExtractArchive(archivePath, destDir, fullPaths)
@@ -137,7 +171,9 @@ func (rw *RealWinUtils) GetDesktopDir() (string, error) {
 	return winutils.GetDesktopDir()
 }
 func (rw *RealWinUtils) CreateShortcut(targetPath, shortcutPath, arguments string) error {
-	return winutils.CreateShortcut(targetPath, shortcutPath, arguments)
+	return rw.withConsoleCapture(func() error {
+		return winutils.CreateShortcut(targetPath, shortcutPath, arguments)
+	})
 }
 func (rw *RealWinUtils) Reboot() error {
 	return winutils.Reboot()
@@ -386,44 +422,19 @@ func main() {
 		"UTM":           &utm.Module{},
 	}
 
-	// Основной цикл
-	for {
-		var availableModules []tui.Installer
-		for _, modDef := range cfg.Modules {
-			if modDef.ID == "iiko-plugins" {
-				continue
-			}
-			if module, ok := registeredModules[modDef.ID]; ok {
-				availableModules = append(availableModules, module)
-			}
-		}
-
-		if len(availableModules) == 0 {
-			log.Fatal("В конфигурации не определено ни одного доступного модуля.")
-		}
-
-		// ShowMenu теперь сам чистит экран и рисует меню
-		selected, err := tui.ShowMenu(availableModules)
-		if err != nil {
-			slog.Info("Выход из программы")
-			tui.Info("Выход из программы.")
-			os.Exit(0)
-		}
-
-		selectedModule := selected.(core.Installer)
-		slog.Info("Выбран модуль", "id", selectedModule.ID())
-
-		tui.ClearScreen() // Чистим перед запуском модуля
-		err = selectedModule.Run(assetManager, RealWinUtils)
-		if err != nil {
-			slog.Error("Ошибка модуля", "module", selectedModule.ID(), "error", err)
-			tui.Error(fmt.Sprintf("\n--- ОПЕРАЦИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ ---\n%v\n---------------------------------------\n", err))
-		} else {
-			slog.Info("Модуль завершил работу успешно", "module", selectedModule.ID())
-			tui.Success("\n--- Операция завершена успешно. ---")
-		}
-
-		// Ждем нажатия перед возвратом в меню, чтобы пользователь увидел результат
-		tui.WaitForAnyKey()
+	consoleModules := buildConsoleModules(cfg.Modules, registeredModules)
+	if len(consoleModules) == 0 {
+		log.Fatal("В конфигурации не определено ни одного доступного модуля.")
 	}
+
+	queue := taskqueue.New()
+	if err := runConsoleDashboard(consoleModules, queue, assetManager, RealWinUtils); err != nil {
+		slog.Error("Ошибка консольного интерфейса", "error", err)
+		tui.Error(fmt.Sprintf("Критическая ошибка интерфейса: %v", err))
+		tui.WaitForAnyKey()
+		os.Exit(1)
+	}
+
+	slog.Info("Выход из программы")
+	tui.Info("Выход из программы.")
 }

@@ -2,7 +2,6 @@ package serviceutils
 
 import (
 	"archive/zip"
-	"bufio"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -96,43 +95,40 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 // Configure - Сбор данных (UI слой)
 func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*ServiceUtilsConfig, error) {
-	tui.ClearScreen()
-	tui.Title("\n--- Меню утилит обслуживания ---")
-	fmt.Println(" 1. Очистка временных файлов")
-	fmt.Println(" 2. Сборщик логов в архив")
-	fmt.Println(" 3. Просмотр лога в реальном времени (tail -f)")
-	fmt.Println(" 4. OrderCheck")
-	fmt.Println(" 5. FrontTools")
-	fmt.Println("\n 0. Назад")
-	fmt.Print("Выберите пункт: ")
-
-	key, err := tui.ReadKey()
+	choice, err := tui.SelectItem([]tui.ChoiceItem{
+		{Title: "Очистка временных файлов"},
+		{Title: "Сборщик логов в архив"},
+		{Title: "Просмотр лога в реальном времени"},
+		{Title: "OrderCheck"},
+		{Title: "FrontTools"},
+	}, tui.SelectionConfig{
+		Title:    "Утилиты обслуживания",
+		Subtitle: "Esc для возврата в главное меню",
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	slog.Info("Пользователь выбрал пункт меню ServiceUtils", "key", key)
+	slog.Info("Пользователь выбрал пункт меню ServiceUtils", "choice", choice)
 
-	switch key {
-	case "1":
+	switch choice {
+	case 0:
 		return &ServiceUtilsConfig{Action: ActionCleanTemp}, nil
 
-	case "2": // Collect Logs
+	case 1:
 		return m.configureCollectLogs(am)
 
-	case "3": // Tail Log
+	case 2:
 		return m.configureViewLog(am)
 
-	case "4": // OrderCheck
+	case 3:
 		return m.configureOrderCheck(wu)
 
-	case "5": // FrontTools
+	case 4:
 		return m.configureFrontTools()
 
-	case "0":
-		return nil, nil
 	default:
-		return m.Configure(ctx, am, wu)
+		return nil, nil
 	}
 }
 
@@ -156,9 +152,22 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 // --- CONFIGURE HELPERS ---
 
 func (m *Module) configureCollectLogs(am core.AssetManager) (*ServiceUtilsConfig, error) {
-	fmt.Print("\nЗа какое количество дней нужно собрать логи? (например, 7): ")
-	reader := bufio.NewReader(os.Stdin)
-	daysStr, _ := reader.ReadString('\n')
+	daysStr, err := tui.PromptText(tui.InputConfig{
+		Title:        "Период сбора логов",
+		Subtitle:     "Укажите количество дней, например 7",
+		Placeholder:  "7",
+		InitialValue: "7",
+		Validate: func(value string) error {
+			days, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil || days <= 0 {
+				return errors.New("нужно указать положительное число")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	days, err := strconv.Atoi(strings.TrimSpace(daysStr))
 	if err != nil || days <= 0 {
 		return nil, errors.New("некорректное число")
@@ -170,19 +179,24 @@ func (m *Module) configureCollectLogs(am core.AssetManager) (*ServiceUtilsConfig
 		return nil, errors.New("директории логов не найдены")
 	}
 
-	tui.Title("\n--- Доступные директории ---")
-	for i, dir := range availableDirs {
-		fmt.Printf(" %d. %s\n", i+1, dir)
+	items := make([]tui.ChoiceItem, 0, len(availableDirs))
+	for _, dir := range availableDirs {
+		items = append(items, tui.ChoiceItem{Title: dir})
 	}
-	fmt.Print("Укажите номера через запятую (например: 1,3): ")
-	choiceStr, _ := reader.ReadString('\n')
 
-	var selectedDirs []string
-	parts := strings.Split(strings.TrimSpace(choiceStr), ",")
-	for _, part := range parts {
-		idx, err := strconv.Atoi(strings.TrimSpace(part))
-		if err == nil && idx >= 1 && idx <= len(availableDirs) {
-			selectedDirs = append(selectedDirs, availableDirs[idx-1])
+	indices, err := tui.SelectItems(items, tui.SelectionConfig{
+		Title:    "Доступные директории логов",
+		Subtitle: "Пробел отметить, Enter подтвердить",
+		Multi:    true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	selectedDirs := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		if idx >= 0 && idx < len(availableDirs) {
+			selectedDirs = append(selectedDirs, availableDirs[idx])
 		}
 	}
 	if len(selectedDirs) == 0 {
@@ -211,7 +225,6 @@ func (m *Module) configureViewLog(am core.AssetManager) (*ServiceUtilsConfig, er
 	dirsWithTodayLogs := make(map[string][]string)
 	var dirList []string
 
-	tui.Info("Поиск сегодняшних логов...")
 	slog.Info("Сканирование директорий на наличие свежих логов")
 
 	for _, dir := range allLogDirs {
@@ -241,35 +254,45 @@ func (m *Module) configureViewLog(am core.AssetManager) (*ServiceUtilsConfig, er
 	}
 	sort.Strings(dirList)
 
-	// Выбор папки
-	tui.Title("\n--- Папки с логами за сегодня ---")
-	for i, dir := range dirList {
-		fmt.Printf(" %d. %s (%d шт.)\n", i+1, dir, len(dirsWithTodayLogs[dir]))
+	dirItems := make([]tui.ChoiceItem, 0, len(dirList))
+	for _, dir := range dirList {
+		dirItems = append(dirItems, tui.ChoiceItem{
+			Title:       dir,
+			Description: fmt.Sprintf("Файлов за сегодня: %d", len(dirsWithTodayLogs[dir])),
+		})
 	}
-	fmt.Print("Выберите папку: ")
-	reader := bufio.NewReader(os.Stdin)
-	choiceStr, _ := reader.ReadString('\n')
-	choice, err := strconv.Atoi(strings.TrimSpace(choiceStr))
-	if err != nil || choice < 1 || choice > len(dirList) {
+	choice, err := tui.SelectItem(dirItems, tui.SelectionConfig{
+		Title:    "Папки с логами за сегодня",
+		Subtitle: "Выберите папку для просмотра",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if choice < 0 || choice >= len(dirList) {
 		return nil, errors.New("неверный выбор")
 	}
-
-	selectedDir := dirList[choice-1]
+	selectedDir := dirList[choice]
 	files := dirsWithTodayLogs[selectedDir]
 
-	// Выбор файла
-	tui.Title(fmt.Sprintf("\n--- Файлы в %s ---", selectedDir))
-	for i, file := range files {
-		fmt.Printf(" %d. %s\n", i+1, filepath.Base(file))
+	fileItems := make([]tui.ChoiceItem, 0, len(files))
+	for _, file := range files {
+		fileItems = append(fileItems, tui.ChoiceItem{
+			Title:       filepath.Base(file),
+			Description: file,
+		})
 	}
-	fmt.Print("Выберите файл: ")
-	choiceStr, _ = reader.ReadString('\n')
-	choice, err = strconv.Atoi(strings.TrimSpace(choiceStr))
-	if err != nil || choice < 1 || choice > len(files) {
+	choice, err = tui.SelectItem(fileItems, tui.SelectionConfig{
+		Title:    "Файлы для просмотра",
+		Subtitle: selectedDir,
+		Search:   len(fileItems) > 8,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if choice < 0 || choice >= len(files) {
 		return nil, errors.New("неверный выбор")
 	}
-
-	selectedFile := files[choice-1]
+	selectedFile := files[choice]
 	slog.Info("Выбран файл для просмотра", "path", selectedFile)
 
 	return &ServiceUtilsConfig{
@@ -300,15 +323,23 @@ func (m *Module) configureOrderCheck(wu core.WinUtils) (*ServiceUtilsConfig, err
 	targetDb := iikoFrontDb
 	if errAlc == nil {
 		slog.Info("Найдена БД Алкоплагина", "path", alcoholDb)
-		fmt.Println("\nВыберите базу данных:")
-		fmt.Printf(" 1. Алкоплагин: %s\n", alcoholDb)
-		if iikoFrontDb != "" {
-			fmt.Printf(" 2. iikoFront: %s\n", iikoFrontDb)
+		items := []tui.ChoiceItem{
+			{Title: "Алкоплагин", Description: alcoholDb},
 		}
-		fmt.Print("Выбор: ")
-		key, _ := tui.ReadKey()
-		if key == "1" {
+		if iikoFrontDb != "" {
+			items = append(items, tui.ChoiceItem{Title: "iikoFront", Description: iikoFrontDb})
+		}
+		choice, err := tui.SelectItem(items, tui.SelectionConfig{
+			Title:    "Выберите базу данных",
+			Subtitle: "Esc оставит текущий вариант",
+		})
+		if err != nil {
+			return nil, err
+		}
+		if choice == 0 {
 			targetDb = alcoholDb
+		} else if choice == 1 && iikoFrontDb != "" {
+			targetDb = iikoFrontDb
 		}
 	} else {
 		slog.Info("БД Алкоплагина не найдена, используем iikoFront", "path", iikoFrontDb)
@@ -474,8 +505,7 @@ func (m *Module) tailFile(ctx core.TaskContext, filePath string, lines int) erro
 	ctx.SetStatus("Просмотр лога")
 	slog.Info("Запуск просмотра лога (tail)", "file", filePath)
 
-	tui.InfoF("Файл: %s", filePath)
-	tui.Info("--- [Ctrl+C] выход ---")
+	ctx.Info("Файл: " + filePath)
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -493,21 +523,74 @@ func (m *Module) tailFile(ctx core.TaskContext, filePath string, lines int) erro
 	cancelCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	_, _ = io.Copy(os.Stdout, file) // Вывод хвоста
+	if _, err := streamLogChunk(ctx, file); err != nil {
+		return err
+	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	idleTimer := time.NewTimer(30 * time.Second)
+	defer idleTimer.Stop()
 
 	for {
 		select {
 		case <-cancelCtx.Done():
-			fmt.Println("\n--- Выход ---")
 			slog.Info("Просмотр лога завершен пользователем")
 			return nil
+		case <-idleTimer.C:
+			ctx.Info("Новых строк нет более 30 секунд. Просмотр завершен.")
+			return nil
 		case <-ticker.C:
-			_, _ = io.Copy(os.Stdout, file)
+			wrote, err := streamLogChunk(ctx, file)
+			if err != nil {
+				return err
+			}
+			if wrote {
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(30 * time.Second)
+			}
 		}
 	}
+}
+
+func streamLogChunk(ctx core.TaskContext, file *os.File) (bool, error) {
+	buffer := make([]byte, 4096)
+	wrote := false
+	for {
+		n, err := file.Read(buffer)
+		if n > 0 {
+			wrote = true
+			for _, line := range strings.Split(string(buffer[:n]), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					writeLogLine(ctx, line)
+				}
+			}
+		}
+		if err == io.EOF {
+			return wrote, nil
+		}
+		if err != nil {
+			return wrote, err
+		}
+	}
+}
+
+type rawLogContext interface {
+	LogLine(line string)
+}
+
+func writeLogLine(ctx core.TaskContext, line string) {
+	if raw, ok := ctx.(rawLogContext); ok {
+		raw.LogLine(line)
+		return
+	}
+	ctx.Info(line)
 }
 
 func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *ServiceUtilsConfig) error {

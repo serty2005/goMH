@@ -1,7 +1,6 @@
 package regime
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"goMH/core"
@@ -24,33 +23,6 @@ type RegimeInstallConfig struct {
 }
 
 const resumeTaskName = "goMH_Regime_Resume"
-
-// getCredentials запрашивает у пользователя логин и пароль для установки Regime
-func getCredentials() (username, password string, err error) {
-	scanner := bufio.NewScanner(os.Stdin)
-
-	// Запрос логина
-	fmt.Print("Введите логин администратора: ")
-	if !scanner.Scan() {
-		return "", "", fmt.Errorf("ошибка чтения логина")
-	}
-	username = strings.TrimSpace(scanner.Text())
-	if username == "" {
-		return "", "", fmt.Errorf("логин не может быть пустым")
-	}
-
-	// Запрос пароля
-	fmt.Print("Введите пароль администратора: ")
-	if !scanner.Scan() {
-		return "", "", fmt.Errorf("ошибка чтения пароля")
-	}
-	password = strings.TrimSpace(scanner.Text())
-	if password == "" {
-		return "", "", fmt.Errorf("пароль не может быть пустым")
-	}
-
-	return username, password, nil
-}
 
 // checkDotNet48 проверяет установленную версию .NET Framework 4.8
 func checkDotNet48() (bool, error) {
@@ -123,32 +95,63 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	ctx := tui.NewConsoleContext()
 	ctx.SetStatus("Подготовка к установке Regime")
 
-	// 1. Проверяем, установлена ли служба "regime"
+	installCfg, err := m.Configure(wu)
+	if err != nil {
+		return err
+	}
+	if installCfg == nil {
+		return nil
+	}
+
+	return m.Execute(ctx, am, wu, *installCfg)
+}
+
+func (m *Module) Configure(wu core.WinUtils) (*RegimeInstallConfig, error) {
 	const serviceName = "regime"
 	isReinstall, err := wu.ServiceExists(serviceName)
 	if err != nil {
-		return fmt.Errorf("не удалось проверить наличие службы '%s': %w", serviceName, err)
+		return nil, fmt.Errorf("не удалось проверить наличие службы '%s': %w", serviceName, err)
 	}
 
-	// 2. Собираем конфиг
-	installCfg := RegimeInstallConfig{
-		IsReinstall: isReinstall,
+	cfg := &RegimeInstallConfig{IsReinstall: isReinstall}
+	if isReinstall {
+		return cfg, nil
 	}
 
-	if !isReinstall {
-		tui.Info("Новая установка 'regime'.")
-		username, password, err := getCredentials()
-		if err != nil {
-			return fmt.Errorf("не удалось получить учетные данные: %w", err)
-		}
-		installCfg.Username = username
-		installCfg.Password = password
-	} else {
-		tui.Warn("Обнаружена существующая служба 'regime'. Будет выполнена переустановка с сохранением данных.")
+	username, err := tui.PromptText(tui.InputConfig{
+		Title:       "Regime: логин администратора",
+		Subtitle:    "Укажите логин для новой установки",
+		Placeholder: "admin",
+		Validate: func(value string) error {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("логин не может быть пустым")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	// 3. Передаем управление логике
-	return m.Execute(ctx, am, wu, installCfg)
+	password, err := tui.PromptText(tui.InputConfig{
+		Title:       "Regime: пароль администратора",
+		Subtitle:    "Пароль будет передан в MSI-пакет",
+		Placeholder: "Введите пароль",
+		Password:    true,
+		Validate: func(value string) error {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("пароль не может быть пустым")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Username = strings.TrimSpace(username)
+	cfg.Password = strings.TrimSpace(password)
+	return cfg, nil
 }
 
 // Resume - точка входа для автоматического продолжения после перезагрузки
