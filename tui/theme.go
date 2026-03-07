@@ -19,6 +19,7 @@ type Theme struct {
 	Error       lipgloss.Style
 	Success     lipgloss.Style
 	Key         lipgloss.Style
+	Help        lipgloss.Style
 	Input       lipgloss.Style
 	InputFocus  lipgloss.Style
 	Placeholder lipgloss.Style
@@ -74,6 +75,8 @@ func DefaultTheme() Theme {
 		Key: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#D5A021")).
 			Bold(true),
+		Help: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#869389")),
 		Input: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#4C5B52")).

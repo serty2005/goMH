@@ -36,6 +36,23 @@ type selectionDoneMsg struct {
 	err     error
 }
 
+type selectionVisibleItem struct {
+	position      int
+	originalIndex int
+	lineStart     int
+	lineSpan      int
+}
+
+type selectionLayout struct {
+	panelX     int
+	panelY     int
+	panelWidth int
+	itemsX     int
+	itemsY     int
+	itemsWidth int
+	items      []selectionVisibleItem
+}
+
 type selectionModel struct {
 	theme     Theme
 	config    SelectionConfig
@@ -90,6 +107,9 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resultErr = msg.err
 		return m, tea.Quit
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
@@ -137,41 +157,16 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.config.Multi {
 				break
 			}
-			index := m.currentIndex()
-			if index < 0 || m.items[index].Disabled {
+			if !m.toggleSelection(m.currentIndex()) {
 				return m, nil
-			}
-			if m.selected[index] {
-				delete(m.selected, index)
-			} else {
-				m.selected[index] = true
 			}
 			return m, nil
 		case "enter":
-			if len(m.filtered) == 0 {
-				return m, nil
-			}
-			if m.config.Multi {
-				indices := make([]int, 0, len(m.selected))
-				for _, originalIndex := range m.filtered {
-					if m.selected[originalIndex] {
-						indices = append(indices, originalIndex)
-					}
-				}
-				if len(indices) == 0 {
-					return m, nil
-				}
-				return m, func() tea.Msg {
-					return selectionDoneMsg{indices: indices}
-				}
-			}
-			index := m.currentIndex()
-			if index < 0 || m.items[index].Disabled {
-				return m, nil
-			}
-			return m, func() tea.Msg {
-				return selectionDoneMsg{indices: []int{index}}
-			}
+			return m, m.confirmCurrentSelection()
+		}
+
+		if cmd := m.handleShortcutKey(msg.String()); cmd != nil {
+			return m, cmd
 		}
 	}
 
@@ -212,10 +207,10 @@ func (m *selectionModel) View() string {
 	lines = append(lines, "")
 	lines = append(lines, m.renderItems(panelWidth-6)...)
 
-	help := m.footerHelp()
-	if help != "" {
+	helpLines := m.footerHelp()
+	if len(helpLines) > 0 {
 		lines = append(lines, "")
-		lines = append(lines, help)
+		lines = append(lines, helpLines...)
 	}
 
 	panelStyle := m.theme.PanelFocus
@@ -237,15 +232,7 @@ func (m *selectionModel) renderItems(width int) []string {
 		originalIndex := m.filtered[pos]
 		item := m.items[originalIndex]
 
-		prefix := "  "
-		if m.config.Multi {
-			if m.selected[originalIndex] {
-				prefix = "[x]"
-			} else {
-				prefix = "[ ]"
-			}
-		}
-		text := strings.TrimSpace(strings.Join([]string{prefix, item.Title, item.Meta}, " "))
+		text := m.selectionLineText(originalIndex, pos-start, width)
 		text = truncateText(text, width)
 
 		line := m.theme.Item.Render(text)
@@ -265,21 +252,29 @@ func (m *selectionModel) renderItems(width int) []string {
 	return lines
 }
 
-func (m *selectionModel) footerHelp() string {
-	parts := []string{}
+func (m *selectionModel) footerHelp() []string {
+	firstLine := make([]string, 0, 4)
+	secondLine := make([]string, 0, 4)
+	firstLine = append(firstLine, m.theme.Key.Render("1-9,0")+" быстрый выбор")
 	if m.config.Search {
-		parts = append(parts, m.theme.Key.Render("Ввод")+" фильтр")
+		firstLine = append(firstLine, m.theme.Key.Render("Ввод")+" фильтр")
 	}
-	parts = append(parts, m.theme.Key.Render("↑↓")+" выбор")
+	firstLine = append(firstLine, m.theme.Key.Render("↑↓")+" выбор")
 	if m.config.Multi {
-		parts = append(parts, m.theme.Key.Render("Space")+" отметить")
+		secondLine = append(secondLine, m.theme.Key.Render("Space")+" отметить")
 	}
-	parts = append(parts, m.theme.Key.Render("Enter")+" подтвердить")
-	parts = append(parts, m.theme.Key.Render("Esc")+" назад")
+	secondLine = append(secondLine,
+		m.theme.Key.Render("Enter")+" подтвердить",
+		m.theme.Key.Render("Мышь")+" навести/клик",
+		m.theme.Key.Render("Esc")+" назад",
+	)
 	if m.config.Help != "" {
-		parts = append(parts, m.theme.ItemMuted.Render(m.config.Help))
+		secondLine = append(secondLine, m.theme.Help.Render(m.config.Help))
 	}
-	return strings.Join(parts, "   ")
+	return []string{
+		m.theme.Help.Render(strings.Join(firstLine, "   ")),
+		m.theme.Help.Render(strings.Join(secondLine, "   ")),
+	}
 }
 
 func (m *selectionModel) applyFilter() {
@@ -307,6 +302,218 @@ func (m *selectionModel) currentIndex() int {
 		return -1
 	}
 	return m.filtered[m.cursor]
+}
+
+func (m *selectionModel) toggleSelection(index int) bool {
+	if index < 0 || index >= len(m.items) || m.items[index].Disabled {
+		return false
+	}
+	if m.selected[index] {
+		delete(m.selected, index)
+	} else {
+		m.selected[index] = true
+	}
+	return true
+}
+
+func (m *selectionModel) confirmCurrentSelection() tea.Cmd {
+	if len(m.filtered) == 0 {
+		return nil
+	}
+	if m.config.Multi {
+		indices := make([]int, 0, len(m.selected))
+		for _, originalIndex := range m.filtered {
+			if m.selected[originalIndex] {
+				indices = append(indices, originalIndex)
+			}
+		}
+		if len(indices) == 0 {
+			return nil
+		}
+		return func() tea.Msg {
+			return selectionDoneMsg{indices: indices}
+		}
+	}
+	index := m.currentIndex()
+	if index < 0 || m.items[index].Disabled {
+		return nil
+	}
+	return func() tea.Msg {
+		return selectionDoneMsg{indices: []int{index}}
+	}
+}
+
+func (m *selectionModel) handleShortcutKey(key string) tea.Cmd {
+	if m.config.Search && strings.TrimSpace(m.input.Value()) != "" {
+		return nil
+	}
+	offset, ok := menuShortcutOffset(key)
+	if !ok {
+		return nil
+	}
+	start, end := visibleRange(m.cursor, len(m.filtered), 10)
+	target := start + offset
+	if target < start || target >= end {
+		return nil
+	}
+	m.cursor = target
+	index := m.filtered[target]
+	if m.config.Multi {
+		m.toggleSelection(index)
+		return nil
+	}
+	if index < 0 || index >= len(m.items) || m.items[index].Disabled {
+		return nil
+	}
+	return m.confirmCurrentSelection()
+}
+
+func (m *selectionModel) selectionLineText(originalIndex int, offset int, width int) string {
+	item := m.items[originalIndex]
+	prefix := menuShortcutLabel(offset)
+	if m.config.Multi {
+		if m.selected[originalIndex] {
+			prefix += " [x]"
+		} else {
+			prefix += " [ ]"
+		}
+	}
+	titleWidth := width - len(prefix) - 1
+	if titleWidth < 0 {
+		titleWidth = 0
+	}
+	title := truncateText(item.Title, titleWidth)
+	text := strings.TrimSpace(prefix + " " + title)
+	if item.Meta != "" {
+		text += " " + item.Meta
+	}
+	return text
+}
+
+func (m *selectionModel) visibleItems() []selectionVisibleItem {
+	start, end := visibleRange(m.cursor, len(m.filtered), 10)
+	items := make([]selectionVisibleItem, 0, end-start)
+	lineStart := 0
+	for pos := start; pos < end; pos++ {
+		originalIndex := m.filtered[pos]
+		lineSpan := 1
+		if m.items[originalIndex].Description != "" {
+			lineSpan++
+		}
+		items = append(items, selectionVisibleItem{
+			position:      pos,
+			originalIndex: originalIndex,
+			lineStart:     lineStart,
+			lineSpan:      lineSpan,
+		})
+		lineStart += lineSpan
+	}
+	return items
+}
+
+func (m *selectionModel) layout() selectionLayout {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	panelWidth := minInt(width-4, 100)
+	if panelWidth < 48 {
+		panelWidth = width - 2
+	}
+	panelStyle := m.theme.PanelFocus
+	contentWidth := panelWidth - 6
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+
+	contentHeight := 1
+	if m.config.Subtitle != "" {
+		contentHeight++
+	}
+
+	itemsY := contentHeight + 1
+	if m.config.Search {
+		style := m.theme.Input
+		if m.input.Focused() {
+			style = m.theme.InputFocus
+		}
+		inputBlock := style.Width(maxInt(24, panelWidth-6)).Render(m.input.View())
+		itemsY += lipgloss.Height(inputBlock) + 1
+		contentHeight += lipgloss.Height(inputBlock) + 1
+	}
+
+	contentHeight++
+	visibleItems := m.visibleItems()
+	itemsHeight := 0
+	for _, item := range visibleItems {
+		itemsHeight += item.lineSpan
+	}
+	contentHeight += itemsHeight
+
+	helpLines := m.footerHelp()
+	if len(helpLines) > 0 {
+		contentHeight += 1 + len(helpLines)
+	}
+
+	_, frameHeight := panelStyle.GetFrameSize()
+	panelHeight := contentHeight + frameHeight
+	panelX := maxInt(0, (m.width-panelWidth)/2)
+	panelY := maxInt(0, (m.height-panelHeight)/2)
+
+	return selectionLayout{
+		panelX:     panelX,
+		panelY:     panelY,
+		panelWidth: panelWidth,
+		itemsX:     panelX + 3,
+		itemsY:     panelY + 2 + itemsY,
+		itemsWidth: contentWidth,
+		items:      visibleItems,
+	}
+}
+
+func (m *selectionModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	index, ok := m.indexAt(msg.X, msg.Y)
+	if !ok {
+		return m, nil
+	}
+
+	m.cursor = index.position
+	switch msg.Action {
+	case tea.MouseActionMotion:
+		return m, nil
+	case tea.MouseActionPress:
+		if msg.Button != tea.MouseButtonLeft {
+			return m, nil
+		}
+		if m.config.Multi {
+			m.toggleSelection(index.originalIndex)
+			return m, nil
+		}
+		if m.items[index.originalIndex].Disabled {
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			return selectionDoneMsg{indices: []int{index.originalIndex}}
+		}
+	}
+	return m, nil
+}
+
+func (m *selectionModel) indexAt(x int, y int) (selectionVisibleItem, bool) {
+	layout := m.layout()
+	if x < layout.itemsX || x >= layout.itemsX+layout.itemsWidth {
+		return selectionVisibleItem{}, false
+	}
+	line := y - layout.itemsY
+	if line < 0 {
+		return selectionVisibleItem{}, false
+	}
+	for _, item := range layout.items {
+		if line >= item.lineStart && line < item.lineStart+item.lineSpan {
+			return item, true
+		}
+	}
+	return selectionVisibleItem{}, false
 }
 
 type InputConfig struct {
@@ -424,20 +631,21 @@ func (m *inputModel) View() string {
 
 	helpParts := []string{
 		m.theme.Key.Render("Enter") + " сохранить",
-		m.theme.Key.Render("Esc") + " назад",
 	}
+	helpLineTwo := []string{m.theme.Key.Render("Esc") + " назад"}
 	if m.config.Help != "" {
-		helpParts = append(helpParts, m.theme.ItemMuted.Render(m.config.Help))
+		helpLineTwo = append(helpLineTwo, m.theme.Help.Render(m.config.Help))
 	}
 	lines = append(lines, "")
-	lines = append(lines, strings.Join(helpParts, "   "))
+	lines = append(lines, m.theme.Help.Render(strings.Join(helpParts, "   ")))
+	lines = append(lines, m.theme.Help.Render(strings.Join(helpLineTwo, "   ")))
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.theme.PanelFocus.Width(panelWidth).Render(strings.Join(lines, "\n")))
 }
 
 func runSelection(items []ChoiceItem, config SelectionConfig) ([]int, error) {
 	model := newSelectionModel(items, config)
-	program := tea.NewProgram(model, tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	finalModel, err := program.Run()
 	if err != nil {
 		return nil, err
@@ -458,7 +666,7 @@ func runSelection(items []ChoiceItem, config SelectionConfig) ([]int, error) {
 
 func runInput(config InputConfig) (string, error) {
 	model := newInputModel(config)
-	program := tea.NewProgram(model, tea.WithAltScreen())
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	finalModel, err := program.Run()
 	if err != nil {
 		return "", err

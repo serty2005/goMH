@@ -47,6 +47,18 @@ type actionDoneMsg struct {
 type refreshTickMsg struct{}
 type spinnerTickMsg struct{}
 
+type dashboardRect struct {
+	x      int
+	y      int
+	width  int
+	height int
+}
+
+type dashboardLayout struct {
+	modules dashboardRect
+	queue   dashboardRect
+}
+
 type dashboardModel struct {
 	modules       []DashboardModule
 	controller    DashboardController
@@ -114,7 +126,7 @@ func RunQueueDashboard(modules []DashboardModule, controller DashboardController
 			Padding(0, 1),
 	}
 
-	program = tea.NewProgram(model, tea.WithAltScreen())
+	program = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	_, err := program.Run()
 	return err
 }
@@ -140,16 +152,17 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spinnerTickCmd()
 
 	case refreshMsg:
-		selectedTaskID := ""
-		if m.pendingTaskID != "" {
-			selectedTaskID = m.pendingTaskID
-			m.pendingTaskID = ""
-		} else if current := m.currentTask(); current != nil {
-			selectedTaskID = current.Snapshot.ID
+		currentTaskID := ""
+		if current := m.currentTask(); current != nil {
+			currentTaskID = current.Snapshot.ID
 		}
-		m.tasks = msg.tasks
+		m.tasks = visibleDashboardTasks(msg.tasks)
 		m.queueStarted = msg.queueStarted
+		selectedTaskID, forceQueueFocus := m.resolveTaskSelection(currentTaskID)
 		m.taskIndex = findTaskIndex(m.tasks, selectedTaskID)
+		if forceQueueFocus && selectedTaskID != "" {
+			m.focus = 1
+		}
 		m.normalize()
 		return m, nil
 
@@ -168,6 +181,12 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.fetchTasks()
 
+	case tea.MouseMsg:
+		if m.busy {
+			return m, nil
+		}
+		return m.handleMouse(msg)
+
 	case tea.KeyMsg:
 		if m.busy {
 			switch msg.String() {
@@ -180,14 +199,12 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "tab", "shift+tab", "left", "right":
-			if len(m.tasks) == 0 && (msg.String() == "right" || msg.String() == "tab") {
-				m.focus = 0
-			} else if msg.String() == "left" || msg.String() == "shift+tab" {
-				m.focus = 0
-			} else {
-				m.focus = 1 - m.focus
-			}
+		case "tab", "right":
+			m.moveFocus(1)
+			m.normalize()
+			return m, nil
+		case "shift+tab", "left":
+			m.moveFocus(-1)
 			m.normalize()
 			return m, nil
 		case "up", "k":
@@ -206,17 +223,16 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.normalize()
 			return m, nil
-		case "a", "enter", " ":
-			module := m.currentModule()
-			if m.controller.OnEnqueue == nil {
+		case "a", " ":
+			if m.focus != 0 {
 				return m, nil
 			}
-			m.busy = true
-			m.lastMessage = "Настройка задачи..."
-			m.lastError = ""
-			return m, m.runBlocking(func() (DashboardActionResult, error) {
-				return m.controller.OnEnqueue(module)
-			})
+			return m.startEnqueueCurrentModule()
+		case "enter":
+			if m.focus != 0 {
+				return m, nil
+			}
+			return m.startEnqueueCurrentModule()
 		case "backspace", "delete":
 			if m.focus != 1 || m.controller.OnRemoveTask == nil {
 				return m, nil
@@ -248,6 +264,13 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.fetchTasks()
 		}
+
+		if index, ok := m.shortcutModuleIndex(msg.String()); ok {
+			m.moduleIndex = index
+			m.focus = 0
+			m.normalize()
+			return m.startEnqueueCurrentModule()
+		}
 	}
 
 	return m, nil
@@ -258,6 +281,8 @@ func (m dashboardModel) View() string {
 		return ""
 	}
 
+	status := m.renderStatusLine()
+	footer := m.renderFooter()
 	leftWidth := max(48, ((m.width - 3) * 2 / 3))
 	rightWidth := m.width - leftWidth - 3
 	if rightWidth < 28 {
@@ -265,8 +290,8 @@ func (m dashboardModel) View() string {
 		leftWidth = max(48, m.width-rightWidth-3)
 	}
 
-	statusHeight := 1
-	footerHeight := 1
+	statusHeight := max(1, lipgloss.Height(status))
+	footerHeight := max(1, lipgloss.Height(footer))
 	_, panelFrameHeight := m.panelStyle.GetFrameSize()
 	availableHeight := m.height - statusHeight - footerHeight
 	if availableHeight < (panelFrameHeight+1)*2 {
@@ -291,8 +316,6 @@ func (m dashboardModel) View() string {
 	leftPanel := m.panelStyle.Width(leftWidth).Height(topPanelsContentHeight).Render(m.renderModules(leftWidth-4, topPanelsContentHeight))
 	rightPanel := m.panelStyle.Width(rightWidth).Height(topPanelsContentHeight).Render(m.renderQueue(rightWidth-4, topPanelsContentHeight))
 	logPanel := m.panelStyle.Width(m.width).Height(logPanelContentHeight).Render(m.renderLogs(m.width-4, logPanelContentHeight))
-	status := m.renderStatusLine()
-	footer := m.renderFooter()
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -344,12 +367,24 @@ func (m dashboardModel) runBlocking(fn func() (DashboardActionResult, error)) te
 	}
 }
 
+func (m *dashboardModel) startEnqueueCurrentModule() (dashboardModel, tea.Cmd) {
+	module := m.currentModule()
+	if m.controller.OnEnqueue == nil || module.ID == "" {
+		return *m, nil
+	}
+	m.busy = true
+	m.lastMessage = "Настройка задачи..."
+	m.lastError = ""
+	return *m, m.runBlocking(func() (DashboardActionResult, error) {
+		return m.controller.OnEnqueue(module)
+	})
+}
+
 func (m dashboardModel) renderModules(width int, height int) string {
 	lines := make([]string, 0, max(1, height))
 	start, end := visibleRange(m.moduleIndex, len(m.modules), max(1, height))
 	for i := start; i < end; i++ {
-		module := m.modules[i]
-		line := truncateText(module.Title, width)
+		line := truncateText(m.formatModuleLine(i, start, width), width)
 		if i == m.moduleIndex && m.focus == 0 {
 			line = m.focusStyle.Width(width).Render(line)
 		} else if i == m.moduleIndex {
@@ -457,14 +492,24 @@ func (m dashboardModel) renderStatusLine() string {
 }
 
 func (m dashboardModel) renderFooter() string {
-	parts := []string{
+	firstLine := []string{
 		m.keyStyle.Render("Tab") + " сменить панель",
+		m.keyStyle.Render("1-9,0") + " быстрый запуск",
 		m.keyStyle.Render("Enter") + " добавить",
+	}
+	secondLine := []string{
 		m.keyStyle.Render("Del") + " удалить/отменить",
+		m.keyStyle.Render("Мышь") + " выбор/клик",
 		m.keyStyle.Render("C") + " очистить",
 		m.keyStyle.Render("Q") + " выход",
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("#F3E9D2")).Width(m.width).Render(strings.Join(parts, "   "))
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#BFCBA8")).
+		Width(m.width)
+	return strings.Join([]string{
+		helpStyle.Render(strings.Join(firstLine, "   ")),
+		helpStyle.Render(strings.Join(secondLine, "   ")),
+	}, "\n")
 }
 
 func (m dashboardModel) renderLogs(width int, height int) string {
@@ -561,6 +606,225 @@ func (m dashboardModel) spinnerFrame() string {
 	return m.spinnerFrames[m.spinnerIndex%len(m.spinnerFrames)]
 }
 
+func (m *dashboardModel) moveFocus(delta int) {
+	if delta == 0 {
+		return
+	}
+	if len(m.tasks) == 0 {
+		m.focus = 0
+		return
+	}
+	if delta > 0 {
+		m.focus = (m.focus + 1) % 2
+		return
+	}
+	m.focus--
+	if m.focus < 0 {
+		m.focus = 1
+	}
+}
+
+func (m dashboardModel) shortcutModuleIndex(key string) (int, bool) {
+	start, end := visibleRange(m.moduleIndex, len(m.modules), max(1, m.modulesRect().height))
+	for pos := start; pos < end && pos < start+len(menuShortcutKeys); pos++ {
+		if menuShortcutKeys[pos-start] == key {
+			return pos, true
+		}
+	}
+	return 0, false
+}
+
+func (m dashboardModel) formatModuleLine(index int, start int, width int) string {
+	label := menuShortcutLabel(index - start)
+	titleWidth := width - len(label) - 1
+	if titleWidth < 0 {
+		titleWidth = 0
+	}
+	return strings.TrimSpace(label + " " + truncateText(m.modules[index].Title, titleWidth))
+}
+
+func (m dashboardModel) handleMouse(msg tea.MouseMsg) (dashboardModel, tea.Cmd) {
+	switch msg.Action {
+	case tea.MouseActionMotion:
+		if index, ok := m.moduleIndexAt(msg.X, msg.Y); ok {
+			m.moduleIndex = index
+			m.focus = 0
+			m.normalize()
+			return m, nil
+		}
+		if index, ok := m.taskIndexAt(msg.X, msg.Y); ok {
+			m.taskIndex = index
+			m.focus = 1
+			m.normalize()
+			return m, nil
+		}
+	case tea.MouseActionPress:
+		if msg.Button != tea.MouseButtonLeft {
+			return m, nil
+		}
+		if index, ok := m.moduleIndexAt(msg.X, msg.Y); ok {
+			m.moduleIndex = index
+			m.focus = 0
+			m.normalize()
+			return m.startEnqueueCurrentModule()
+		}
+		if index, ok := m.taskIndexAt(msg.X, msg.Y); ok {
+			m.taskIndex = index
+			m.focus = 1
+			m.normalize()
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m dashboardModel) moduleIndexAt(x int, y int) (int, bool) {
+	rect := m.modulesRect()
+	if !rect.contains(x, y) {
+		return 0, false
+	}
+	start, end := visibleRange(m.moduleIndex, len(m.modules), max(1, rect.height))
+	index := start + (y - rect.y)
+	if index < start || index >= end {
+		return 0, false
+	}
+	return index, true
+}
+
+func (m dashboardModel) taskIndexAt(x int, y int) (int, bool) {
+	rect := m.queueRect()
+	if !rect.contains(x, y) {
+		return 0, false
+	}
+	start, end := visibleRange(m.taskIndex, len(m.tasks), max(1, rect.height/3))
+	line := y - rect.y
+	maxLine := (end - start) * 3
+	if line < 0 || line >= maxLine {
+		return 0, false
+	}
+	index := start + line/3
+	if index < start || index >= end {
+		return 0, false
+	}
+	return index, true
+}
+
+func (m dashboardModel) modulesRect() dashboardRect {
+	return m.layout().modules
+}
+
+func (m dashboardModel) queueRect() dashboardRect {
+	return m.layout().queue
+}
+
+func (m dashboardModel) layout() dashboardLayout {
+	if m.width <= 0 || m.height <= 0 {
+		return dashboardLayout{}
+	}
+
+	statusHeight := max(1, lipgloss.Height(m.renderStatusLine()))
+	footerHeight := max(1, lipgloss.Height(m.renderFooter()))
+	leftWidth := max(48, ((m.width - 3) * 2 / 3))
+	rightWidth := m.width - leftWidth - 3
+	if rightWidth < 28 {
+		rightWidth = 28
+		leftWidth = max(48, m.width-rightWidth-3)
+	}
+
+	panelFrameWidth, panelFrameHeight := m.panelStyle.GetFrameSize()
+	availableHeight := m.height - statusHeight - footerHeight
+	if availableHeight < (panelFrameHeight+1)*2 {
+		availableHeight = (panelFrameHeight + 1) * 2
+	}
+
+	topPanelsTotalHeight := availableHeight * 2 / 3
+	logPanelTotalHeight := availableHeight - topPanelsTotalHeight
+	minPanelTotalHeight := panelFrameHeight + 1
+	if topPanelsTotalHeight < minPanelTotalHeight {
+		topPanelsTotalHeight = minPanelTotalHeight
+		logPanelTotalHeight = availableHeight - topPanelsTotalHeight
+	}
+	if logPanelTotalHeight < minPanelTotalHeight {
+		logPanelTotalHeight = minPanelTotalHeight
+		topPanelsTotalHeight = availableHeight - logPanelTotalHeight
+	}
+
+	contentInsetX := panelFrameWidth / 2
+	contentInsetY := panelFrameHeight / 2
+	contentHeight := max(1, topPanelsTotalHeight-panelFrameHeight)
+
+	return dashboardLayout{
+		modules: dashboardRect{
+			x:      contentInsetX,
+			y:      contentInsetY,
+			width:  leftWidth - panelFrameWidth,
+			height: contentHeight,
+		},
+		queue: dashboardRect{
+			x:      leftWidth + contentInsetX,
+			y:      contentInsetY,
+			width:  rightWidth - panelFrameWidth,
+			height: contentHeight,
+		},
+	}
+}
+
+func (r dashboardRect) contains(x int, y int) bool {
+	return x >= r.x && x < r.x+r.width && y >= r.y && y < r.y+r.height
+}
+
+func visibleDashboardTasks(tasks []dashboardTask) []dashboardTask {
+	filtered := make([]dashboardTask, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Snapshot.State == taskqueue.TaskSuccess {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	return filtered
+}
+
+func (m *dashboardModel) resolveTaskSelection(currentTaskID string) (string, bool) {
+	if m.pendingTaskID != "" {
+		taskID := m.pendingTaskID
+		m.pendingTaskID = ""
+		if hasTaskWithID(m.tasks, taskID) {
+			return taskID, true
+		}
+	}
+
+	running := firstTaskWithState(m.tasks, taskqueue.TaskRunning)
+	if running != nil {
+		if currentTaskID != running.Snapshot.ID {
+			return running.Snapshot.ID, currentTaskID != ""
+		}
+		return running.Snapshot.ID, false
+	}
+
+	if currentTaskID != "" && hasTaskWithID(m.tasks, currentTaskID) {
+		return currentTaskID, false
+	}
+
+	if len(m.tasks) > 0 {
+		return m.tasks[0].Snapshot.ID, currentTaskID != ""
+	}
+
+	return "", false
+}
+
+func hasTaskWithID(tasks []dashboardTask, taskID string) bool {
+	return findTaskIndex(tasks, taskID) >= 0
+}
+
+func firstTaskWithState(tasks []dashboardTask, state taskqueue.TaskState) *dashboardTask {
+	for i := range tasks {
+		if tasks[i].Snapshot.State == state {
+			return &tasks[i]
+		}
+	}
+	return nil
+}
+
 func formatTaskState(state taskqueue.TaskState) string {
 	switch state {
 	case taskqueue.TaskQueued:
@@ -627,12 +891,18 @@ func truncateText(text string, width int) string {
 }
 
 func findTaskIndex(tasks []dashboardTask, selectedID string) int {
+	if selectedID == "" {
+		if len(tasks) == 0 {
+			return 0
+		}
+		return 0
+	}
 	for i, task := range tasks {
 		if task.Snapshot.ID == selectedID {
 			return i
 		}
 	}
-	return 0
+	return -1
 }
 
 func max(a, b int) int {
