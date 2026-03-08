@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"goMH/taskqueue"
 	"time"
 
 	"github.com/lxn/walk"
@@ -80,12 +81,21 @@ func (c *GuiContext) SetProgress(percent int) {
 	})
 }
 
-// TaskGuiContext is created per task and forwards telemetry to TaskManager.
+// TaskGuiContext проксирует телеметрию задачи в общий runtime очереди.
 type TaskGuiContext struct {
-	tm      *TaskManager
+	queue   *taskqueue.Queue
 	taskID  string
 	module  string
 	runtime context.Context
+}
+
+func NewTaskGuiContext(queue *taskqueue.Queue, snapshot taskqueue.TaskSnapshot, runtimeCtx context.Context) *TaskGuiContext {
+	return &TaskGuiContext{
+		queue:   queue,
+		taskID:  snapshot.ID,
+		module:  snapshot.ModuleID,
+		runtime: runtimeCtx,
+	}
 }
 
 func (c *TaskGuiContext) Context() context.Context {
@@ -97,7 +107,7 @@ func (c *TaskGuiContext) Context() context.Context {
 
 func (c *TaskGuiContext) log(level, msg string) {
 	line := fmt.Sprintf("[%s][%s][%s][%s] %s", time.Now().Format("15:04:05"), c.module, c.taskID, level, msg)
-	c.tm.appendLog(c.taskID, line)
+	c.queue.AppendLogLine(c.taskID, line)
 }
 
 func (c *TaskGuiContext) Info(msg string) {
@@ -117,10 +127,9 @@ func (c *TaskGuiContext) Success(msg string) {
 }
 
 func (c *TaskGuiContext) SetStatus(text string) {
-	c.tm.updateStatus(c.taskID, text)
-	c.log("STAGE", text)
+	c.queue.UpdateStatus(c.taskID, text)
 }
 
 func (c *TaskGuiContext) SetProgress(percent int) {
-	c.tm.updateProgress(c.taskID, percent)
+	c.queue.UpdateProgress(c.taskID, percent)
 }

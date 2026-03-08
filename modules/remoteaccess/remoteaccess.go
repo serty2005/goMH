@@ -25,6 +25,51 @@ func (m *Module) MenuText() string {
 	return "Установить средства удаленного доступа (TV, LM, RustDesk, POSRelayd)"
 }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager, services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	title := "Удаленный доступ"
+	signature := "remoteaccess|generic"
+	switch cfg.Tool {
+	case ToolTeamViewer:
+		title = "Установка TeamViewer"
+		signature = "remoteaccess|teamviewer"
+	case ToolLiteManager:
+		title = "Установка LiteManager"
+		signature = "remoteaccess|litemanager"
+	case ToolRustDesk:
+		title = "Установка RustDesk"
+		signature = "remoteaccess|rustdesk"
+	case ToolPOSRelayd:
+		title = "Установка POSRelayd Agent"
+		signature = "remoteaccess|posrelayd"
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+			Exclusive: isExclusiveRemoteAccess(cfg),
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
 // ToolType определяет тип инструмента
 type ToolType int
 
@@ -149,6 +194,23 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return m.installPOSRelayd(ctx, am, wu)
 	}
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*RemoteAccessConfig, error) {
+	cfg, ok := config.(*RemoteAccessConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
+}
+
+func isExclusiveRemoteAccess(cfg *RemoteAccessConfig) bool {
+	switch cfg.Tool {
+	case ToolTeamViewer, ToolLiteManager, ToolRustDesk:
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Логика установки ---

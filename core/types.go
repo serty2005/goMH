@@ -79,11 +79,58 @@ type AssetManager interface {
 	Cfg() *config.Config
 }
 
-// Installer — это единый интерфейс для всех устанавливаемых модулей.
+// Installer — базовый интерфейс модуля приложения.
 type Installer interface {
 	ID() string
 	MenuText() string
 	Run(am AssetManager, wu WinUtils) error
+}
+
+// ModuleServices объединяет зависимости, доступные модулям на уровне приложения.
+type ModuleServices struct {
+	AssetManager AssetManager
+	WinUtils     WinUtils
+}
+
+// ModuleTaskSpec описывает задачу, которую модуль хочет поставить в очередь.
+type ModuleTaskSpec struct {
+	Title     string
+	Signature string
+	Exclusive bool
+}
+
+type ModuleRunMode int
+
+const (
+	ModuleRunModeQueue ModuleRunMode = iota
+	ModuleRunModeImmediate
+)
+
+// ModuleActionResult описывает результат постановки задачи или немедленного действия.
+type ModuleActionResult struct {
+	Note       string
+	TaskID     string
+	SelectTask bool
+}
+
+// ModuleTaskPlan описывает, как модуль должен быть выполнен после конфигурации.
+type ModuleTaskPlan struct {
+	Mode   ModuleRunMode
+	Task   ModuleTaskSpec
+	Result ModuleActionResult
+}
+
+// QueueModule описывает единый контракт модуля для конфигурации, сборки task spec и выполнения.
+type QueueModule interface {
+	Installer
+	ConfigureTask(ctx TaskContext, services ModuleServices) (any, error)
+	BuildTask(config any) (ModuleTaskPlan, error)
+	ExecuteTask(ctx TaskContext, services ModuleServices, config any) error
+}
+
+// ImmediateModuleAction позволяет модулю выполнить особое действие без постановки в очередь.
+type ImmediateModuleAction interface {
+	ExecuteImmediate(ctx TaskContext, services ModuleServices, config any) (ModuleActionResult, error)
 }
 
 type FTPEntry struct {

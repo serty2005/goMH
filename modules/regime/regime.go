@@ -89,6 +89,41 @@ func (m *Module) MenuText() string {
 	return "Regime (Локальный модуль ЧестныйЗнак)"
 }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	title := "Regime: новая установка"
+	signature := "regime|install|" + cfg.Username
+	if cfg.IsReinstall {
+		title = "Regime: переустановка"
+		signature = "regime|reinstall"
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+			Exclusive: true,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, *cfg)
+}
+
 // Run - точка входа (UI слой)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	ctx := tui.NewConsoleContext()
@@ -309,4 +344,18 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	}
 
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*RegimeInstallConfig, error) {
+	switch cfg := config.(type) {
+	case RegimeInstallConfig:
+		return &cfg, nil
+	case *RegimeInstallConfig:
+		if cfg == nil {
+			return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+		}
+		return cfg, nil
+	default:
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
 }

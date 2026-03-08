@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"goMH/core"
+	"sync"
 	"testing"
 	"time"
 )
@@ -118,6 +119,99 @@ func TestQueueTracksFailureAndLogs(t *testing.T) {
 	}
 	if snapshots[0].LastError != "boom" {
 		t.Fatalf("unexpected last error: %s", snapshots[0].LastError)
+	}
+}
+
+func TestQueueNotifiesListenersAboutTaskLifecycle(t *testing.T) {
+	queue := New()
+
+	var (
+		mu       sync.Mutex
+		enqueued TaskSnapshot
+		started  TaskSnapshot
+		finished TaskSnapshot
+		updates  []TaskSnapshot
+		logs     []string
+	)
+
+	queue.AddListener(Listener{
+		OnTaskEnqueued: func(snapshot TaskSnapshot) {
+			mu.Lock()
+			enqueued = snapshot
+			mu.Unlock()
+		},
+		OnTaskStarted: func(snapshot TaskSnapshot) {
+			mu.Lock()
+			started = snapshot
+			mu.Unlock()
+		},
+		OnTaskUpdated: func(snapshot TaskSnapshot) {
+			mu.Lock()
+			updates = append(updates, snapshot)
+			mu.Unlock()
+		},
+		OnTaskLog: func(_ TaskSnapshot, line string) {
+			mu.Lock()
+			logs = append(logs, line)
+			mu.Unlock()
+		},
+		OnTaskFinished: func(snapshot TaskSnapshot) {
+			mu.Lock()
+			finished = snapshot
+			mu.Unlock()
+		},
+	})
+
+	_, err := queue.Enqueue(TaskSpec{
+		ID:        "listener-1",
+		ModuleID:  "test",
+		Title:     "listener",
+		Signature: "listener",
+		Run: func(ctx core.TaskContext) error {
+			ctx.SetStatus("Шаг 1")
+			ctx.SetProgress(42)
+			ctx.Info("Подробности")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	startedBackground := queue.StartBackground(func(snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, snapshot.ID, runtimeCtx)
+	})
+	if !startedBackground {
+		t.Fatal("background mode was not started")
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return finished.ID == "listener-1"
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if enqueued.ID != "listener-1" {
+		t.Fatalf("unexpected enqueued snapshot: %+v", enqueued)
+	}
+	if started.State != TaskRunning {
+		t.Fatalf("expected started state %s, got %s", TaskRunning, started.State)
+	}
+	if len(updates) == 0 {
+		t.Fatal("expected at least one updated snapshot")
+	}
+	lastUpdate := updates[len(updates)-1]
+	if lastUpdate.Progress != 42 {
+		t.Fatalf("unexpected progress in last update: %d", lastUpdate.Progress)
+	}
+	if len(logs) == 0 {
+		t.Fatal("expected listener logs to be delivered")
+	}
+	if finished.State != TaskSuccess {
+		t.Fatalf("expected success finish state, got %s", finished.State)
 	}
 }
 

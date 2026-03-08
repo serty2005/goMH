@@ -1,21 +1,23 @@
 package gui
 
 import (
+	"errors"
+	"fmt"
+	"goMH/app/modruntime"
 	"goMH/config"
 	"goMH/core"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/regime"
-	"goMH/modules/utm"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 )
 
 type CombinedForm struct {
-	am  core.AssetManager
-	wu  core.WinUtils
-	tm  *TaskManager
-	ctx *GuiContext
+	am           core.AssetManager
+	wu           core.WinUtils
+	queueService *modruntime.Service
+	ctx          *GuiContext
 
 	// Fiscal
 	fiscalCombo *walk.ComboBox
@@ -27,13 +29,13 @@ type CombinedForm struct {
 	regimeGB   *walk.GroupBox // Чтобы скрывать/показывать поля ввода
 }
 
-func NewCombinedForm(parent walk.Container, am core.AssetManager, wu core.WinUtils, tm *TaskManager, ctx *GuiContext) (walk.Widget, error) {
+func NewCombinedForm(parent walk.Container, am core.AssetManager, wu core.WinUtils, queueService *modruntime.Service, ctx *GuiContext) (walk.Widget, error) {
 	form := &CombinedForm{
-		am:          am,
-		wu:          wu,
-		tm:          tm,
-		ctx:         ctx,
-		fiscalModel: NewFiscalDriverModel(am.Cfg().FiscalDriversConfig),
+		am:           am,
+		wu:           wu,
+		queueService: queueService,
+		ctx:          ctx,
+		fiscalModel:  NewFiscalDriverModel(am.Cfg().FiscalDriversConfig),
 	}
 
 	// Проверка статуса Regime для UI (нужно ли показывать поля ввода)
@@ -159,18 +161,11 @@ func (f *CombinedForm) onInstallFiscal() {
 	cfg := &fiscaldrivers.DriverInstallConfig{
 		Driver: driver,
 	}
-
-	f.tm.AddTask(func() error {
-		mod := &fiscaldrivers.Module{}
-		return mod.Execute(f.ctx, f.am, f.wu, cfg)
-	})
+	f.enqueuePrepared("FiscalDrivers", cfg, "Установка драйвера: "+driver.MenuText)
 }
 
 func (f *CombinedForm) onInstallUTM() {
-	f.tm.AddTask(func() error {
-		mod := &utm.Module{}
-		return mod.Execute(f.ctx, f.am, f.wu)
-	})
+	f.enqueuePrepared("UTM", struct{}{}, "Установка УТМ")
 }
 
 func (f *CombinedForm) onInstallRegime(isReinstall bool) {
@@ -191,10 +186,30 @@ func (f *CombinedForm) onInstallRegime(isReinstall bool) {
 		Password:    password,
 	}
 
-	f.tm.AddTask(func() error {
-		mod := &regime.Module{}
-		return mod.Execute(f.ctx, f.am, f.wu, cfg)
-	})
+	f.enqueuePrepared("Regime", cfg, "Установка Regime")
+}
+
+func (f *CombinedForm) enqueuePrepared(moduleID string, config any, successTitle string) {
+	if f.queueService == nil {
+		f.ctx.Error("Сервис очереди не инициализирован")
+		return
+	}
+
+	result, err := f.queueService.EnqueuePrepared(moduleID, config)
+	if err != nil {
+		if errors.Is(err, ErrDuplicateTask) {
+			f.ctx.Warn("Такая же задача уже в очереди или выполняется")
+			return
+		}
+		f.ctx.Error(fmt.Sprintf("Не удалось поставить задачу в очередь: %v", err))
+		return
+	}
+
+	message := result.Note
+	if message == "" {
+		message = "Задача добавлена в очередь: " + successTitle
+	}
+	f.ctx.Info(message)
 }
 
 // --- Models ---

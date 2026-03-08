@@ -58,6 +58,52 @@ func (m *Module) MenuText() string {
 	return "Fast Reverse Proxy Client (проброс портов)"
 }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	m.Cfg = &services.AssetManager.Cfg().FrpcConfig
+	return m.Configure(ctx, services.AssetManager, services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	title := "FRPC"
+	signature := "frpc|generic"
+	switch cfg.Action {
+	case ActionInstall:
+		title = fmt.Sprintf("FRPC: установка %s:%s -> %d", cfg.Alias, cfg.LocalPort, cfg.RemotePort)
+		signature = fmt.Sprintf("frpc|install|%s|%s|%d", cfg.Alias, cfg.LocalPort, cfg.RemotePort)
+	case ActionAddPort:
+		title = fmt.Sprintf("FRPC: порт %s:%s -> %d", cfg.Alias, cfg.LocalPort, cfg.RemotePort)
+		signature = fmt.Sprintf("frpc|add|%s|%s|%d", cfg.Alias, cfg.LocalPort, cfg.RemotePort)
+	case ActionReinstall:
+		title = fmt.Sprintf("FRPC: переустановка %s:%s -> %d", cfg.Alias, cfg.LocalPort, cfg.RemotePort)
+		signature = fmt.Sprintf("frpc|reinstall|%s|%s|%d", cfg.Alias, cfg.LocalPort, cfg.RemotePort)
+	case ActionUninstall:
+		title = "FRPC: удаление"
+		signature = "frpc|uninstall"
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	m.Cfg = &services.AssetManager.Cfg().FrpcConfig
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
 // Run - точка входа (UI)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Запуск модуля FRPC")
@@ -251,6 +297,14 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	ctx.Success("Операция FRPC успешно завершена.")
 	slog.Info("Операция FRPC успешно завершена")
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*FrpcInstallConfig, error) {
+	cfg, ok := config.(*FrpcInstallConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
 }
 
 // --- Вспомогательные функции ---

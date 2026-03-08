@@ -2,8 +2,11 @@ package gui
 
 import (
 	"fmt"
+	"goMH/app/modruntime"
 	"goMH/config"
 	"goMH/core"
+	moduleregistry "goMH/modules/registry"
+	"goMH/taskqueue"
 	"time"
 
 	"github.com/lxn/walk"
@@ -16,7 +19,7 @@ type GuiModuleItem struct {
 	Enabled bool
 }
 
-func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) error {
+func Run(cfg *config.Config, registry *moduleregistry.Registry, am core.AssetManager, wu core.WinUtils) error {
 	var mw *walk.MainWindow
 	var logText *walk.TextEdit
 	var statusBar *walk.StatusBarItem
@@ -112,7 +115,18 @@ func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) error {
 	}
 
 	ctx := NewGuiContext(mw, logText, statusBar, progressBar)
-	tm := NewTaskManager()
+	queue := taskqueue.New()
+	tm := NewTaskManager(queue)
+	queueService := &modruntime.Service{
+		Resolver:  registry,
+		Submitter: modruntime.NewTaskQueueSubmitter(queue),
+		Services: core.ModuleServices{
+			AssetManager: am,
+			WinUtils:     wu,
+		},
+		ConfigureContext: ctx,
+		ImmediateContext: ctx,
+	}
 
 	refreshQueue := func() {
 		taskModel.Replace(tm.Snapshots())
@@ -171,7 +185,7 @@ func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) error {
 			ctx.Warn("Раздел пока недоступен в GUI: " + modItem.Title)
 			return
 		}
-		loadModuleForm(contentArea, modItem.ID, am, wu, tm, ctx)
+		loadModuleForm(contentArea, modItem.ID, am, wu, queueService, ctx)
 	})
 
 	if len(guiModules) > 0 {
@@ -204,7 +218,7 @@ func loadDisabledModuleForm(parent *walk.Composite, item GuiModuleItem) {
 	}.Create(NewBuilder(parent))
 }
 
-func loadModuleForm(parent *walk.Composite, moduleID string, am core.AssetManager, wu core.WinUtils, tm *TaskManager, ctx *GuiContext) {
+func loadModuleForm(parent *walk.Composite, moduleID string, am core.AssetManager, wu core.WinUtils, queueService *modruntime.Service, ctx *GuiContext) {
 	parent.SetSuspended(true)
 	defer parent.SetSuspended(false)
 
@@ -223,7 +237,7 @@ func loadModuleForm(parent *walk.Composite, moduleID string, am core.AssetManage
 		return
 	}
 
-	_, err := factory(parent, am, wu, tm, ctx)
+	_, err := factory(parent, am, wu, queueService, ctx)
 	if err != nil {
 		Label{Text: "Ошибка загрузки формы: " + err.Error()}.Create(NewBuilder(parent))
 	}

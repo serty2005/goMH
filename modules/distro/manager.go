@@ -51,6 +51,63 @@ func (m *Module) MenuText() string {
 	return "iiko / Syrve (Дистрибутивы и плагины)"
 }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager, services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	patchName := ""
+	if cfg.Patch != nil {
+		patchName = cfg.Patch.ShortName
+	}
+
+	title := "Задача iiko / Syrve"
+	signature := "distro|generic"
+	switch cfg.Action {
+	case ActionInstallComponent:
+		parts := []string{cfg.Brand, cfg.Component.MenuText}
+		if cfg.Version != "" {
+			parts = append(parts, cfg.Version)
+		}
+		if patchName != "" {
+			parts = append(parts, "патч "+patchName)
+		}
+		title = "Установка " + strings.Join(parts, " ")
+		signature = fmt.Sprintf("distro|component|%s|%s|%s|%s", cfg.Brand, cfg.Component.ID, cfg.Version, patchName)
+	case ActionInstallPortable:
+		title = fmt.Sprintf("Portable %s %s %s", cfg.Brand, cfg.Component.MenuText, cfg.Version)
+		signature = fmt.Sprintf("distro|portable|%s|%s|%s", cfg.Brand, cfg.Component.ID, cfg.Version)
+	case ActionManualPatch:
+		title = fmt.Sprintf("Ручной патч %s %s", cfg.Brand, patchName)
+		signature = fmt.Sprintf("distro|manual_patch|%s|%s|%s", cfg.Brand, cfg.Version, patchName)
+	case ActionPlugins:
+		title = fmt.Sprintf("Автообновление плагинов %s", cfg.Brand)
+		signature = fmt.Sprintf("distro|plugins|%s", cfg.Brand)
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+			Exclusive: cfg.Action == ActionInstallComponent,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
 // brandHandler определяет интерфейс для специфичной логики бренда при конфигурации.
 type brandHandler interface {
 	// ConfigureBrand проводит опрос пользователя и возвращает конфиг
@@ -148,6 +205,14 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return m.executeInstallPortable(ctx, am, wu, cfg)
 	}
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*DistroInstallConfig, error) {
+	cfg, ok := config.(*DistroInstallConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
 }
 
 // --- EXECUTE IMPLEMENTATIONS ---

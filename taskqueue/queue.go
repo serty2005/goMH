@@ -58,6 +58,14 @@ type RunSummary struct {
 
 type ContextFactory func(TaskSnapshot, context.Context) core.TaskContext
 
+type Listener struct {
+	OnTaskEnqueued func(TaskSnapshot)
+	OnTaskStarted  func(TaskSnapshot)
+	OnTaskUpdated  func(TaskSnapshot)
+	OnTaskLog      func(TaskSnapshot, string)
+	OnTaskFinished func(TaskSnapshot)
+}
+
 type taskRecord struct {
 	spec       TaskSpec
 	snapshot   TaskSnapshot
@@ -71,14 +79,20 @@ type Queue struct {
 	cond              *sync.Cond
 	tasks             []*taskRecord
 	seq               uint64
+	listenerSeq       uint64
 	logLimit          int
 	started           bool
 	runningExclusive  bool
 	backgroundFactory ContextFactory
+	listenersMu       sync.RWMutex
+	listeners         map[uint64]Listener
 }
 
 func New() *Queue {
-	queue := &Queue{logLimit: 200}
+	queue := &Queue{
+		logLimit:  200,
+		listeners: make(map[uint64]Listener),
+	}
 	queue.cond = sync.NewCond(&queue.mu)
 	return queue
 }
@@ -100,13 +114,13 @@ func (q *Queue) Enqueue(spec TaskSpec) (TaskSnapshot, error) {
 	}
 
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	for _, rec := range q.tasks {
 		if rec.snapshot.Signature != spec.Signature {
 			continue
 		}
 		if rec.snapshot.State == TaskQueued || rec.snapshot.State == TaskRunning {
+			q.mu.Unlock()
 			return TaskSnapshot{}, ErrDuplicateTask
 		}
 	}
@@ -130,10 +144,12 @@ func (q *Queue) Enqueue(spec TaskSpec) (TaskSnapshot, error) {
 		logs:     []string{fmt.Sprintf("[%s] [QUEUE] Задача добавлена в очередь", now.Format("15:04:05"))},
 	}
 	q.tasks = append(q.tasks, rec)
-	logging.LogTaskQueued(snapshot.ModuleID, snapshot.ID, snapshot.Title)
 	if q.started {
 		q.cond.Broadcast()
 	}
+	q.mu.Unlock()
+
+	q.afterTaskEnqueued(rec.snapshot)
 	return rec.snapshot, nil
 }
 
@@ -153,6 +169,8 @@ func (q *Queue) RemoveQueued(taskID string) bool {
 
 func (q *Queue) Cancel(taskID string) bool {
 	var cancel context.CancelFunc
+	var snapshot TaskSnapshot
+	var line string
 
 	q.mu.Lock()
 	rec := q.findLocked(taskID)
@@ -167,9 +185,13 @@ func (q *Queue) Cancel(taskID string) bool {
 	rec.snapshot.Cancelable = false
 	rec.snapshot.StageText = "Отмена запрошена"
 	rec.snapshot.UpdatedAt = now
-	q.appendLogLocked(rec, fmt.Sprintf("[%s] [WARN] Запрошена отмена задачи", now.Format("15:04:05")))
+	line = fmt.Sprintf("[%s] [WARN] Запрошена отмена задачи", now.Format("15:04:05"))
+	q.appendLogLocked(rec, line)
+	snapshot = rec.snapshot
 	q.mu.Unlock()
 
+	q.notifyTaskUpdated(snapshot)
+	q.notifyTaskLog(snapshot, line)
 	cancel()
 	return true
 }
@@ -254,6 +276,20 @@ func (q *Queue) StartBackground(contextFactory ContextFactory) bool {
 	return true
 }
 
+func (q *Queue) AddListener(listener Listener) func() {
+	id := atomic.AddUint64(&q.listenerSeq, 1)
+
+	q.listenersMu.Lock()
+	q.listeners[id] = listener
+	q.listenersMu.Unlock()
+
+	return func() {
+		q.listenersMu.Lock()
+		delete(q.listeners, id)
+		q.listenersMu.Unlock()
+	}
+}
+
 func (q *Queue) RunPending(contextFactory ContextFactory) RunSummary {
 	pending := q.pendingRecords()
 	summary := RunSummary{
@@ -270,6 +306,7 @@ func (q *Queue) RunPending(contextFactory ContextFactory) RunSummary {
 
 	for _, rec := range pending {
 		snapshot := q.markRunning(rec)
+		q.afterTaskStarted(snapshot)
 		ctx := q.buildContext(contextFactory, snapshot, rec.runtimeCtx)
 
 		err := rec.spec.Run(ctx)
@@ -300,6 +337,7 @@ func (q *Queue) pendingRecords() []*taskRecord {
 func (q *Queue) dispatcher() {
 	for {
 		rec, snapshot, runtimeCtx, contextFactory := q.waitNextTask()
+		q.afterTaskStarted(snapshot)
 		go q.runTask(rec, snapshot, runtimeCtx, contextFactory)
 	}
 }
@@ -352,13 +390,11 @@ func (q *Queue) markRunningLocked(rec *taskRecord) TaskSnapshot {
 	rec.snapshot.Progress = 0
 	rec.snapshot.Cancelable = true
 	q.appendLogLocked(rec, fmt.Sprintf("[%s] [STAGE] Задача запущена", now.Format("15:04:05")))
-	logging.LogTaskStarted(rec.snapshot.ModuleID, rec.snapshot.ID, rec.snapshot.Title)
 	return rec.snapshot
 }
 
 func (q *Queue) markFinished(rec *taskRecord, err error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	now := time.Now()
 	if rec.cancel != nil {
@@ -384,8 +420,10 @@ func (q *Queue) markFinished(rec *taskRecord, err error) {
 			rec.snapshot.StageText = "Завершено с ошибкой"
 			q.appendLogLocked(rec, fmt.Sprintf("[%s] [ERROR] %s", now.Format("15:04:05"), err.Error()))
 		}
-		logging.LogTaskFinished(rec.snapshot.ModuleID, rec.snapshot.ID, rec.snapshot.Title, err)
 		q.cond.Broadcast()
+		snapshot := rec.snapshot
+		q.mu.Unlock()
+		q.afterTaskFinished(snapshot, err)
 		return
 	}
 
@@ -394,45 +432,72 @@ func (q *Queue) markFinished(rec *taskRecord, err error) {
 	rec.snapshot.StageText = "Успешно завершено"
 	rec.snapshot.Progress = 100
 	q.appendLogLocked(rec, fmt.Sprintf("[%s] [SUCCESS] Задача завершена успешно", now.Format("15:04:05")))
-	logging.LogTaskFinished(rec.snapshot.ModuleID, rec.snapshot.ID, rec.snapshot.Title, nil)
 	q.cond.Broadcast()
+	snapshot := rec.snapshot
+	q.mu.Unlock()
+	q.afterTaskFinished(snapshot, nil)
 }
 
 func (q *Queue) updateStatus(taskID, status string) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	if rec := q.findLocked(taskID); rec != nil {
-		rec.snapshot.StageText = status
-		rec.snapshot.UpdatedAt = time.Now()
-		q.appendLogLocked(rec, fmt.Sprintf("[%s] [STAGE] %s", time.Now().Format("15:04:05"), status))
+	rec := q.findLocked(taskID)
+	if rec == nil {
+		q.mu.Unlock()
+		return
 	}
+
+	now := time.Now()
+	line := fmt.Sprintf("[%s] [STAGE] %s", now.Format("15:04:05"), status)
+	rec.snapshot.StageText = status
+	rec.snapshot.UpdatedAt = now
+	q.appendLogLocked(rec, line)
+	snapshot := rec.snapshot
+	q.mu.Unlock()
+
+	q.notifyTaskUpdated(snapshot)
+	q.notifyTaskLog(snapshot, line)
 }
 
 func (q *Queue) updateProgress(taskID string, progress int) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	if rec := q.findLocked(taskID); rec != nil {
-		if progress < 0 {
-			progress = 0
-		}
-		if progress > 100 {
-			progress = 100
-		}
-		rec.snapshot.Progress = progress
-		rec.snapshot.UpdatedAt = time.Now()
+	rec := q.findLocked(taskID)
+	if rec == nil {
+		q.mu.Unlock()
+		return
 	}
+
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	rec.snapshot.Progress = progress
+	rec.snapshot.UpdatedAt = time.Now()
+	snapshot := rec.snapshot
+	q.mu.Unlock()
+
+	q.notifyTaskUpdated(snapshot)
 }
 
 func (q *Queue) appendLog(taskID, level, line string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	q.appendLogLine(taskID, fmt.Sprintf("[%s] [%s] %s", time.Now().Format("15:04:05"), level, line))
+}
 
-	if rec := q.findLocked(taskID); rec != nil {
-		rec.snapshot.UpdatedAt = time.Now()
-		q.appendLogLocked(rec, fmt.Sprintf("[%s] [%s] %s", time.Now().Format("15:04:05"), level, line))
+func (q *Queue) appendLogLine(taskID, line string) {
+	q.mu.Lock()
+	rec := q.findLocked(taskID)
+	if rec == nil {
+		q.mu.Unlock()
+		return
 	}
+
+	rec.snapshot.UpdatedAt = time.Now()
+	q.appendLogLocked(rec, line)
+	snapshot := rec.snapshot
+	q.mu.Unlock()
+
+	q.notifyTaskLog(snapshot, line)
 }
 
 func (q *Queue) findLocked(taskID string) *taskRecord {
@@ -449,6 +514,22 @@ func (q *Queue) appendLogLocked(rec *taskRecord, line string) {
 	if len(rec.logs) > q.logLimit {
 		rec.logs = rec.logs[len(rec.logs)-q.logLimit:]
 	}
+}
+
+func (q *Queue) UpdateStatus(taskID, status string) {
+	q.updateStatus(taskID, status)
+}
+
+func (q *Queue) UpdateProgress(taskID string, progress int) {
+	q.updateProgress(taskID, progress)
+}
+
+func (q *Queue) AppendLog(taskID, level, line string) {
+	q.appendLog(taskID, level, line)
+}
+
+func (q *Queue) AppendLogLine(taskID, line string) {
+	q.appendLogLine(taskID, line)
 }
 
 func (q *Queue) buildContext(factory ContextFactory, snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
@@ -523,3 +604,57 @@ func (c *silentContext) Error(string)             {}
 func (c *silentContext) Success(string)           {}
 func (c *silentContext) SetStatus(string)         {}
 func (c *silentContext) SetProgress(int)          {}
+
+func (q *Queue) snapshotListeners() []Listener {
+	q.listenersMu.RLock()
+	defer q.listenersMu.RUnlock()
+
+	result := make([]Listener, 0, len(q.listeners))
+	for _, listener := range q.listeners {
+		result = append(result, listener)
+	}
+	return result
+}
+
+func (q *Queue) afterTaskEnqueued(snapshot TaskSnapshot) {
+	logging.LogTaskQueued(snapshot.ModuleID, snapshot.ID, snapshot.Title)
+	for _, listener := range q.snapshotListeners() {
+		if listener.OnTaskEnqueued != nil {
+			listener.OnTaskEnqueued(snapshot)
+		}
+	}
+}
+
+func (q *Queue) afterTaskStarted(snapshot TaskSnapshot) {
+	logging.LogTaskStarted(snapshot.ModuleID, snapshot.ID, snapshot.Title)
+	for _, listener := range q.snapshotListeners() {
+		if listener.OnTaskStarted != nil {
+			listener.OnTaskStarted(snapshot)
+		}
+	}
+}
+
+func (q *Queue) afterTaskFinished(snapshot TaskSnapshot, err error) {
+	logging.LogTaskFinished(snapshot.ModuleID, snapshot.ID, snapshot.Title, err)
+	for _, listener := range q.snapshotListeners() {
+		if listener.OnTaskFinished != nil {
+			listener.OnTaskFinished(snapshot)
+		}
+	}
+}
+
+func (q *Queue) notifyTaskUpdated(snapshot TaskSnapshot) {
+	for _, listener := range q.snapshotListeners() {
+		if listener.OnTaskUpdated != nil {
+			listener.OnTaskUpdated(snapshot)
+		}
+	}
+}
+
+func (q *Queue) notifyTaskLog(snapshot TaskSnapshot, line string) {
+	for _, listener := range q.snapshotListeners() {
+		if listener.OnTaskLog != nil {
+			listener.OnTaskLog(snapshot, line)
+		}
+	}
+}

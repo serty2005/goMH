@@ -3,6 +3,7 @@ package gui
 import (
 	"errors"
 	"fmt"
+	"goMH/app/modruntime"
 	"goMH/config"
 	"goMH/core"
 	"goMH/modules/distro"
@@ -13,10 +14,10 @@ import (
 )
 
 type DistroForm struct {
-	am  core.AssetManager
-	wu  core.WinUtils
-	tm  *TaskManager
-	ctx *GuiContext
+	am           core.AssetManager
+	wu           core.WinUtils
+	queueService *modruntime.Service
+	ctx          *GuiContext
 
 	brand         string
 	components    []config.DistroComponent
@@ -45,11 +46,11 @@ type DistroForm struct {
 	rbIiko           *walk.RadioButton
 }
 
-func NewDistroForm(parent walk.Container, am core.AssetManager, wu core.WinUtils, tm *TaskManager, ctx *GuiContext) (walk.Widget, error) {
+func NewDistroForm(parent walk.Container, am core.AssetManager, wu core.WinUtils, queueService *modruntime.Service, ctx *GuiContext) (walk.Widget, error) {
 	f := &DistroForm{
 		am:                am,
 		wu:                wu,
-		tm:                tm,
+		queueService:      queueService,
 		ctx:               ctx,
 		brand:             "iiko",
 		patchModel:        NewPatchListModel(),
@@ -282,9 +283,7 @@ func (f *DistroForm) onQueueInstall() {
 		}
 	}
 
-	title := fmt.Sprintf("Install %s %s", comp.MenuText, cfg.Version)
-	sig := fmt.Sprintf("install|%s|%s|%s", f.brand, comp.ID, cfg.Version)
-	f.enqueueDistroTask("iiko", title, sig, cfg)
+	f.enqueueDistroTask(cfg)
 }
 
 func (f *DistroForm) onQueuePortable() {
@@ -306,9 +305,7 @@ func (f *DistroForm) onQueuePortable() {
 		return
 	}
 
-	title := fmt.Sprintf("Portable %s %s", comp.MenuText, version)
-	sig := fmt.Sprintf("portable|%s|%s|%s", f.brand, comp.ID, version)
-	f.enqueueDistroTask("iiko", title, sig, cfg)
+	f.enqueueDistroTask(cfg)
 }
 
 func (f *DistroForm) onLoadManualPatches() {
@@ -359,9 +356,7 @@ func (f *DistroForm) onQueueManualPatch() {
 		Version: version,
 		Patch:   &selected,
 	}
-	title := fmt.Sprintf("Manual Patch %s", selected.ShortName)
-	sig := fmt.Sprintf("manual-patch|%s|%s", version, selected.ShortName)
-	f.enqueueDistroTask("iiko", title, sig, cfg)
+	f.enqueueDistroTask(cfg)
 }
 
 func (f *DistroForm) onQueuePlugins() {
@@ -370,19 +365,16 @@ func (f *DistroForm) onQueuePlugins() {
 		return
 	}
 	cfg := &distro.DistroInstallConfig{Action: distro.ActionPlugins, Brand: "iiko"}
-	f.enqueueDistroTask("iiko", "Plugins AutoUpdate", "plugins|autoupdate", cfg)
+	f.enqueueDistroTask(cfg)
 }
 
-func (f *DistroForm) enqueueDistroTask(moduleID, title, signature string, cfg *distro.DistroInstallConfig) {
-	_, err := f.tm.Enqueue(TaskSpec{
-		ModuleID:  moduleID,
-		Title:     title,
-		Signature: signature,
-		Run: func(taskCtx core.TaskContext) error {
-			mod := &distro.Module{}
-			return mod.Execute(taskCtx, f.am, f.wu, cfg)
-		},
-	})
+func (f *DistroForm) enqueueDistroTask(cfg *distro.DistroInstallConfig) {
+	if f.queueService == nil {
+		f.ctx.Error("Сервис очереди не инициализирован")
+		return
+	}
+
+	result, err := f.queueService.EnqueuePrepared("iiko", cfg)
 	if err != nil {
 		if errors.Is(err, ErrDuplicateTask) {
 			f.ctx.Warn("Такая же задача уже в очереди или выполняется")
@@ -391,7 +383,12 @@ func (f *DistroForm) enqueueDistroTask(moduleID, title, signature string, cfg *d
 		f.ctx.Error(fmt.Sprintf("Не удалось поставить задачу в очередь: %v", err))
 		return
 	}
-	f.ctx.Info("Задача добавлена в очередь: " + title)
+
+	message := result.Note
+	if message == "" {
+		message = "Задача добавлена в очередь."
+	}
+	f.ctx.Info(message)
 }
 
 func (f *DistroForm) buildPortableConfig(comp config.DistroComponent, version string) (*distro.DistroInstallConfig, error) {

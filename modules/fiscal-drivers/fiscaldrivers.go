@@ -28,6 +28,34 @@ func (m *Module) MenuText() string {
 	return "Установка драйверов фискальных регистраторов"
 }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     "Установка драйвера: " + cfg.Driver.MenuText,
+			Signature: "fiscal|" + cfg.Driver.ID,
+			Exclusive: true,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
 // Run - точка входа (UI слой)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Запуск модуля FiscalDrivers")
@@ -125,6 +153,14 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	ctx.Success("Драйвер успешно установлен.")
 	slog.Info("Установка драйвера завершена успешно")
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*DriverInstallConfig, error) {
+	cfg, ok := config.(*DriverInstallConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
 }
 
 // uninstallExistingDrivers ищет и удаляет драйверы Штрих/Ритейл по стандартным путям.

@@ -62,6 +62,74 @@ var SharedLogStreamService = logstream.NewService()
 func (m *Module) ID() string       { return "ServiceUtils" }
 func (m *Module) MenuText() string { return "Утилиты обслуживания" }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager, services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	title := "Утилиты обслуживания"
+	signature := "serviceutils|generic"
+	switch cfg.Action {
+	case ActionCleanTemp:
+		title = "Очистка временных файлов"
+		signature = "serviceutils|clean_temp"
+	case ActionCollectLogs:
+		title = fmt.Sprintf("Сбор логов за %d дн.", cfg.LogDays)
+		signature = fmt.Sprintf("serviceutils|collect|%d|%s", cfg.LogDays, strings.Join(cfg.LogDirs, ";"))
+	case ActionViewLog:
+		title = "Просмотр лога: " + filepath.Base(cfg.LogFileToView)
+		signature = "serviceutils|view|" + cfg.LogFileToView
+	case ActionOrderCheck:
+		title = "OrderCheck: " + filepath.Base(cfg.TargetDatabasePath)
+		signature = "serviceutils|ordercheck|" + cfg.TargetDatabasePath
+	case ActionFrontTools:
+		title = "FrontTools: " + strings.ToUpper(cfg.DatabaseType)
+		signature = "serviceutils|fronttools|" + cfg.DatabaseType
+	}
+
+	plan := core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+		},
+	}
+	if cfg.Action == ActionViewLog {
+		plan.Mode = core.ModuleRunModeImmediate
+		plan.Result.Note = "Поток лога запущен в stdout."
+	}
+	return plan, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
+func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServices, config any) (core.ModuleActionResult, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleActionResult{}, err
+	}
+	if cfg.Action != ActionViewLog {
+		return core.ModuleActionResult{}, errors.New("немедленное выполнение поддерживается только для просмотра лога")
+	}
+
+	_, err = m.StartLogView(ctx.Context(), cfg, SharedLogStreamService, logstream.NewStdoutSink())
+	if err != nil {
+		return core.ModuleActionResult{}, err
+	}
+	return core.ModuleActionResult{Note: "Поток лога запущен в stdout."}, nil
+}
+
 // Run - точка входа (UI)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Запуск модуля ServiceUtils")
@@ -179,6 +247,14 @@ func (m *Module) StartLogView(parent context.Context, cfg *ServiceUtilsConfig, s
 		IdleTimeout:  30 * time.Second,
 		Sink:         sink,
 	})
+}
+
+func (m *Module) taskConfig(config any) (*ServiceUtilsConfig, error) {
+	cfg, ok := config.(*ServiceUtilsConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
 }
 
 // --- CONFIGURE HELPERS ---

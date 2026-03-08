@@ -47,6 +47,48 @@ type Module struct{}
 func (m *Module) ID() string       { return "VComCaster" }
 func (m *Module) MenuText() string { return "VComCaster (для сканера штрих-кодов)" }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager, services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	title := "VComCaster"
+	signature := "vcomcaster|generic"
+	switch cfg.Action {
+	case ActionInstall:
+		title = fmt.Sprintf("VComCaster: установка для %s", cfg.SelectedScanner.Caption)
+		signature = fmt.Sprintf("vcomcaster|install|%s", cfg.ScannerDeviceID)
+	case ActionReinstall:
+		title = fmt.Sprintf("VComCaster: переустановка для %s", cfg.SelectedScanner.Caption)
+		signature = fmt.Sprintf("vcomcaster|reinstall|%s", cfg.ScannerDeviceID)
+	case ActionUninstall:
+		title = "VComCaster: удаление"
+		signature = "vcomcaster|uninstall"
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+			Exclusive: cfg.Action == ActionInstall || cfg.Action == ActionReinstall || cfg.Action == ActionUninstall,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
 // Run - точка входа (UI слой). Здесь мы общаемся с пользователем.
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// 1. Создаем адаптер для консоли
@@ -96,6 +138,14 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	default:
 		return fmt.Errorf("неизвестное действие: %d", cfg.Action)
 	}
+}
+
+func (m *Module) taskConfig(config any) (*VComCasterConfig, error) {
+	cfg, ok := config.(*VComCasterConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
 }
 
 // --- CONFIGURATION HELPERS ---

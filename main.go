@@ -9,15 +9,9 @@ import (
 	"goMH/core"
 	"goMH/gui"
 	"goMH/logging"
-	"goMH/modules/distro"
-	fiscaldrivers "goMH/modules/fiscal-drivers"
-	"goMH/modules/frpc"
 	"goMH/modules/regime"
-	"goMH/modules/remoteaccess"
+	moduleregistry "goMH/modules/registry"
 	"goMH/modules/selfupdate"
-	"goMH/modules/serviceutils"
-	"goMH/modules/utm"
-	"goMH/modules/vcomcaster"
 	"goMH/tui"
 	"goMH/winutils"
 	"io"
@@ -417,7 +411,8 @@ func execute() error {
 	// --- ЗАПУСК GUI ---
 	if *guiFlag {
 		slog.Info("Запуск в режиме GUI")
-		if err := gui.Run(cfg, assetManager, RealWinUtils); err != nil {
+		registry := moduleregistry.NewDefault()
+		if err := gui.Run(cfg, registry, assetManager, RealWinUtils); err != nil {
 			return fmt.Errorf("не удалось запустить GUI: %w", err)
 		}
 		return nil
@@ -429,19 +424,8 @@ func execute() error {
 		slog.Warn("Не удалось изменить размер консоли", "error", err)
 	}
 
-	// Регистрация модулей
-	registeredModules := map[string]core.Installer{
-		"VComCaster":    &vcomcaster.Module{},
-		"iiko":          &distro.Module{},
-		"FRPC":          &frpc.Module{},
-		"Regime":        &regime.Module{},
-		"RemoteAccess":  &remoteaccess.Module{},
-		"ServiceUtils":  &serviceutils.Module{},
-		"FiscalDrivers": &fiscaldrivers.Module{},
-		"UTM":           &utm.Module{},
-	}
-
-	if err := consolequeue.Run(cfg.Modules, registeredModules, assetManager, RealWinUtils); err != nil {
+	registry := moduleregistry.NewDefault()
+	if err := consolequeue.Run(cfg.Modules, registry, assetManager, RealWinUtils); err != nil {
 		slog.Error("Ошибка консольного интерфейса", "error", err)
 		tui.Error(fmt.Sprintf("Критическая ошибка интерфейса: %v", err))
 		tui.WaitForAnyKey()

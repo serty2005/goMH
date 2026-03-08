@@ -18,6 +18,32 @@ func (m *Module) MenuText() string {
 	return "Установить УТМ (ЕГАИС)"
 }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return struct{}{}, nil
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	if err := m.validateTaskConfig(config); err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     "Установка УТМ",
+			Signature: "utm|install",
+			Exclusive: true,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	if err := m.validateTaskConfig(config); err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils)
+}
+
 // Run - точка входа для консольного меню.
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// 1. Создаем контекст для консоли
@@ -55,4 +81,13 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 
 	ctx.Success("Установка УТМ завершена успешно.")
 	return nil
+}
+
+func (m *Module) validateTaskConfig(config any) error {
+	switch config.(type) {
+	case nil, struct{}, *struct{}:
+		return nil
+	default:
+		return fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
 }
