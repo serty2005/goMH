@@ -55,12 +55,16 @@ func TestExecuteWithTaskRuntimeRoutesAssetManagerOutputAndProgress(t *testing.T)
 	if len(taskCtx.progress) == 0 || taskCtx.progress[len(taskCtx.progress)-1] != 100 {
 		t.Fatalf("ожидался прогресс 100, получено: %#v", taskCtx.progress)
 	}
+	if len(taskCtx.cancelable) < 2 || !taskCtx.cancelable[0] || taskCtx.cancelable[len(taskCtx.cancelable)-1] {
+		t.Fatalf("ожидалось включение и последующее отключение отмены, получено: %#v", taskCtx.cancelable)
+	}
 }
 
 type captureTaskContext struct {
-	logs     []string
-	statuses []string
-	progress []int
+	logs       []string
+	statuses   []string
+	progress   []int
+	cancelable []bool
 }
 
 func (c *captureTaskContext) Context() context.Context { return context.Background() }
@@ -75,6 +79,10 @@ func (c *captureTaskContext) SetStatus(text string) {
 
 func (c *captureTaskContext) SetProgress(percent int) {
 	c.progress = append(c.progress, percent)
+}
+
+func (c *captureTaskContext) SetCancelable(enabled bool) {
+	c.cancelable = append(c.cancelable, enabled)
 }
 
 func containsLine(lines []string, needle string) bool {

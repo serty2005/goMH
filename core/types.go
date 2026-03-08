@@ -18,6 +18,8 @@ type TaskContext interface {
 	SetStatus(text string)
 	// SetProgress устанавливает процент выполнения (0-100). -1 для неопределенного прогресса.
 	SetProgress(percent int)
+	// SetCancelable переключает доступность безопасной отмены для текущего этапа задачи.
+	SetCancelable(enabled bool)
 }
 
 // ScannerInfo содержит информацию о найденном устройстве-сканере.

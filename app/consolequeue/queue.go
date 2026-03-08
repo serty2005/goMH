@@ -74,9 +74,9 @@ func runDashboard(modules []tui.DashboardModule, queue *taskqueue.Queue, service
 				return "Задача удалена из очереди.", nil
 			}
 			if queue.Cancel(taskID) {
-				return "Отмена задачи запрошена.", nil
+				return "Запрошена безопасная остановка скачивания.", nil
 			}
-			return "", errors.New("можно удалить ожидающую задачу или отменить активную задачу")
+			return "", errors.New("можно удалить ожидающую задачу или остановить только активное скачивание")
 		},
 		OnClearFinished: func() (string, error) {
 			removed := queue.ClearFinished()

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -275,17 +276,47 @@ func cleanupOldExecutable() {
 	}
 }
 
-// setupSignalHandler принимает функцию очистки с параметрами
-func setupSignalHandler(rootPath string) {
+type cleanupRunner struct {
+	once    sync.Once
+	actions []func()
+}
+
+func (r *cleanupRunner) Add(action func()) {
+	if action == nil {
+		return
+	}
+	r.actions = append(r.actions, action)
+}
+
+func (r *cleanupRunner) Run() {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		for _, action := range r.actions {
+			action()
+		}
+	})
+}
+
+func setupSignalHandler(onSignal func(os.Signal)) func() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	go func() {
-		sig := <-sigChan
-		fmt.Printf("\nПолучен сигнал %v. Выполняется очистка временных файлов...\n", sig)
-		cleanupTempDir(rootPath)
-		os.Exit(0)
+		sig, ok := <-sigChan
+		if !ok {
+			return
+		}
+		if onSignal != nil {
+			onSignal(sig)
+		}
 	}()
+
+	return func() {
+		signal.Stop(sigChan)
+		close(sigChan)
+	}
 }
 
 func main() {
@@ -335,11 +366,17 @@ func execute() error {
 	if err != nil {
 		return fmt.Errorf("не удалось инициализировать логирование: %w", err)
 	}
-	defer func() {
+
+	cleanup := &cleanupRunner{}
+	cleanup.Add(func() {
 		if closeErr := logSetup.Close(); closeErr != nil {
 			fmt.Fprintf(os.Stderr, "Не удалось закрыть файл лога: %v\n", closeErr)
 		}
-	}()
+	})
+	cleanup.Add(func() {
+		cleanupTempDir(cfg.RootPath)
+	})
+	defer cleanup.Run()
 
 	if logSetup.FileEnabled {
 		slog.Info("Логирование инициализировано", "log_level", cfg.Logging.Level, "log_path", logSetup.LogPath)
@@ -348,8 +385,12 @@ func execute() error {
 	}
 
 	// Настройка очистки
-	setupSignalHandler(cfg.RootPath)
-	defer cleanupTempDir(cfg.RootPath)
+	stopSignalHandler := setupSignalHandler(func(sig os.Signal) {
+		fmt.Printf("\nПолучен сигнал %v. Выполняется завершение приложения...\n", sig)
+		cleanup.Run()
+		os.Exit(0)
+	})
+	defer stopSignalHandler()
 
 	// Инициализация утилит
 	RealWinUtils := NewRealWinUtils()

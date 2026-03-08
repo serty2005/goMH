@@ -511,7 +511,7 @@ func (m dashboardModel) renderFooter() string {
 		m.keyStyle.Render("Enter") + " добавить",
 	}
 	secondLine := []string{
-		m.keyStyle.Render("Del") + " удалить/отменить",
+		m.keyStyle.Render("Del") + " удалить/остановить скачивание",
 		m.keyStyle.Render("Мышь") + " выбор/клик",
 		m.keyStyle.Render("C") + " очистить",
 		m.keyStyle.Render("Q") + " выход",

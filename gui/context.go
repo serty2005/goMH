@@ -79,3 +79,5 @@ func (c *GuiContext) SetProgress(percent int) {
 		c.progress.SetValue(percent)
 	})
 }
+
+func (c *GuiContext) SetCancelable(bool) {}

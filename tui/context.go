@@ -42,3 +42,5 @@ func (c *ConsoleContext) SetProgress(percent int) {
 	// так как assetmgr (пока что) использует свой progressbar.
 	// Здесь можно реализовать текстовый прогресс, если нужно.
 }
+
+func (c *ConsoleContext) SetCancelable(bool) {}

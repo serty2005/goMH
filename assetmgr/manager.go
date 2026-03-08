@@ -35,6 +35,7 @@ type runtimeHooks struct {
 	progress   io.Writer
 	statusFn   func(string)
 	percentFn  func(string, int)
+	cancelFn   func(bool)
 	runtimeCtx context.Context
 }
 
@@ -59,13 +60,14 @@ func (m *Manager) Cfg() *config.Config {
 	return m.cfg
 }
 
-func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn func(string), percentFn func(string, int), runtimeCtx context.Context) *Manager {
+func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn func(string), percentFn func(string, int), cancelFn func(bool), runtimeCtx context.Context) *Manager {
 	cloned := *m
 	cloned.runtime = runtimeHooks{
 		stdout:     stdout,
 		progress:   progress,
 		statusFn:   statusFn,
 		percentFn:  percentFn,
+		cancelFn:   cancelFn,
 		runtimeCtx: runtimeCtx,
 	}
 	if cloned.runtime.stdout == nil {
@@ -167,6 +169,8 @@ func (m *Manager) Get(assetName string) (string, error) {
 // ftpPath - это путь на сервере, например /distr/iiko/Setup.Front.exe
 func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error) {
 	fileName := sanitizeProgressLabel(filepath.Base(ftpPath))
+	m.setCancelable(true)
+	defer m.setCancelable(false)
 	m.reportStatus("Скачивание " + fileName)
 	m.reportProgress(fileName, 0)
 
@@ -233,6 +237,8 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 // DownloadHTTPWithProgress скачивает файл по HTTP с проверкой размера и прогресс-баром.
 func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, error) {
 	fileName := sanitizeProgressLabel(filepath.Base(httpURL))
+	m.setCancelable(true)
+	defer m.setCancelable(false)
 	m.reportStatus("Скачивание " + fileName)
 	m.reportProgress(fileName, 0)
 
@@ -674,6 +680,12 @@ func (m *Manager) reportStatus(text string) {
 func (m *Manager) reportProgress(description string, percent int) {
 	if m.runtime.percentFn != nil {
 		m.runtime.percentFn(description, percent)
+	}
+}
+
+func (m *Manager) setCancelable(enabled bool) {
+	if m.runtime.cancelFn != nil {
+		m.runtime.cancelFn(enabled)
 	}
 }
 

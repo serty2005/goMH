@@ -20,6 +20,7 @@ type InitResult struct {
 }
 
 var defaultLogPathFunc = defaultLogPath
+var fallbackLogWriterFunc = fallbackLogWriter
 
 func (r *InitResult) Close() error {
 	if r == nil || r.closeFile == nil {
@@ -30,7 +31,7 @@ func (r *InitResult) Close() error {
 
 func Init(cfg config.LoggingConfig) (*InitResult, error) {
 	level := parseLevel(cfg.Level)
-	writer := io.Writer(io.Discard)
+	writer := fallbackLogWriterFunc()
 
 	result := &InitResult{
 		FileEnabled: cfg.FileEnabled,
@@ -56,6 +57,10 @@ func Init(cfg config.LoggingConfig) (*InitResult, error) {
 	handler := NewPrettyHandler(writer, &slog.HandlerOptions{Level: level})
 	slog.SetDefault(slog.New(handler))
 	return result, nil
+}
+
+func fallbackLogWriter() io.Writer {
+	return os.Stderr
 }
 
 func LogTaskQueued(moduleID, taskID, title string) {

@@ -174,7 +174,7 @@ func (q *Queue) Cancel(taskID string) bool {
 
 	q.mu.Lock()
 	rec := q.findLocked(taskID)
-	if rec == nil || rec.snapshot.State != TaskRunning || rec.cancel == nil {
+	if rec == nil || rec.snapshot.State != TaskRunning || rec.cancel == nil || !rec.snapshot.Cancelable {
 		q.mu.Unlock()
 		return false
 	}
@@ -183,9 +183,9 @@ func (q *Queue) Cancel(taskID string) bool {
 	cancel = rec.cancel
 	rec.cancel = nil
 	rec.snapshot.Cancelable = false
-	rec.snapshot.StageText = "Отмена запрошена"
+	rec.snapshot.StageText = "Остановка скачивания запрошена"
 	rec.snapshot.UpdatedAt = now
-	line = fmt.Sprintf("[%s] [WARN] Запрошена отмена задачи", now.Format("15:04:05"))
+	line = fmt.Sprintf("[%s] [WARN] Запрошена безопасная остановка скачивания", now.Format("15:04:05"))
 	q.appendLogLocked(rec, line)
 	snapshot = rec.snapshot
 	q.mu.Unlock()
@@ -388,7 +388,7 @@ func (q *Queue) markRunningLocked(rec *taskRecord) TaskSnapshot {
 	rec.snapshot.StageText = "Выполняется"
 	rec.snapshot.LastError = ""
 	rec.snapshot.Progress = 0
-	rec.snapshot.Cancelable = true
+	rec.snapshot.Cancelable = false
 	q.appendLogLocked(rec, fmt.Sprintf("[%s] [STAGE] Задача запущена", now.Format("15:04:05")))
 	return rec.snapshot
 }
@@ -412,9 +412,9 @@ func (q *Queue) markFinished(rec *taskRecord, err error) {
 	if err != nil {
 		rec.snapshot.State = TaskFailed
 		if errors.Is(err, context.Canceled) {
-			rec.snapshot.LastError = "Операция отменена пользователем"
-			rec.snapshot.StageText = "Отменено"
-			q.appendLogLocked(rec, fmt.Sprintf("[%s] [WARN] Операция отменена пользователем", now.Format("15:04:05")))
+			rec.snapshot.LastError = "Скачивание отменено пользователем"
+			rec.snapshot.StageText = "Скачивание отменено"
+			q.appendLogLocked(rec, fmt.Sprintf("[%s] [WARN] Скачивание отменено пользователем", now.Format("15:04:05")))
 		} else {
 			rec.snapshot.LastError = err.Error()
 			rec.snapshot.StageText = "Завершено с ошибкой"
@@ -473,6 +473,22 @@ func (q *Queue) updateProgress(taskID string, progress int) {
 		progress = 100
 	}
 	rec.snapshot.Progress = progress
+	rec.snapshot.UpdatedAt = time.Now()
+	snapshot := rec.snapshot
+	q.mu.Unlock()
+
+	q.notifyTaskUpdated(snapshot)
+}
+
+func (q *Queue) updateCancelable(taskID string, enabled bool) {
+	q.mu.Lock()
+	rec := q.findLocked(taskID)
+	if rec == nil || rec.snapshot.State != TaskRunning || rec.snapshot.Cancelable == enabled {
+		q.mu.Unlock()
+		return
+	}
+
+	rec.snapshot.Cancelable = enabled
 	rec.snapshot.UpdatedAt = time.Now()
 	snapshot := rec.snapshot
 	q.mu.Unlock()
@@ -568,6 +584,10 @@ func (c *taskContext) SetStatus(text string) {
 
 func (c *taskContext) SetProgress(percent int) {
 	c.queue.updateProgress(c.taskID, percent)
+}
+
+func (c *taskContext) SetCancelable(enabled bool) {
+	c.queue.updateCancelable(c.taskID, enabled)
 }
 
 func (q *Queue) snapshotListeners() []Listener {

@@ -1,7 +1,9 @@
 package logging
 
 import (
+	"bytes"
 	"goMH/config"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,6 +13,9 @@ import (
 
 func TestInitDisablesFileLogging(t *testing.T) {
 	restorePath := overrideDefaultLogPath(t, filepath.Join(t.TempDir(), "disabled.log"))
+	fallbackBuffer := &bytes.Buffer{}
+	restoreFallback := overrideFallbackLogWriter(t, fallbackBuffer)
+	defer restoreFallback()
 
 	result, err := Init(config.LoggingConfig{Level: "WARN", FileEnabled: false})
 	if err != nil {
@@ -25,8 +30,12 @@ func TestInitDisablesFileLogging(t *testing.T) {
 	if result.LogPath != "" {
 		t.Fatalf("путь к логу должен быть пустым, получено %q", result.LogPath)
 	}
+	slog.Warn("Проверка fallback-логирования")
 	if err := result.Close(); err != nil {
 		t.Fatalf("Close вернул ошибку: %v", err)
+	}
+	if content := fallbackBuffer.String(); !strings.Contains(content, "Проверка fallback-логирования") {
+		t.Fatalf("ожидалась запись в fallback sink, содержимое:\n%s", content)
 	}
 }
 
@@ -77,5 +86,16 @@ func overrideDefaultLogPath(t *testing.T, path string) func() {
 	}
 	return func() {
 		defaultLogPathFunc = prev
+	}
+}
+
+func overrideFallbackLogWriter(t *testing.T, writer *bytes.Buffer) func() {
+	t.Helper()
+	prev := fallbackLogWriterFunc
+	fallbackLogWriterFunc = func() io.Writer {
+		return writer
+	}
+	return func() {
+		fallbackLogWriterFunc = prev
 	}
 }

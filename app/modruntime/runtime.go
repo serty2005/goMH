@@ -40,6 +40,7 @@ func withTaskAssetManager(am core.AssetManager, writer io.Writer, taskCtx core.T
 			taskCtx.SetStatus("Скачивание " + description)
 			taskCtx.SetProgress(percent)
 		},
+		taskCtx.SetCancelable,
 		taskCtx.Context(),
 	)
 }

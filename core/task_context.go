@@ -20,3 +20,4 @@ func (c *silentTaskContext) Error(string)             {}
 func (c *silentTaskContext) Success(string)           {}
 func (c *silentTaskContext) SetStatus(string)         {}
 func (c *silentTaskContext) SetProgress(int)          {}
+func (c *silentTaskContext) SetCancelable(bool)       {}

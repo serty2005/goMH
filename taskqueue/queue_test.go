@@ -374,6 +374,7 @@ func TestQueueCancelsRunningTaskWhenCancelable(t *testing.T) {
 		Signature: "cancelable",
 		Run: func(ctx core.TaskContext) error {
 			close(taskCtxDone)
+			ctx.SetCancelable(true)
 			<-ctx.Context().Done()
 			return ctx.Context().Err()
 		},
@@ -408,9 +409,61 @@ func TestQueueCancelsRunningTaskWhenCancelable(t *testing.T) {
 	})
 
 	snapshot := queue.Snapshots()[0]
-	if snapshot.LastError != "Операция отменена пользователем" {
+	if snapshot.LastError != "Скачивание отменено пользователем" {
 		t.Fatalf("unexpected last error: %s", snapshot.LastError)
 	}
+}
+
+func TestQueueDoesNotCancelRunningTaskWithoutSafeWindow(t *testing.T) {
+	queue := New()
+
+	taskStarted := make(chan struct{})
+	release := make(chan struct{})
+	_, err := queue.Enqueue(TaskSpec{
+		ID:        "not-cancelable",
+		ModuleID:  "test",
+		Title:     "not-cancelable",
+		Signature: "not-cancelable",
+		Run: func(_ core.TaskContext) error {
+			close(taskStarted)
+			<-release
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	started := queue.StartBackground(func(snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, snapshot.ID, runtimeCtx)
+	})
+	if !started {
+		t.Fatal("background mode was not started")
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		select {
+		case <-taskStarted:
+			return true
+		default:
+			return false
+		}
+	})
+
+	if queue.Cancel("not-cancelable") {
+		t.Fatal("не ожидалось подтверждение отмены вне безопасного этапа")
+	}
+
+	snapshot := queue.Snapshots()[0]
+	if snapshot.Cancelable {
+		t.Fatal("задача не должна быть помечена как отменяемая")
+	}
+
+	close(release)
+	waitFor(t, 2*time.Second, func() bool {
+		snapshots := queue.Snapshots()
+		return len(snapshots) == 1 && snapshots[0].State == TaskSuccess
+	})
 }
 
 func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
