@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -22,6 +23,10 @@ func NewGuiContext(mw *walk.MainWindow, logText *walk.TextEdit, status *walk.Sta
 		statusBar: status,
 		progress:  progress,
 	}
+}
+
+func (c *GuiContext) Context() context.Context {
+	return context.Background()
 }
 
 func (c *GuiContext) appendLog(prefix, msg string) {
@@ -77,9 +82,17 @@ func (c *GuiContext) SetProgress(percent int) {
 
 // TaskGuiContext is created per task and forwards telemetry to TaskManager.
 type TaskGuiContext struct {
-	tm     *TaskManager
-	taskID string
-	module string
+	tm      *TaskManager
+	taskID  string
+	module  string
+	runtime context.Context
+}
+
+func (c *TaskGuiContext) Context() context.Context {
+	if c.runtime == nil {
+		return context.Background()
+	}
+	return c.runtime
 }
 
 func (c *TaskGuiContext) log(level, msg string) {

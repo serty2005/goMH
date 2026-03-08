@@ -16,7 +16,7 @@ type GuiModuleItem struct {
 	Enabled bool
 }
 
-func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) {
+func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) error {
 	var mw *walk.MainWindow
 	var logText *walk.TextEdit
 	var statusBar *walk.StatusBarItem
@@ -108,7 +108,7 @@ func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) {
 			{AssignTo: &statusBar, Text: "Готов к работе", Width: 500},
 		},
 	}.Create()); err != nil {
-		panic(err)
+		return fmt.Errorf("не удалось создать главное окно: %w", err)
 	}
 
 	ctx := NewGuiContext(mw, logText, statusBar, progressBar)
@@ -179,6 +179,7 @@ func Run(cfg *config.Config, am core.AssetManager, wu core.WinUtils) {
 	}
 
 	mw.Run()
+	return nil
 }
 
 func loadDisabledModuleForm(parent *walk.Composite, item GuiModuleItem) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"goMH/core"
+	"goMH/logging"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,11 +56,14 @@ type RunSummary struct {
 	Finished bool
 }
 
+type ContextFactory func(TaskSnapshot, context.Context) core.TaskContext
+
 type taskRecord struct {
-	spec     TaskSpec
-	snapshot TaskSnapshot
-	logs     []string
-	cancel   func()
+	spec       TaskSpec
+	snapshot   TaskSnapshot
+	logs       []string
+	runtimeCtx context.Context
+	cancel     context.CancelFunc
 }
 
 type Queue struct {
@@ -70,7 +74,7 @@ type Queue struct {
 	logLimit          int
 	started           bool
 	runningExclusive  bool
-	backgroundFactory func(TaskSnapshot) core.TaskContext
+	backgroundFactory ContextFactory
 }
 
 func New() *Queue {
@@ -126,6 +130,7 @@ func (q *Queue) Enqueue(spec TaskSpec) (TaskSnapshot, error) {
 		logs:     []string{fmt.Sprintf("[%s] [QUEUE] Задача добавлена в очередь", now.Format("15:04:05"))},
 	}
 	q.tasks = append(q.tasks, rec)
+	logging.LogTaskQueued(snapshot.ModuleID, snapshot.ID, snapshot.Title)
 	if q.started {
 		q.cond.Broadcast()
 	}
@@ -147,11 +152,11 @@ func (q *Queue) RemoveQueued(taskID string) bool {
 }
 
 func (q *Queue) Cancel(taskID string) bool {
-	var cancel func()
+	var cancel context.CancelFunc
 
 	q.mu.Lock()
 	rec := q.findLocked(taskID)
-	if rec == nil || rec.snapshot.State != TaskRunning || !rec.snapshot.Cancelable || rec.cancel == nil {
+	if rec == nil || rec.snapshot.State != TaskRunning || rec.cancel == nil {
 		q.mu.Unlock()
 		return false
 	}
@@ -160,9 +165,9 @@ func (q *Queue) Cancel(taskID string) bool {
 	cancel = rec.cancel
 	rec.cancel = nil
 	rec.snapshot.Cancelable = false
-	rec.snapshot.StageText = "Отмена скачивания..."
+	rec.snapshot.StageText = "Отмена запрошена"
 	rec.snapshot.UpdatedAt = now
-	q.appendLogLocked(rec, fmt.Sprintf("[%s] [WARN] Запрошена отмена скачивания", now.Format("15:04:05")))
+	q.appendLogLocked(rec, fmt.Sprintf("[%s] [WARN] Запрошена отмена задачи", now.Format("15:04:05")))
 	q.mu.Unlock()
 
 	cancel()
@@ -234,7 +239,7 @@ func (q *Queue) Started() bool {
 	return q.started
 }
 
-func (q *Queue) StartBackground(contextFactory func(TaskSnapshot) core.TaskContext) bool {
+func (q *Queue) StartBackground(contextFactory ContextFactory) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -249,7 +254,7 @@ func (q *Queue) StartBackground(contextFactory func(TaskSnapshot) core.TaskConte
 	return true
 }
 
-func (q *Queue) RunPending(contextFactory func(TaskSnapshot) core.TaskContext) RunSummary {
+func (q *Queue) RunPending(contextFactory ContextFactory) RunSummary {
 	pending := q.pendingRecords()
 	summary := RunSummary{
 		Started:  len(pending),
@@ -265,10 +270,7 @@ func (q *Queue) RunPending(contextFactory func(TaskSnapshot) core.TaskContext) R
 
 	for _, rec := range pending {
 		snapshot := q.markRunning(rec)
-		ctx := contextFactory(snapshot)
-		if ctx == nil {
-			ctx = newSilentContext()
-		}
+		ctx := q.buildContext(contextFactory, snapshot, rec.runtimeCtx)
 
 		err := rec.spec.Run(ctx)
 		if err != nil {
@@ -297,22 +299,19 @@ func (q *Queue) pendingRecords() []*taskRecord {
 
 func (q *Queue) dispatcher() {
 	for {
-		rec, snapshot, contextFactory := q.waitNextTask()
-		go q.runTask(rec, snapshot, contextFactory)
+		rec, snapshot, runtimeCtx, contextFactory := q.waitNextTask()
+		go q.runTask(rec, snapshot, runtimeCtx, contextFactory)
 	}
 }
 
-func (q *Queue) runTask(rec *taskRecord, snapshot TaskSnapshot, contextFactory func(TaskSnapshot) core.TaskContext) {
-	ctx := contextFactory(snapshot)
-	if ctx == nil {
-		ctx = newSilentContext()
-	}
+func (q *Queue) runTask(rec *taskRecord, snapshot TaskSnapshot, runtimeCtx context.Context, contextFactory ContextFactory) {
+	ctx := q.buildContext(contextFactory, snapshot, runtimeCtx)
 
 	err := rec.spec.Run(ctx)
 	q.markFinished(rec, err)
 }
 
-func (q *Queue) waitNextTask() (*taskRecord, TaskSnapshot, func(TaskSnapshot) core.TaskContext) {
+func (q *Queue) waitNextTask() (*taskRecord, TaskSnapshot, context.Context, ContextFactory) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -329,7 +328,7 @@ func (q *Queue) waitNextTask() (*taskRecord, TaskSnapshot, func(TaskSnapshot) co
 			if rec.spec.Exclusive {
 				q.runningExclusive = true
 			}
-			return rec, snapshot, q.backgroundFactory
+			return rec, snapshot, rec.runtimeCtx, q.backgroundFactory
 		}
 
 		q.cond.Wait()
@@ -344,15 +343,16 @@ func (q *Queue) markRunning(rec *taskRecord) TaskSnapshot {
 
 func (q *Queue) markRunningLocked(rec *taskRecord) TaskSnapshot {
 	now := time.Now()
+	rec.runtimeCtx, rec.cancel = context.WithCancel(context.Background())
 	rec.snapshot.State = TaskRunning
 	rec.snapshot.StartedAt = now
 	rec.snapshot.UpdatedAt = now
 	rec.snapshot.StageText = "Выполняется"
 	rec.snapshot.LastError = ""
 	rec.snapshot.Progress = 0
-	rec.snapshot.Cancelable = false
-	rec.cancel = nil
+	rec.snapshot.Cancelable = true
 	q.appendLogLocked(rec, fmt.Sprintf("[%s] [STAGE] Задача запущена", now.Format("15:04:05")))
+	logging.LogTaskStarted(rec.snapshot.ModuleID, rec.snapshot.ID, rec.snapshot.Title)
 	return rec.snapshot
 }
 
@@ -361,10 +361,14 @@ func (q *Queue) markFinished(rec *taskRecord, err error) {
 	defer q.mu.Unlock()
 
 	now := time.Now()
+	if rec.cancel != nil {
+		rec.cancel()
+		rec.cancel = nil
+	}
+	rec.runtimeCtx = nil
 	rec.snapshot.FinishedAt = now
 	rec.snapshot.UpdatedAt = now
 	rec.snapshot.Cancelable = false
-	rec.cancel = nil
 	if rec.spec.Exclusive {
 		q.runningExclusive = false
 	}
@@ -380,6 +384,7 @@ func (q *Queue) markFinished(rec *taskRecord, err error) {
 			rec.snapshot.StageText = "Завершено с ошибкой"
 			q.appendLogLocked(rec, fmt.Sprintf("[%s] [ERROR] %s", now.Format("15:04:05"), err.Error()))
 		}
+		logging.LogTaskFinished(rec.snapshot.ModuleID, rec.snapshot.ID, rec.snapshot.Title, err)
 		q.cond.Broadcast()
 		return
 	}
@@ -389,6 +394,7 @@ func (q *Queue) markFinished(rec *taskRecord, err error) {
 	rec.snapshot.StageText = "Успешно завершено"
 	rec.snapshot.Progress = 100
 	q.appendLogLocked(rec, fmt.Sprintf("[%s] [SUCCESS] Задача завершена успешно", now.Format("15:04:05")))
+	logging.LogTaskFinished(rec.snapshot.ModuleID, rec.snapshot.ID, rec.snapshot.Title, nil)
 	q.cond.Broadcast()
 }
 
@@ -419,17 +425,6 @@ func (q *Queue) updateProgress(taskID string, progress int) {
 	}
 }
 
-func (q *Queue) setCancelable(taskID string, cancel func()) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	if rec := q.findLocked(taskID); rec != nil {
-		rec.cancel = cancel
-		rec.snapshot.Cancelable = cancel != nil
-		rec.snapshot.UpdatedAt = time.Now()
-	}
-}
-
 func (q *Queue) appendLog(taskID, level, line string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -437,16 +432,6 @@ func (q *Queue) appendLog(taskID, level, line string) {
 	if rec := q.findLocked(taskID); rec != nil {
 		rec.snapshot.UpdatedAt = time.Now()
 		q.appendLogLocked(rec, fmt.Sprintf("[%s] [%s] %s", time.Now().Format("15:04:05"), level, line))
-	}
-}
-
-func (q *Queue) appendRawLog(taskID, line string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	if rec := q.findLocked(taskID); rec != nil {
-		rec.snapshot.UpdatedAt = time.Now()
-		q.appendLogLocked(rec, line)
 	}
 }
 
@@ -466,16 +451,34 @@ func (q *Queue) appendLogLocked(rec *taskRecord, line string) {
 	}
 }
 
-type taskContext struct {
-	queue  *Queue
-	taskID string
+func (q *Queue) buildContext(factory ContextFactory, snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+	if factory != nil {
+		if ctx := factory(snapshot, runtimeCtx); ctx != nil {
+			return ctx
+		}
+	}
+	return newSilentContext(runtimeCtx)
 }
 
-func NewTaskContext(queue *Queue, taskID string) core.TaskContext {
-	return &taskContext{
-		queue:  queue,
-		taskID: taskID,
+type taskContext struct {
+	runtime context.Context
+	queue   *Queue
+	taskID  string
+}
+
+func NewTaskContext(queue *Queue, taskID string, runtimeCtx context.Context) core.TaskContext {
+	if runtimeCtx == nil {
+		runtimeCtx = context.Background()
 	}
+	return &taskContext{
+		runtime: runtimeCtx,
+		queue:   queue,
+		taskID:  taskID,
+	}
+}
+
+func (c *taskContext) Context() context.Context {
+	return c.runtime
 }
 
 func (c *taskContext) Info(msg string) {
@@ -502,31 +505,21 @@ func (c *taskContext) SetProgress(percent int) {
 	c.queue.updateProgress(c.taskID, percent)
 }
 
-func (c *taskContext) LogLine(line string) {
-	c.queue.appendRawLog(c.taskID, line)
+type silentContext struct {
+	runtime context.Context
 }
 
-func (c *taskContext) SetCancelable(cancel func()) {
-	c.queue.setCancelable(c.taskID, cancel)
+func newSilentContext(runtimeCtx context.Context) core.TaskContext {
+	if runtimeCtx == nil {
+		runtimeCtx = context.Background()
+	}
+	return &silentContext{runtime: runtimeCtx}
 }
 
-func (c *taskContext) ClearCancelable() {
-	c.queue.setCancelable(c.taskID, nil)
-}
-
-type silentContext struct{}
-
-func newSilentContext() core.TaskContext {
-	return &silentContext{}
-}
-
-func (c *silentContext) Info(string)      {}
-func (c *silentContext) Warn(string)      {}
-func (c *silentContext) Error(string)     {}
-func (c *silentContext) Success(string)   {}
-func (c *silentContext) SetStatus(string) {}
-func (c *silentContext) SetProgress(int)  {}
-func (c *silentContext) LogLine(string)   {}
-func (c *silentContext) SetCancelable(func()) {
-}
-func (c *silentContext) ClearCancelable() {}
+func (c *silentContext) Context() context.Context { return c.runtime }
+func (c *silentContext) Info(string)              {}
+func (c *silentContext) Warn(string)              {}
+func (c *silentContext) Error(string)             {}
+func (c *silentContext) Success(string)           {}
+func (c *silentContext) SetStatus(string)         {}
+func (c *silentContext) SetProgress(int)          {}

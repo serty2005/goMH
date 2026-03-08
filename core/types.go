@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"goMH/config"
 
 	"golang.org/x/sys/windows/registry"
@@ -8,6 +9,7 @@ import (
 
 // TaskContext определяет методы для взаимодействия логики с интерфейсом (CLI или GUI).
 type TaskContext interface {
+	Context() context.Context
 	Info(msg string)
 	Warn(msg string)
 	Error(msg string)

@@ -30,8 +30,8 @@ func TestQueueRunsPendingInFIFOOrder(t *testing.T) {
 		}
 	}
 
-	summary := queue.RunPending(func(s TaskSnapshot) core.TaskContext {
-		return NewTaskContext(queue, s.ID)
+	summary := queue.RunPending(func(s TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, s.ID, runtimeCtx)
 	})
 	if summary.Started != 3 || summary.Success != 3 || summary.Failed != 0 {
 		t.Fatalf("unexpected summary: %+v", summary)
@@ -97,8 +97,8 @@ func TestQueueTracksFailureAndLogs(t *testing.T) {
 		t.Fatalf("enqueue failed: %v", err)
 	}
 
-	summary := queue.RunPending(func(s TaskSnapshot) core.TaskContext {
-		return NewTaskContext(queue, s.ID)
+	summary := queue.RunPending(func(s TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, s.ID, runtimeCtx)
 	})
 	if summary.Failed != 1 {
 		t.Fatalf("expected 1 failed task, got %+v", summary)
@@ -143,8 +143,8 @@ func TestQueueBackgroundModeProcessesNewTasksAfterStart(t *testing.T) {
 		}
 	}
 
-	started := queue.StartBackground(func(snapshot TaskSnapshot) core.TaskContext {
-		return NewTaskContext(queue, snapshot.ID)
+	started := queue.StartBackground(func(snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, snapshot.ID, runtimeCtx)
 	})
 	if !started {
 		t.Fatal("background mode was not started")
@@ -233,8 +233,8 @@ func TestQueueRunsParallelTasksWithoutBlockingExclusive(t *testing.T) {
 		},
 	})
 
-	started := queue.StartBackground(func(snapshot TaskSnapshot) core.TaskContext {
-		return NewTaskContext(queue, snapshot.ID)
+	started := queue.StartBackground(func(snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, snapshot.ID, runtimeCtx)
 	})
 	if !started {
 		t.Fatal("background mode was not started")
@@ -279,28 +279,17 @@ func TestQueueCancelsRunningTaskWhenCancelable(t *testing.T) {
 		Title:     "cancelable",
 		Signature: "cancelable",
 		Run: func(ctx core.TaskContext) error {
-			control, ok := ctx.(interface {
-				SetCancelable(func())
-				ClearCancelable()
-			})
-			if !ok {
-				return errors.New("контекст не поддерживает отмену")
-			}
-
-			downloadCtx, cancel := context.WithCancel(context.Background())
-			control.SetCancelable(cancel)
-			defer control.ClearCancelable()
 			close(taskCtxDone)
-			<-downloadCtx.Done()
-			return downloadCtx.Err()
+			<-ctx.Context().Done()
+			return ctx.Context().Err()
 		},
 	})
 	if err != nil {
 		t.Fatalf("enqueue failed: %v", err)
 	}
 
-	started := queue.StartBackground(func(snapshot TaskSnapshot) core.TaskContext {
-		return NewTaskContext(queue, snapshot.ID)
+	started := queue.StartBackground(func(snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, snapshot.ID, runtimeCtx)
 	})
 	if !started {
 		t.Fatal("background mode was not started")

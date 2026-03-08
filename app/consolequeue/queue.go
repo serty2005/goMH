@@ -1,4 +1,4 @@
-package main
+package consolequeue
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/dependencies"
+	"goMH/logstream"
 	"goMH/modules/distro"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/frpc"
@@ -29,9 +30,18 @@ type consoleModule struct {
 	enqueue   func(am core.AssetManager, wu core.WinUtils, queue *taskqueue.Queue) (tui.DashboardActionResult, error)
 }
 
-type taskCancelableControl interface {
-	SetCancelable(cancel func())
-	ClearCancelable()
+type consoleOutputWinUtils interface {
+	WithConsoleOutput(stdout io.Writer, stderr io.Writer) core.WinUtils
+}
+
+func Run(cfgModules []config.ModuleDef, registered map[string]core.Installer, am core.AssetManager, wu core.WinUtils) error {
+	modules := buildConsoleModules(cfgModules, registered)
+	if len(modules) == 0 {
+		return errors.New("в конфигурации не определено ни одного доступного модуля")
+	}
+
+	queue := taskqueue.New()
+	return runDashboard(modules, queue, am, wu)
 }
 
 func buildConsoleModules(cfgModules []config.ModuleDef, registered map[string]core.Installer) []consoleModule {
@@ -78,9 +88,9 @@ func buildConsoleModules(cfgModules []config.ModuleDef, registered map[string]co
 	return modules
 }
 
-func runConsoleDashboard(modules []consoleModule, queue *taskqueue.Queue, am core.AssetManager, wu core.WinUtils) error {
-	queue.StartBackground(func(snapshot taskqueue.TaskSnapshot) core.TaskContext {
-		return taskqueue.NewTaskContext(queue, snapshot.ID)
+func runDashboard(modules []consoleModule, queue *taskqueue.Queue, am core.AssetManager, wu core.WinUtils) error {
+	queue.StartBackground(func(snapshot taskqueue.TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return taskqueue.NewTaskContext(queue, snapshot.ID, runtimeCtx)
 	})
 
 	dashboardModules := make([]tui.DashboardModule, 0, len(modules))
@@ -109,9 +119,9 @@ func runConsoleDashboard(modules []consoleModule, queue *taskqueue.Queue, am cor
 				return "Задача удалена из очереди.", nil
 			}
 			if queue.Cancel(taskID) {
-				return "Отмена скачивания запрошена.", nil
+				return "Отмена задачи запрошена.", nil
 			}
-			return "", errors.New("можно удалить ожидающую задачу или отменить активное скачивание")
+			return "", errors.New("можно удалить ожидающую задачу или отменить активную задачу")
 		},
 		OnClearFinished: func() (string, error) {
 			removed := queue.ClearFinished()
@@ -273,6 +283,14 @@ func enqueueServiceUtilsTask(module *serviceutils.Module) func(am core.AssetMana
 			return tui.DashboardActionResult{}, err
 		}
 
+		if cfg.Action == serviceutils.ActionViewLog {
+			_, err := module.StartLogView(context.Background(), cfg, serviceutils.SharedLogStreamService, logstream.NewStdoutSink())
+			if err != nil {
+				return tui.DashboardActionResult{}, err
+			}
+			return enqueueResult("Поток лога запущен в stdout.", "", false), nil
+		}
+
 		title, signature := describeServiceUtilsTask(cfg)
 		snapshot, err := queue.Enqueue(taskqueue.TaskSpec{
 			ModuleID:  module.ID(),
@@ -343,14 +361,7 @@ func executeQueuedTask(taskCtx core.TaskContext, am core.AssetManager, wu core.W
 	defer restoreSevenZip()
 	defer writer.Flush()
 
-	downloadCtx, cancelDownload := context.WithCancel(context.Background())
-	defer cancelDownload()
-
-	if control, ok := taskCtx.(taskCancelableControl); ok {
-		defer control.ClearCancelable()
-	}
-
-	taskAM := withTaskAssetManager(am, writer, downloadCtx, cancelDownload, taskCtx)
+	taskAM := withTaskAssetManager(am, writer, taskCtx)
 	taskWU := withTaskWinUtils(wu, writer)
 
 	return fn(taskAM, taskWU)
@@ -364,7 +375,7 @@ func enqueueResult(note string, taskID string, selectTask bool) tui.DashboardAct
 	return result
 }
 
-func withTaskAssetManager(am core.AssetManager, writer io.Writer, downloadCtx context.Context, cancelDownload context.CancelFunc, taskCtx core.TaskContext) core.AssetManager {
+func withTaskAssetManager(am core.AssetManager, writer io.Writer, taskCtx core.TaskContext) core.AssetManager {
 	manager, ok := am.(*assetmgr.Manager)
 	if !ok {
 		return am
@@ -380,23 +391,12 @@ func withTaskAssetManager(am core.AssetManager, writer io.Writer, downloadCtx co
 			taskCtx.SetStatus("Скачивание " + description)
 			taskCtx.SetProgress(percent)
 		},
-		downloadCtx,
-		func(active bool, _ string) {
-			control, ok := taskCtx.(taskCancelableControl)
-			if !ok {
-				return
-			}
-			if active {
-				control.SetCancelable(cancelDownload)
-				return
-			}
-			control.ClearCancelable()
-		},
+		taskCtx.Context(),
 	)
 }
 
 func withTaskWinUtils(wu core.WinUtils, writer io.Writer) core.WinUtils {
-	real, ok := wu.(*RealWinUtils)
+	real, ok := wu.(consoleOutputWinUtils)
 	if !ok {
 		return wu
 	}

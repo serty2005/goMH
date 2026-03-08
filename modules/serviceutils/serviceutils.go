@@ -8,18 +8,17 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	"goMH/logstream"
 	"goMH/tui"
 	"io"
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/mholt/archives"
@@ -57,6 +56,8 @@ type ServiceUtilsConfig struct {
 }
 
 type Module struct{}
+
+var SharedLogStreamService = logstream.NewService()
 
 func (m *Module) ID() string       { return "ServiceUtils" }
 func (m *Module) MenuText() string { return "Утилиты обслуживания" }
@@ -140,13 +141,44 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	case ActionCollectLogs:
 		return m.collectLogs(ctx, am, cfg)
 	case ActionViewLog:
-		return m.tailFile(ctx, cfg.LogFileToView, 50)
+		return m.runLogView(ctx, cfg)
 	case ActionOrderCheck:
 		return m.runOrderCheckFlow(ctx, am, wu, cfg)
 	case ActionFrontTools:
 		return m.runFrontToolsFlow(ctx, am, wu, cfg)
 	}
 	return nil
+}
+
+func (m *Module) StartLogView(parent context.Context, cfg *ServiceUtilsConfig, service *logstream.Service, sinks ...logstream.Sink) (*logstream.Handle, error) {
+	if cfg == nil {
+		return nil, errors.New("конфигурация ServiceUtils не задана")
+	}
+	if cfg.Action != ActionViewLog {
+		return nil, errors.New("конфигурация не относится к просмотру лога")
+	}
+	if service == nil {
+		service = SharedLogStreamService
+	}
+
+	activeSinks := make([]logstream.Sink, 0, len(sinks))
+	for _, sink := range sinks {
+		if sink != nil {
+			activeSinks = append(activeSinks, sink)
+		}
+	}
+	if len(activeSinks) == 0 {
+		return nil, errors.New("для просмотра лога не задан ни один sink")
+	}
+
+	sink := logstream.NewMultiSink(activeSinks...)
+	return service.StartTail(parent, logstream.TailRequest{
+		FilePath:     cfg.LogFileToView,
+		StartLines:   50,
+		PollInterval: 500 * time.Millisecond,
+		IdleTimeout:  30 * time.Second,
+		Sink:         sink,
+	})
 }
 
 // --- CONFIGURE HELPERS ---
@@ -501,96 +533,28 @@ func (m *Module) collectLogs(ctx core.TaskContext, am core.AssetManager, cfg *Se
 	return nil
 }
 
-func (m *Module) tailFile(ctx core.TaskContext, filePath string, lines int) error {
+func (m *Module) runLogView(ctx core.TaskContext, cfg *ServiceUtilsConfig) error {
 	ctx.SetStatus("Просмотр лога")
-	slog.Info("Запуск просмотра лога (tail)", "file", filePath)
+	ctx.Info("Файл: " + cfg.LogFileToView)
+	slog.Info("Запуск просмотра лога", "file", cfg.LogFileToView)
 
-	ctx.Info("Файл: " + filePath)
-
-	file, err := os.Open(filePath)
+	handle, err := m.StartLogView(ctx.Context(), cfg, logstream.NewService(), logstream.NewTaskContextSink(ctx))
 	if err != nil {
-		slog.Error("Не удалось открыть файл", "error", err)
-		return err
-	}
-	defer file.Close()
-
-	stat, _ := file.Stat()
-	if stat.Size() > 0 {
-		startPos, _ := findStartOfLastNLines(file, lines)
-		file.Seek(startPos, io.SeekStart)
-	}
-
-	cancelCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	if _, err := streamLogChunk(ctx, file); err != nil {
+		slog.Error("Не удалось запустить просмотр лога", "file", cfg.LogFileToView, "error", err)
 		return err
 	}
 
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	idleTimer := time.NewTimer(30 * time.Second)
-	defer idleTimer.Stop()
-
-	for {
-		select {
-		case <-cancelCtx.Done():
-			slog.Info("Просмотр лога завершен пользователем")
-			return nil
-		case <-idleTimer.C:
-			ctx.Info("Новых строк нет более 30 секунд. Просмотр завершен.")
-			return nil
-		case <-ticker.C:
-			wrote, err := streamLogChunk(ctx, file)
-			if err != nil {
-				return err
-			}
-			if wrote {
-				if !idleTimer.Stop() {
-					select {
-					case <-idleTimer.C:
-					default:
-					}
-				}
-				idleTimer.Reset(30 * time.Second)
-			}
-		}
+	err = handle.Wait()
+	switch {
+	case err == nil:
+		ctx.Info("Новых строк нет более 30 секунд. Просмотр завершен.")
+		return nil
+	case errors.Is(err, context.Canceled):
+		ctx.Warn("Просмотр лога остановлен.")
+		return err
+	default:
+		return err
 	}
-}
-
-func streamLogChunk(ctx core.TaskContext, file *os.File) (bool, error) {
-	buffer := make([]byte, 4096)
-	wrote := false
-	for {
-		n, err := file.Read(buffer)
-		if n > 0 {
-			wrote = true
-			for _, line := range strings.Split(string(buffer[:n]), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					writeLogLine(ctx, line)
-				}
-			}
-		}
-		if err == io.EOF {
-			return wrote, nil
-		}
-		if err != nil {
-			return wrote, err
-		}
-	}
-}
-
-type rawLogContext interface {
-	LogLine(line string)
-}
-
-func writeLogLine(ctx core.TaskContext, line string) {
-	if raw, ok := ctx.(rawLogContext); ok {
-		raw.LogLine(line)
-		return
-	}
-	ctx.Info(line)
 }
 
 func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *ServiceUtilsConfig) error {
@@ -652,7 +616,9 @@ func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, w
 				}
 				// Индикация ожидания в статусе
 				ctx.SetStatus(fmt.Sprintf("Ожидание закрытия iikoFront (%d/%d)...", i+1, maxRetries))
-				time.Sleep(retryInterval)
+				if err := waitForTaskContext(ctx, retryInterval); err != nil {
+					return err
+				}
 			}
 
 			if !stopped {
@@ -725,7 +691,10 @@ func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, w
 			return err
 		}
 		_, err := wu.RunCommand("schtasks", "/Run", "/TN", taskName)
-		time.Sleep(2 * time.Second)
+		if waitErr := waitForTaskContext(ctx, 2*time.Second); waitErr != nil {
+			_ = wu.DeleteScheduledTaskByName(taskName)
+			return waitErr
+		}
 		_ = wu.DeleteScheduledTaskByName(taskName)
 		return err
 	}
@@ -923,29 +892,18 @@ func (m *Module) extractLogsFromUniversalArchive(archivePath, tempDir string) ([
 	return extractedLogs, err
 }
 
-func findStartOfLastNLines(file *os.File, n int) (int64, error) {
-	stat, _ := file.Stat()
-	fileSize := stat.Size()
-	var readPos int64 = fileSize
-	count := 0
-	buf := make([]byte, 4096)
-
-	for readPos > 0 && count < n {
-		readSize := int64(4096)
-		if readPos < 4096 {
-			readSize = readPos
-		}
-		readPos -= readSize
-		file.Seek(readPos, io.SeekStart)
-		file.Read(buf[:readSize])
-		for i := readSize - 1; i >= 0; i-- {
-			if buf[i] == '\n' {
-				count++
-				if count >= n {
-					return readPos + i + 1, nil
-				}
-			}
-		}
+func waitForTaskContext(ctx core.TaskContext, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
 	}
-	return 0, nil
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Context().Done():
+		return ctx.Context().Err()
+	case <-timer.C:
+		return nil
+	}
 }

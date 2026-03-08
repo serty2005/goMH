@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"goMH/app/consolequeue"
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
@@ -17,11 +18,9 @@ import (
 	"goMH/modules/serviceutils"
 	"goMH/modules/utm"
 	"goMH/modules/vcomcaster"
-	"goMH/taskqueue"
 	"goMH/tui"
 	"goMH/winutils"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,7 +40,7 @@ type RealWinUtils struct {
 	stderr io.Writer
 }
 
-func (rw *RealWinUtils) WithConsoleOutput(stdout io.Writer, stderr io.Writer) *RealWinUtils {
+func (rw *RealWinUtils) WithConsoleOutput(stdout io.Writer, stderr io.Writer) core.WinUtils {
 	cloned := *rw
 	cloned.stdout = stdout
 	cloned.stderr = stderr
@@ -308,6 +307,15 @@ func setupSignalHandler(rootPath string) {
 }
 
 func main() {
+	exitCode := 0
+	if err := execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Критическая ошибка: %v\n", err)
+		exitCode = 1
+	}
+	os.Exit(exitCode)
+}
+
+func execute() error {
 	// 0. Очистка старых версий при запуске
 	cleanupOldExecutable()
 
@@ -325,24 +333,37 @@ func main() {
 		tui.Error("Пожалуйста, запустите эту программу от имени Администратора.")
 		fmt.Println("\nНажмите Enter для выхода...")
 		fmt.Scanln()
-		os.Exit(1)
+		return fmt.Errorf("для выполнения требуются права администратора")
 	}
 	tui.Success("Приложение запущено с правами администратора.")
 
 	// Загрузка конфига
 	finalConfigPath, err := getConfigPath(configPathFlag)
 	if err != nil {
-		log.Fatalf("Критическая ошибка: не удалось определить источник конфигурации: %v", err)
+		return fmt.Errorf("не удалось определить источник конфигурации: %w", err)
 	}
 
 	cfg, err := config.LoadConfig(finalConfigPath)
 	if err != nil {
-		log.Fatalf("Критическая ошибка: не удалось загрузить конфигурацию: %v", err)
+		return fmt.Errorf("не удалось загрузить конфигурацию: %w", err)
 	}
 
 	// Инициализация логгера
-	logging.Init(cfg.LogLevel)
-	slog.Info("Логгер инициализирован", "log_level", cfg.LogLevel)
+	logSetup, err := logging.Init(cfg.Logging)
+	if err != nil {
+		return fmt.Errorf("не удалось инициализировать логирование: %w", err)
+	}
+	defer func() {
+		if closeErr := logSetup.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Не удалось закрыть файл лога: %v\n", closeErr)
+		}
+	}()
+
+	if logSetup.FileEnabled {
+		slog.Info("Логирование инициализировано", "log_level", cfg.Logging.Level, "log_path", logSetup.LogPath)
+	} else {
+		slog.Info("Логирование инициализировано", "log_level", cfg.Logging.Level, "file_enabled", false)
+	}
 
 	// Настройка очистки
 	setupSignalHandler(cfg.RootPath)
@@ -362,7 +383,7 @@ func main() {
 			tui.Warn(fmt.Sprintf("Ошибка проверки обновлений: %v", err))
 		} else if updated {
 			slog.Info("Приложение было обновлено, завершение работы старой версии")
-			return
+			return nil
 		}
 	}
 
@@ -370,38 +391,36 @@ func main() {
 	assetManager, err := assetmgr.New(cfg)
 	if err != nil {
 		slog.Error("Критическая ошибка assetmgr", "error", err)
-		log.Fatalf("Критическая ошибка: не удалось инициализировать менеджер ресурсов: %v", err)
+		return fmt.Errorf("не удалось инициализировать менеджер ресурсов: %w", err)
 	}
 
 	// --- РЕЖИМ ВОЗОБНОВЛЕНИЯ / ПРЯМОГО ЗАПУСКА ---
 	if *moduleFlag == "Regime" && *resumeFlag != "" {
 		slog.Info("Запуск в режиме возобновления Regime", "config", *resumeFlag)
 		mod := &regime.Module{}
-		// В режиме возобновления мы передаем путь к временному конфигу через Run,
-		// так как интерфейс Run не поддерживает произвольные аргументы.
-		// Модуль Regime сам распознает, что это resume, если ему передать управление.
-		// Но лучше вызвать Resume явно.
-		// Однако интерфейс Installer имеет только Run.
-		// Для простоты, мы добавим логику в Regime.Resume(), который мы вызовем напрямую,
-		// так как мы знаем конкретный тип модуля здесь.
+		logging.LogTaskStarted(mod.ID(), "resume", "Возобновление установки Regime")
 
 		if err := mod.Resume(assetManager, RealWinUtils, *resumeFlag); err != nil {
+			logging.LogTaskFinished(mod.ID(), "resume", "Возобновление установки Regime", err)
 			slog.Error("Ошибка возобновления Regime", "error", err)
 			tui.Error(fmt.Sprintf("Ошибка возобновления установки: %v", err))
 			tui.WaitForAnyKey()
+			return fmt.Errorf("ошибка возобновления Regime: %w", err)
 		} else {
+			logging.LogTaskFinished(mod.ID(), "resume", "Возобновление установки Regime", nil)
 			tui.Success("\n--- Операция завершена успешно. ---")
-			// Даем пользователю прочитать сообщение перед закрытием
 			time.Sleep(5 * time.Second)
 		}
-		return
+		return nil
 	}
 
 	// --- ЗАПУСК GUI ---
 	if *guiFlag {
 		slog.Info("Запуск в режиме GUI")
-		gui.Run(cfg, assetManager, RealWinUtils)
-		return // Завершаем main после закрытия окна
+		if err := gui.Run(cfg, assetManager, RealWinUtils); err != nil {
+			return fmt.Errorf("не удалось запустить GUI: %w", err)
+		}
+		return nil
 	}
 
 	// --- КОНСОЛЬНЫЙ РЕЖИМ ---
@@ -422,19 +441,14 @@ func main() {
 		"UTM":           &utm.Module{},
 	}
 
-	consoleModules := buildConsoleModules(cfg.Modules, registeredModules)
-	if len(consoleModules) == 0 {
-		log.Fatal("В конфигурации не определено ни одного доступного модуля.")
-	}
-
-	queue := taskqueue.New()
-	if err := runConsoleDashboard(consoleModules, queue, assetManager, RealWinUtils); err != nil {
+	if err := consolequeue.Run(cfg.Modules, registeredModules, assetManager, RealWinUtils); err != nil {
 		slog.Error("Ошибка консольного интерфейса", "error", err)
 		tui.Error(fmt.Sprintf("Критическая ошибка интерфейса: %v", err))
 		tui.WaitForAnyKey()
-		os.Exit(1)
+		return fmt.Errorf("ошибка консольного интерфейса: %w", err)
 	}
 
 	slog.Info("Выход из программы")
 	tui.Info("Выход из программы.")
+	return nil
 }

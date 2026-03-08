@@ -70,7 +70,6 @@ func installDotNet48(ctx core.TaskContext, am core.AssetManager, wu core.WinUtil
 	// Используем стандартные флаги тихого установщика Microsoft: /q /norestart
 	output, err := wu.RunCommand(installerPath, "/q", "/norestart")
 	if err != nil {
-		// ОБНОВЛЕНО: Проверяем код 3010 (ERROR_SUCCESS_REBOOT_REQUIRED)
 		if strings.Contains(err.Error(), "exit status 3010") {
 			ctx.Info("Установщик вернул код 3010 (требуется перезагрузка). Это нормальное поведение.")
 			return nil
@@ -229,8 +228,7 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 			return fmt.Errorf("не удалось инициировать перезагрузку: %w", err)
 		}
 
-		// Завершаем программу, чтобы не идти дальше
-		os.Exit(0)
+		return nil
 	} else {
 		ctx.Success(".NET Framework 4.8 установлен.")
 	}

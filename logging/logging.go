@@ -1,9 +1,9 @@
-// logging/logging.go
 package logging
 
 import (
 	"context"
 	"fmt"
+	"goMH/config"
 	"io"
 	"log/slog"
 	"os"
@@ -12,50 +12,102 @@ import (
 	"sync"
 )
 
-// Init инициализирует глобальный логгер с кастомным форматированием.
-func Init(logLevel string) {
-	exePath, err := os.Executable()
-	if err != nil {
-		exePath = "."
-	}
-	logDir := filepath.Dir(exePath)
-	logPath := filepath.Join(logDir, "goMH.log")
-
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		fmt.Printf("Ошибка создания лога: %v\n", err)
-		os.Exit(1)
-	}
-
-	var level slog.Level
-	switch strings.ToUpper(logLevel) {
-	case "DEBUG":
-		level = slog.LevelDebug
-	case "WARN":
-		level = slog.LevelWarn
-	case "ERROR":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
-	}
-
-	// Используем MultiWriter для вывода и в файл, и в консоль (опционально, сейчас только файл как в оригинале)
-	// Если нужно только в файл:
-	writer := logFile
-
-	handler := NewPrettyHandler(writer, &slog.HandlerOptions{
-		Level: level,
-	})
-
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
-
-	// Первичное сообщение в старом формате fmt для консоли, чтобы видеть старт
-	fmt.Printf("Логирование настроено. Уровень: %s. Файл: %s\n", level.String(), logPath)
-	slog.Info("--- Запуск приложения goMH ---")
+type InitResult struct {
+	LogPath     string
+	FileEnabled bool
+	Level       slog.Level
+	closeFile   func() error
 }
 
-// PrettyHandler - кастомный обработчик для красивого вывода.
+func (r *InitResult) Close() error {
+	if r == nil || r.closeFile == nil {
+		return nil
+	}
+	return r.closeFile()
+}
+
+func Init(cfg config.LoggingConfig) (*InitResult, error) {
+	level := parseLevel(cfg.Level)
+	writer := io.Writer(io.Discard)
+
+	result := &InitResult{
+		FileEnabled: cfg.FileEnabled,
+		Level:       level,
+	}
+
+	if cfg.FileEnabled {
+		logPath, err := defaultLogPath()
+		if err != nil {
+			return nil, err
+		}
+
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			return nil, fmt.Errorf("не удалось открыть файл лога %s: %w", logPath, err)
+		}
+
+		writer = logFile
+		result.LogPath = logPath
+		result.closeFile = logFile.Close
+	}
+
+	handler := NewPrettyHandler(writer, &slog.HandlerOptions{Level: level})
+	slog.SetDefault(slog.New(handler))
+	return result, nil
+}
+
+func LogTaskQueued(moduleID, taskID, title string) {
+	slog.Info("Задача добавлена в runtime-очередь",
+		"module_id", moduleID,
+		"task_id", taskID,
+		"title", title,
+	)
+}
+
+func LogTaskStarted(moduleID, taskID, title string) {
+	slog.Info("Задача запущена",
+		"module_id", moduleID,
+		"task_id", taskID,
+		"title", title,
+	)
+}
+
+func LogTaskFinished(moduleID, taskID, title string, err error) {
+	attrs := []any{
+		"module_id", moduleID,
+		"task_id", taskID,
+		"title", title,
+	}
+
+	if err != nil {
+		slog.Error("Задача завершена с ошибкой", append(attrs, "error", err)...)
+		return
+	}
+
+	slog.Info("Задача завершена успешно", attrs...)
+}
+
+func parseLevel(level string) slog.Level {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "WARN", "WARNING":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func defaultLogPath() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("не удалось определить путь к исполняемому файлу: %w", err)
+	}
+	return filepath.Join(filepath.Dir(exePath), "goMH.log"), nil
+}
+
 type PrettyHandler struct {
 	w     io.Writer
 	mu    sync.Mutex
@@ -64,9 +116,14 @@ type PrettyHandler struct {
 }
 
 func NewPrettyHandler(w io.Writer, opts *slog.HandlerOptions) *PrettyHandler {
+	handlerOptions := slog.HandlerOptions{}
+	if opts != nil {
+		handlerOptions = *opts
+	}
+
 	return &PrettyHandler{
 		w:    w,
-		opts: *opts,
+		opts: handlerOptions,
 	}
 }
 
@@ -78,64 +135,51 @@ func (h *PrettyHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// 1. Форматирование времени: 2025-11-19 05:23:22.343
 	timeStr := r.Time.Format("2006-01-02 15:04:05.000")
-
-	// 2. Уровень лога в квадратных скобках
 	levelStr := fmt.Sprintf("[%s]", r.Level.String())
 
-	// 3. Запись заголовка: Time [LEVEL] Message
-	// Например: 2025-11-19 05:23:22.343 [DEBUG] Перемещение старой версии в бэкап
-	_, err := fmt.Fprintf(h.w, "%s %-7s %s\n", timeStr, levelStr, r.Message)
-	if err != nil {
+	if _, err := fmt.Fprintf(h.w, "%s %-7s %s\n", timeStr, levelStr, r.Message); err != nil {
 		return err
 	}
 
-	// 4. Обработка атрибутов
-	// Сначала добавляем атрибуты, добавленные через WithAttrs
 	for _, attr := range h.attrs {
-		h.printAttr(attr)
+		if err := h.printAttr(attr); err != nil {
+			return err
+		}
 	}
-	// Затем атрибуты текущей записи
+
+	var handleErr error
 	r.Attrs(func(attr slog.Attr) bool {
-		h.printAttr(attr)
-		return true
+		handleErr = h.printAttr(attr)
+		return handleErr == nil
 	})
 
-	return nil
+	return handleErr
 }
 
-func (h *PrettyHandler) printAttr(attr slog.Attr) {
-	// Пропускаем пустые атрибуты
+func (h *PrettyHandler) printAttr(attr slog.Attr) error {
 	if attr.Key == "" {
-		return
+		return nil
 	}
-
-	value := attr.Value.String()
-	// Если значение содержит кавычки или пробелы, можно дополнительно обработать,
-	// но по запросу нужно просто key=value, где value может быть путем.
-	// Для путей Windows с обратными слешами Go может их экранировать, если использовать %q.
-	// Используем %v или %s для чистого вывода.
-
-	// Особая обработка для ошибок, чтобы они выглядели понятнее
-	if attr.Key == "error" || attr.Key == "err" {
-		fmt.Fprintf(h.w, "  %s=%v\n", attr.Key, value)
-		return
-	}
-
-	fmt.Fprintf(h.w, "  %s=%s\n", attr.Key, value)
+	_, err := fmt.Fprintf(h.w, "  %s=%s\n", attr.Key, attr.Value.String())
+	return err
 }
 
 func (h *PrettyHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	cloned := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	cloned = append(cloned, h.attrs...)
+	cloned = append(cloned, attrs...)
 	return &PrettyHandler{
 		w:     h.w,
 		opts:  h.opts,
-		attrs: append(h.attrs, attrs...),
+		attrs: cloned,
 	}
 }
 
-func (h *PrettyHandler) WithGroup(name string) slog.Handler {
-	// Группировка в этом простом формате не реализована визуально отступами,
-	// возвращаем тот же хендлер (или можно реализовать префикс ключей)
-	return h
+func (h *PrettyHandler) WithGroup(string) slog.Handler {
+	return &PrettyHandler{
+		w:     h.w,
+		opts:  h.opts,
+		attrs: append([]slog.Attr(nil), h.attrs...),
+	}
 }

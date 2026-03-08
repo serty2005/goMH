@@ -1,15 +1,17 @@
 package gui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"goMH/core"
+	"goMH/logging"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-var ErrDuplicateTask = errors.New("duplicate task is already queued or running")
+var ErrDuplicateTask = errors.New("задача с такой сигнатурой уже находится в очереди или выполняется")
 
 type TaskState string
 
@@ -47,6 +49,8 @@ type TaskSnapshot struct {
 type taskRecord struct {
 	spec     TaskSpec
 	snapshot TaskSnapshot
+	runtime  context.Context
+	cancel   context.CancelFunc
 }
 
 type TaskManager struct {
@@ -82,7 +86,7 @@ func (tm *TaskManager) OnTaskFinished(cb func(TaskSnapshot)) { tm.onTaskFinished
 
 func (tm *TaskManager) Enqueue(spec TaskSpec) (TaskSnapshot, error) {
 	if spec.Run == nil {
-		return TaskSnapshot{}, errors.New("task Run callback is required")
+		return TaskSnapshot{}, errors.New("для задачи не задан обработчик выполнения")
 	}
 
 	now := time.Now()
@@ -120,6 +124,7 @@ func (tm *TaskManager) Enqueue(spec TaskSpec) (TaskSnapshot, error) {
 
 	rec := &taskRecord{spec: spec, snapshot: snap}
 	tm.tasks = append(tm.tasks, rec)
+	logging.LogTaskQueued(rec.snapshot.ModuleID, rec.snapshot.ID, rec.snapshot.Title)
 
 	enqueuedCB := tm.onTaskEnqueued
 	queueCh := tm.queueCh
@@ -172,7 +177,7 @@ func (tm *TaskManager) Stats() (running int, queued int) {
 func (tm *TaskManager) worker() {
 	for rec := range tm.queueCh {
 		tm.setRunning(rec)
-		ctx := &TaskGuiContext{tm: tm, taskID: rec.snapshot.ID, module: rec.snapshot.ModuleID}
+		ctx := &TaskGuiContext{tm: tm, taskID: rec.snapshot.ID, module: rec.snapshot.ModuleID, runtime: rec.runtime}
 		err := rec.spec.Run(ctx)
 		tm.finish(rec, err)
 	}
@@ -181,6 +186,7 @@ func (tm *TaskManager) worker() {
 func (tm *TaskManager) setRunning(rec *taskRecord) {
 	tm.mu.Lock()
 	now := time.Now()
+	rec.runtime, rec.cancel = context.WithCancel(context.Background())
 	rec.snapshot.State = TaskRunning
 	rec.snapshot.StartedAt = now
 	rec.snapshot.UpdatedAt = now
@@ -188,6 +194,7 @@ func (tm *TaskManager) setRunning(rec *taskRecord) {
 	snapshot := rec.snapshot
 	cb := tm.onTaskStarted
 	tm.mu.Unlock()
+	logging.LogTaskStarted(snapshot.ModuleID, snapshot.ID, snapshot.Title)
 
 	if cb != nil {
 		cb(snapshot)
@@ -197,6 +204,11 @@ func (tm *TaskManager) setRunning(rec *taskRecord) {
 func (tm *TaskManager) finish(rec *taskRecord, err error) {
 	tm.mu.Lock()
 	now := time.Now()
+	if rec.cancel != nil {
+		rec.cancel()
+		rec.cancel = nil
+	}
+	rec.runtime = nil
 	rec.snapshot.FinishedAt = now
 	rec.snapshot.UpdatedAt = now
 	if err != nil {
@@ -212,6 +224,7 @@ func (tm *TaskManager) finish(rec *taskRecord, err error) {
 	snapshot := rec.snapshot
 	cb := tm.onTaskFinished
 	tm.mu.Unlock()
+	logging.LogTaskFinished(snapshot.ModuleID, snapshot.ID, snapshot.Title, err)
 
 	if cb != nil {
 		cb(snapshot)

@@ -101,11 +101,17 @@ type UTMConfig struct {
 	InstallArgs string `json:"install_args"`
 }
 
+type LoggingConfig struct {
+	Level       string `json:"level"`
+	FileEnabled bool   `json:"file_enabled"`
+}
+
 type Config struct {
 	RootPath            string               `json:"root_path"`
 	SelfUpdateConfig    SelfUpdateConfig     `json:"self_update_config"`
 	AssetsCachePath     string               `json:"assets_cache_path"`
 	LogLevel            string               `json:"log_level"`
+	Logging             LoggingConfig        `json:"logging"`
 	FTP                 []FTPConfig          `json:"ftp_config"`
 	Modules             []ModuleDef          `json:"modules"`
 	FrpcConfig          FrpcConfig           `json:"frpc_config"`
@@ -135,6 +141,18 @@ type AssetInfo struct {
 	DownloadMethod string `json:"download_method"`
 }
 
+type rawLoggingConfig struct {
+	Level       string `json:"level"`
+	FileEnabled *bool  `json:"file_enabled"`
+}
+
+type configAlias Config
+
+type rawConfig struct {
+	configAlias
+	Logging *rawLoggingConfig `json:"logging"`
+}
+
 func LoadConfig(pathOrURL string) (*Config, error) {
 	var data []byte
 	var err error
@@ -156,10 +174,13 @@ func LoadConfig(pathOrURL string) (*Config, error) {
 		return nil, fmt.Errorf("не удалось получить данные конфигурации: %w", err)
 	}
 
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	var raw rawConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("ошибка парсинга JSON конфигурации: %w", err)
 	}
+
+	cfg := Config(raw.configAlias)
+	cfg.applyLoggingDefaults(raw.Logging)
 
 	for i := range cfg.FTP {
 		if cfg.FTP[i].Port == 0 {
@@ -168,4 +189,25 @@ func LoadConfig(pathOrURL string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func (cfg *Config) applyLoggingDefaults(raw *rawLoggingConfig) {
+	level := strings.TrimSpace(cfg.LogLevel)
+	if raw != nil && strings.TrimSpace(raw.Level) != "" {
+		level = strings.TrimSpace(raw.Level)
+	}
+	if level == "" {
+		level = "INFO"
+	}
+
+	fileEnabled := true
+	if raw != nil && raw.FileEnabled != nil {
+		fileEnabled = *raw.FileEnabled
+	}
+
+	cfg.Logging = LoggingConfig{
+		Level:       level,
+		FileEnabled: fileEnabled,
+	}
+	cfg.LogLevel = cfg.Logging.Level
 }

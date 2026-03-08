@@ -1,6 +1,9 @@
 package tui
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // ConsoleContext реализует core.TaskContext для консольного интерфейса.
 type ConsoleContext struct{}
@@ -12,6 +15,10 @@ func NewConsoleContext() *ConsoleContext {
 
 func NewSilentContext() *SilentContext {
 	return &SilentContext{}
+}
+
+func (c *ConsoleContext) Context() context.Context {
+	return context.Background()
 }
 
 func (c *ConsoleContext) Info(msg string) {
@@ -41,9 +48,10 @@ func (c *ConsoleContext) SetProgress(percent int) {
 	// Здесь можно реализовать текстовый прогресс, если нужно.
 }
 
-func (c *SilentContext) Info(string)      {}
-func (c *SilentContext) Warn(string)      {}
-func (c *SilentContext) Error(string)     {}
-func (c *SilentContext) Success(string)   {}
-func (c *SilentContext) SetStatus(string) {}
-func (c *SilentContext) SetProgress(int)  {}
+func (c *SilentContext) Context() context.Context { return context.Background() }
+func (c *SilentContext) Info(string)              {}
+func (c *SilentContext) Warn(string)              {}
+func (c *SilentContext) Error(string)             {}
+func (c *SilentContext) Success(string)           {}
+func (c *SilentContext) SetStatus(string)         {}
+func (c *SilentContext) SetProgress(int)          {}

@@ -31,12 +31,11 @@ type Manager struct {
 }
 
 type runtimeHooks struct {
-	stdout          io.Writer
-	progress        io.Writer
-	statusFn        func(string)
-	percentFn       func(string, int)
-	downloadCtx     context.Context
-	downloadStateFn func(bool, string)
+	stdout     io.Writer
+	progress   io.Writer
+	statusFn   func(string)
+	percentFn  func(string, int)
+	runtimeCtx context.Context
 }
 
 func New(cfg *config.Config) (*Manager, error) {
@@ -60,15 +59,14 @@ func (m *Manager) Cfg() *config.Config {
 	return m.cfg
 }
 
-func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn func(string), percentFn func(string, int), downloadCtx context.Context, downloadStateFn func(bool, string)) *Manager {
+func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn func(string), percentFn func(string, int), runtimeCtx context.Context) *Manager {
 	cloned := *m
 	cloned.runtime = runtimeHooks{
-		stdout:          stdout,
-		progress:        progress,
-		statusFn:        statusFn,
-		percentFn:       percentFn,
-		downloadCtx:     downloadCtx,
-		downloadStateFn: downloadStateFn,
+		stdout:     stdout,
+		progress:   progress,
+		statusFn:   statusFn,
+		percentFn:  percentFn,
+		runtimeCtx: runtimeCtx,
 	}
 	if cloned.runtime.stdout == nil {
 		cloned.runtime.stdout = io.Discard
@@ -76,8 +74,8 @@ func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn
 	if cloned.runtime.progress == nil {
 		cloned.runtime.progress = io.Discard
 	}
-	if cloned.runtime.downloadCtx == nil {
-		cloned.runtime.downloadCtx = context.Background()
+	if cloned.runtime.runtimeCtx == nil {
+		cloned.runtime.runtimeCtx = context.Background()
 	}
 	return &cloned
 }
@@ -164,8 +162,6 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 	fileName := sanitizeProgressLabel(filepath.Base(ftpPath))
 	m.reportStatus("Скачивание " + fileName)
 	m.reportProgress(fileName, 0)
-	m.reportDownloadState(true, fileName)
-	defer m.reportDownloadState(false, fileName)
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
@@ -232,8 +228,6 @@ func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, err
 	fileName := sanitizeProgressLabel(filepath.Base(httpURL))
 	m.reportStatus("Скачивание " + fileName)
 	m.reportProgress(fileName, 0)
-	m.reportDownloadState(true, fileName)
-	defer m.reportDownloadState(false, fileName)
 
 	// Убедимся, что директория для сохранения файла существует
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
@@ -676,17 +670,11 @@ func (m *Manager) reportProgress(description string, percent int) {
 	}
 }
 
-func (m *Manager) reportDownloadState(active bool, description string) {
-	if m.runtime.downloadStateFn != nil {
-		m.runtime.downloadStateFn(active, description)
-	}
-}
-
 func (m *Manager) downloadContext() context.Context {
-	if m.runtime.downloadCtx == nil {
+	if m.runtime.runtimeCtx == nil {
 		return context.Background()
 	}
-	return m.runtime.downloadCtx
+	return m.runtime.runtimeCtx
 }
 
 func (m *Manager) wrapDownloadReader(reader io.Reader) io.Reader {
@@ -697,10 +685,10 @@ func (m *Manager) wrapDownloadReader(reader io.Reader) io.Reader {
 }
 
 func (m *Manager) cancelFTPDownload(conn *ftp.ServerConn, reader io.Closer) {
-	if m.runtime.downloadCtx == nil {
+	if m.runtime.runtimeCtx == nil {
 		return
 	}
-	ctx := m.runtime.downloadCtx
+	ctx := m.runtime.runtimeCtx
 	go func() {
 		<-ctx.Done()
 		_ = reader.Close()
