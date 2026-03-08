@@ -57,8 +57,6 @@ type ServiceUtilsConfig struct {
 
 type Module struct{}
 
-var SharedLogStreamService = logstream.NewService()
-
 func (m *Module) ID() string       { return "ServiceUtils" }
 func (m *Module) MenuText() string { return "Утилиты обслуживания" }
 
@@ -123,7 +121,7 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 		return core.ModuleActionResult{}, errors.New("немедленное выполнение поддерживается только для просмотра лога")
 	}
 
-	_, err = m.StartLogView(ctx.Context(), cfg, SharedLogStreamService, logstream.NewStdoutSink())
+	_, err = m.StartLogView(ctx.Context(), cfg, nil, logstream.NewStdoutSink())
 	if err != nil {
 		return core.ModuleActionResult{}, err
 	}
@@ -226,7 +224,7 @@ func (m *Module) StartLogView(parent context.Context, cfg *ServiceUtilsConfig, s
 		return nil, errors.New("конфигурация не относится к просмотру лога")
 	}
 	if service == nil {
-		service = SharedLogStreamService
+		service = logstream.NewService()
 	}
 
 	activeSinks := make([]logstream.Sink, 0, len(sinks))

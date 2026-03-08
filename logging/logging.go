@@ -19,6 +19,8 @@ type InitResult struct {
 	closeFile   func() error
 }
 
+var defaultLogPathFunc = defaultLogPath
+
 func (r *InitResult) Close() error {
 	if r == nil || r.closeFile == nil {
 		return nil
@@ -36,7 +38,7 @@ func Init(cfg config.LoggingConfig) (*InitResult, error) {
 	}
 
 	if cfg.FileEnabled {
-		logPath, err := defaultLogPath()
+		logPath, err := defaultLogPathFunc()
 		if err != nil {
 			return nil, err
 		}

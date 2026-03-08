@@ -80,6 +80,13 @@ func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn
 	return &cloned
 }
 
+func (m *Manager) ConsoleWriter() io.Writer {
+	if m == nil || m.runtime.stdout == nil {
+		return io.Discard
+	}
+	return m.runtime.stdout
+}
+
 func (m *Manager) DownloadToCache(assetName string) (string, error) {
 	assetInfo, ok := m.cfg.AssetCatalog[assetName]
 	if !ok {

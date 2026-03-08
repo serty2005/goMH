@@ -135,14 +135,14 @@ func (s Service) configureContext() core.TaskContext {
 	if s.ConfigureContext != nil {
 		return s.ConfigureContext
 	}
-	return newSilentContext(context.Background())
+	return core.NewSilentTaskContext(context.Background())
 }
 
 func (s Service) immediateContext() core.TaskContext {
 	if s.ImmediateContext != nil {
 		return s.ImmediateContext
 	}
-	return newSilentContext(context.Background())
+	return core.NewSilentTaskContext(context.Background())
 }
 
 func isNilConfig(config any) bool {

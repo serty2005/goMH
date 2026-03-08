@@ -3,7 +3,6 @@ package gui
 import (
 	"context"
 	"fmt"
-	"goMH/taskqueue"
 	"time"
 
 	"github.com/lxn/walk"
@@ -79,57 +78,4 @@ func (c *GuiContext) SetProgress(percent int) {
 		}
 		c.progress.SetValue(percent)
 	})
-}
-
-// TaskGuiContext проксирует телеметрию задачи в общий runtime очереди.
-type TaskGuiContext struct {
-	queue   *taskqueue.Queue
-	taskID  string
-	module  string
-	runtime context.Context
-}
-
-func NewTaskGuiContext(queue *taskqueue.Queue, snapshot taskqueue.TaskSnapshot, runtimeCtx context.Context) *TaskGuiContext {
-	return &TaskGuiContext{
-		queue:   queue,
-		taskID:  snapshot.ID,
-		module:  snapshot.ModuleID,
-		runtime: runtimeCtx,
-	}
-}
-
-func (c *TaskGuiContext) Context() context.Context {
-	if c.runtime == nil {
-		return context.Background()
-	}
-	return c.runtime
-}
-
-func (c *TaskGuiContext) log(level, msg string) {
-	line := fmt.Sprintf("[%s][%s][%s][%s] %s", time.Now().Format("15:04:05"), c.module, c.taskID, level, msg)
-	c.queue.AppendLogLine(c.taskID, line)
-}
-
-func (c *TaskGuiContext) Info(msg string) {
-	c.log("INFO", msg)
-}
-
-func (c *TaskGuiContext) Warn(msg string) {
-	c.log("WARN", msg)
-}
-
-func (c *TaskGuiContext) Error(msg string) {
-	c.log("ERROR", msg)
-}
-
-func (c *TaskGuiContext) Success(msg string) {
-	c.log("SUCCESS", msg)
-}
-
-func (c *TaskGuiContext) SetStatus(text string) {
-	c.queue.UpdateStatus(c.taskID, text)
-}
-
-func (c *TaskGuiContext) SetProgress(percent int) {
-	c.queue.UpdateProgress(c.taskID, percent)
 }

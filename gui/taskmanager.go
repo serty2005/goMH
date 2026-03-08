@@ -55,7 +55,7 @@ func (tm *TaskManager) Queue() *taskqueue.Queue {
 
 func (tm *TaskManager) Start() {
 	tm.queue.StartBackground(func(snapshot taskqueue.TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
-		return NewTaskGuiContext(tm.queue, snapshot, runtimeCtx)
+		return taskqueue.NewTaskContext(tm.queue, snapshot.ID, runtimeCtx)
 	})
 }
 

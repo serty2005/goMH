@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"goMH/core"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,18 +15,25 @@ import (
 type SevenZipClient struct {
 	exePath string
 	wu      core.WinUtils
+	writer  io.Writer
+}
+
+type consoleWriterProvider interface {
+	ConsoleWriter() io.Writer
 }
 
 // NewClient создает и инициализирует новый клиент для работы с 7-Zip.
 // Он автоматически находит или устанавливает 7z.exe при первом вызове.
 func NewClient(am core.AssetManager, wu core.WinUtils) (*SevenZipClient, error) {
-	exePath, err := findAndInstall(am, wu)
+	writer := resolveConsoleWriter(am, wu)
+	exePath, err := findAndInstall(am, wu, writer)
 	if err != nil {
 		return nil, err
 	}
 	return &SevenZipClient{
 		exePath: exePath,
 		wu:      wu,
+		writer:  writer,
 	}, nil
 }
 
@@ -63,7 +71,7 @@ func (c *SevenZipClient) List(sourceArchive string) ([]string, error) {
 
 // findAndInstall ищет исполняемый файл 7z.exe в стандартных местах и устанавливает его при необходимости.
 // Эта функция теперь является неэкспортируемой и используется только внутри этого пакета.
-func findAndInstall(am core.AssetManager, wu core.WinUtils) (string, error) {
+func findAndInstall(am core.AssetManager, wu core.WinUtils, writer io.Writer) (string, error) {
 	// 1. Проверяем стандартные пути установки
 	potentialPaths := []string{
 		`C:\Program Files\7-Zip\7z.exe`,
@@ -82,14 +90,14 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils) (string, error) {
 	}
 
 	// 3. Если 7z не найден, пытаемся скачать и установить
-	consolePrintln("7z.exe не найден в системе. Попытка автоматической установки...")
+	consolePrintln(writer, "7z.exe не найден в системе. Попытка автоматической установки...")
 
 	cfg := am.Cfg()
 	if cfg == nil || cfg.MaintenanceConfig.SevenZipAssetID == "" {
 		return "", errors.New("в конфигурации не указан '7zipAssetID' для автоматической установки 7-Zip")
 	}
 
-	consolePrintf("Попытка скачивания 7-Zip через AssetManager с ID: %s...\n", cfg.MaintenanceConfig.SevenZipAssetID)
+	consolePrintf(writer, "Попытка скачивания 7-Zip через AssetManager с ID: %s...\n", cfg.MaintenanceConfig.SevenZipAssetID)
 
 	cachePath, err := am.DownloadToCache(cfg.MaintenanceConfig.SevenZipAssetID)
 	if err != nil {
@@ -97,7 +105,7 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils) (string, error) {
 	}
 	defer os.Remove(cachePath)
 
-	consolePrintln("Установка 7-Zip...")
+	consolePrintln(writer, "Установка 7-Zip...")
 	_, err = wu.RunCommand(cachePath, "/S")
 	if err != nil {
 		return "", fmt.Errorf("не удалось установить 7-Zip: %w", err)
@@ -107,11 +115,38 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils) (string, error) {
 
 	installPath := `C:\Program Files\7-Zip\7z.exe`
 	if _, err := os.Stat(installPath); err == nil {
-		consolePrintln("7-Zip успешно установлен.")
+		consolePrintln(writer, "7-Zip успешно установлен.")
 		return installPath, nil
 	}
 
 	return "", errors.New("не удалось найти 7z.exe после установки. Проверьте права администратора")
+}
+
+func resolveConsoleWriter(am core.AssetManager, wu core.WinUtils) io.Writer {
+	for _, source := range []any{am, wu} {
+		provider, ok := source.(consoleWriterProvider)
+		if !ok {
+			continue
+		}
+		if writer := provider.ConsoleWriter(); writer != nil {
+			return writer
+		}
+	}
+	return os.Stdout
+}
+
+func consolePrintf(writer io.Writer, format string, args ...interface{}) {
+	if writer == nil {
+		writer = io.Discard
+	}
+	fmt.Fprintf(writer, format, args...)
+}
+
+func consolePrintln(writer io.Writer, args ...interface{}) {
+	if writer == nil {
+		writer = io.Discard
+	}
+	fmt.Fprintln(writer, args...)
 }
 
 // parseFileList парсит вывод команды `7z l -slt` и возвращает список путей файлов.

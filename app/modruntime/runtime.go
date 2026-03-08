@@ -1,10 +1,8 @@
 package modruntime
 
 import (
-	"context"
 	"goMH/assetmgr"
 	"goMH/core"
-	"goMH/dependencies"
 	"io"
 	"strings"
 	"sync"
@@ -16,8 +14,6 @@ type consoleOutputWinUtils interface {
 
 func ExecuteWithTaskRuntime(taskCtx core.TaskContext, services core.ModuleServices, fn func(taskServices core.ModuleServices) error) error {
 	writer := newTaskLogWriter(taskCtx)
-	restoreSevenZip := dependencies.SetConsoleOutput(writer)
-	defer restoreSevenZip()
 	defer writer.Flush()
 
 	taskServices := core.ModuleServices{
@@ -103,22 +99,3 @@ func (w *taskLogWriter) flushLocked(force bool) {
 		w.buffer.WriteString(rest)
 	}
 }
-
-type silentContext struct {
-	runtime context.Context
-}
-
-func newSilentContext(runtimeCtx context.Context) core.TaskContext {
-	if runtimeCtx == nil {
-		runtimeCtx = context.Background()
-	}
-	return &silentContext{runtime: runtimeCtx}
-}
-
-func (c *silentContext) Context() context.Context { return c.runtime }
-func (c *silentContext) Info(string)              {}
-func (c *silentContext) Warn(string)              {}
-func (c *silentContext) Error(string)             {}
-func (c *silentContext) Success(string)           {}
-func (c *silentContext) SetStatus(string)         {}
-func (c *silentContext) SetProgress(int)          {}

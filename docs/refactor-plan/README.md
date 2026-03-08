@@ -30,6 +30,7 @@
 ## Состав каталога
 
 - [SESSION_PROMPTS.md](/c:/self/repos/goMH/docs/refactor-plan/SESSION_PROMPTS.md) — сводный список готовых промптов.
+- [migration-notes.md](/c:/self/repos/goMH/docs/refactor-plan/migration-notes.md) — итоговые решения, убранные адаптеры и оставленная совместимость.
 - [prompts/01-runtime-and-logging.md](/c:/self/repos/goMH/docs/refactor-plan/prompts/01-runtime-and-logging.md) — этап 1.
 - [prompts/02-task-runtime-and-log-streaming.md](/c:/self/repos/goMH/docs/refactor-plan/prompts/02-task-runtime-and-log-streaming.md) — этап 2.
 - [prompts/03-module-contract-and-registry.md](/c:/self/repos/goMH/docs/refactor-plan/prompts/03-module-contract-and-registry.md) — этап 3.

@@ -516,29 +516,13 @@ func (q *Queue) appendLogLocked(rec *taskRecord, line string) {
 	}
 }
 
-func (q *Queue) UpdateStatus(taskID, status string) {
-	q.updateStatus(taskID, status)
-}
-
-func (q *Queue) UpdateProgress(taskID string, progress int) {
-	q.updateProgress(taskID, progress)
-}
-
-func (q *Queue) AppendLog(taskID, level, line string) {
-	q.appendLog(taskID, level, line)
-}
-
-func (q *Queue) AppendLogLine(taskID, line string) {
-	q.appendLogLine(taskID, line)
-}
-
 func (q *Queue) buildContext(factory ContextFactory, snapshot TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
 	if factory != nil {
 		if ctx := factory(snapshot, runtimeCtx); ctx != nil {
 			return ctx
 		}
 	}
-	return newSilentContext(runtimeCtx)
+	return core.NewSilentTaskContext(runtimeCtx)
 }
 
 type taskContext struct {
@@ -585,25 +569,6 @@ func (c *taskContext) SetStatus(text string) {
 func (c *taskContext) SetProgress(percent int) {
 	c.queue.updateProgress(c.taskID, percent)
 }
-
-type silentContext struct {
-	runtime context.Context
-}
-
-func newSilentContext(runtimeCtx context.Context) core.TaskContext {
-	if runtimeCtx == nil {
-		runtimeCtx = context.Background()
-	}
-	return &silentContext{runtime: runtimeCtx}
-}
-
-func (c *silentContext) Context() context.Context { return c.runtime }
-func (c *silentContext) Info(string)              {}
-func (c *silentContext) Warn(string)              {}
-func (c *silentContext) Error(string)             {}
-func (c *silentContext) Success(string)           {}
-func (c *silentContext) SetStatus(string)         {}
-func (c *silentContext) SetProgress(int)          {}
 
 func (q *Queue) snapshotListeners() []Listener {
 	q.listenersMu.RLock()

@@ -152,34 +152,10 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, spinnerTickCmd()
 
 	case refreshMsg:
-		currentTaskID := ""
-		if current := m.currentTask(); current != nil {
-			currentTaskID = current.Snapshot.ID
-		}
-		m.tasks = visibleDashboardTasks(msg.tasks)
-		m.queueStarted = msg.queueStarted
-		selectedTaskID, forceQueueFocus := m.resolveTaskSelection(currentTaskID)
-		m.taskIndex = findTaskIndex(m.tasks, selectedTaskID)
-		if forceQueueFocus && selectedTaskID != "" {
-			m.focus = 1
-		}
-		m.normalize()
-		return m, nil
+		return m.handleRefresh(msg)
 
 	case actionDoneMsg:
-		m.busy = false
-		if msg.err != nil {
-			m.lastError = msg.err.Error()
-			m.lastMessage = ""
-		} else {
-			m.lastMessage = msg.note
-			m.lastError = ""
-			if msg.selectTaskID != "" {
-				m.focus = 1
-				m.pendingTaskID = msg.selectTaskID
-			}
-		}
-		return m, m.fetchTasks()
+		return m.handleActionDone(msg)
 
 	case tea.MouseMsg:
 		if m.busy {
@@ -188,89 +164,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
-		if m.busy {
-			switch msg.String() {
-			case "ctrl+c", "q":
-				return m, tea.Quit
-			}
-			return m, nil
-		}
-
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "tab", "right":
-			m.moveFocus(1)
-			m.normalize()
-			return m, nil
-		case "shift+tab", "left":
-			m.moveFocus(-1)
-			m.normalize()
-			return m, nil
-		case "up", "k":
-			if m.focus == 0 {
-				m.moduleIndex--
-			} else {
-				m.taskIndex--
-			}
-			m.normalize()
-			return m, nil
-		case "down", "j":
-			if m.focus == 0 {
-				m.moduleIndex++
-			} else {
-				m.taskIndex++
-			}
-			m.normalize()
-			return m, nil
-		case "a", " ":
-			if m.focus != 0 {
-				return m, nil
-			}
-			return m.startEnqueueCurrentModule()
-		case "enter":
-			if m.focus != 0 {
-				return m, nil
-			}
-			return m.startEnqueueCurrentModule()
-		case "backspace", "delete":
-			if m.focus != 1 || m.controller.OnRemoveTask == nil {
-				return m, nil
-			}
-			task := m.currentTask()
-			if task == nil {
-				return m, nil
-			}
-			note, err := m.controller.OnRemoveTask(task.Snapshot.ID)
-			if err != nil {
-				m.lastError = err.Error()
-				m.lastMessage = ""
-			} else {
-				m.lastMessage = note
-				m.lastError = ""
-			}
-			return m, m.fetchTasks()
-		case "c":
-			if m.controller.OnClearFinished == nil {
-				return m, nil
-			}
-			note, err := m.controller.OnClearFinished()
-			if err != nil {
-				m.lastError = err.Error()
-				m.lastMessage = ""
-			} else {
-				m.lastMessage = note
-				m.lastError = ""
-			}
-			return m, m.fetchTasks()
-		}
-
-		if index, ok := m.shortcutModuleIndex(msg.String()); ok {
-			m.moduleIndex = index
-			m.focus = 0
-			m.normalize()
-			return m.startEnqueueCurrentModule()
-		}
+		return m.handleKey(msg)
 	}
 
 	return m, nil
@@ -378,6 +272,125 @@ func (m *dashboardModel) startEnqueueCurrentModule() (dashboardModel, tea.Cmd) {
 	return *m, m.runBlocking(func() (DashboardActionResult, error) {
 		return m.controller.OnEnqueue(module)
 	})
+}
+
+func (m dashboardModel) handleRefresh(msg refreshMsg) (dashboardModel, tea.Cmd) {
+	currentTaskID := ""
+	if current := m.currentTask(); current != nil {
+		currentTaskID = current.Snapshot.ID
+	}
+	m.tasks = visibleDashboardTasks(msg.tasks)
+	m.queueStarted = msg.queueStarted
+	selectedTaskID, forceQueueFocus := m.resolveTaskSelection(currentTaskID)
+	m.taskIndex = findTaskIndex(m.tasks, selectedTaskID)
+	if forceQueueFocus && selectedTaskID != "" {
+		m.focus = 1
+	}
+	m.normalize()
+	return m, nil
+}
+
+func (m dashboardModel) handleActionDone(msg actionDoneMsg) (dashboardModel, tea.Cmd) {
+	m.busy = false
+	m.applyResult(msg.note, msg.err)
+	if msg.err == nil && msg.selectTaskID != "" {
+		m.focus = 1
+		m.pendingTaskID = msg.selectTaskID
+	}
+	return m, m.fetchTasks()
+}
+
+func (m dashboardModel) handleKey(msg tea.KeyMsg) (dashboardModel, tea.Cmd) {
+	if m.busy {
+		return m.handleBusyKey(msg)
+	}
+
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "tab", "right":
+		m.moveFocus(1)
+		m.normalize()
+		return m, nil
+	case "shift+tab", "left":
+		m.moveFocus(-1)
+		m.normalize()
+		return m, nil
+	case "up", "k":
+		m.moveSelection(-1)
+		return m, nil
+	case "down", "j":
+		m.moveSelection(1)
+		return m, nil
+	case "a", " ", "enter":
+		if m.focus != 0 {
+			return m, nil
+		}
+		return m.startEnqueueCurrentModule()
+	case "backspace", "delete":
+		return m.removeCurrentTask()
+	case "c":
+		return m.clearFinishedTasks()
+	}
+
+	if index, ok := m.shortcutModuleIndex(msg.String()); ok {
+		m.moduleIndex = index
+		m.focus = 0
+		m.normalize()
+		return m.startEnqueueCurrentModule()
+	}
+
+	return m, nil
+}
+
+func (m dashboardModel) handleBusyKey(msg tea.KeyMsg) (dashboardModel, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	default:
+		return m, nil
+	}
+}
+
+func (m *dashboardModel) moveSelection(delta int) {
+	if m.focus == 0 {
+		m.moduleIndex += delta
+	} else {
+		m.taskIndex += delta
+	}
+	m.normalize()
+}
+
+func (m dashboardModel) removeCurrentTask() (dashboardModel, tea.Cmd) {
+	if m.focus != 1 || m.controller.OnRemoveTask == nil {
+		return m, nil
+	}
+	task := m.currentTask()
+	if task == nil {
+		return m, nil
+	}
+	note, err := m.controller.OnRemoveTask(task.Snapshot.ID)
+	m.applyResult(note, err)
+	return m, m.fetchTasks()
+}
+
+func (m dashboardModel) clearFinishedTasks() (dashboardModel, tea.Cmd) {
+	if m.controller.OnClearFinished == nil {
+		return m, nil
+	}
+	note, err := m.controller.OnClearFinished()
+	m.applyResult(note, err)
+	return m, m.fetchTasks()
+}
+
+func (m *dashboardModel) applyResult(note string, err error) {
+	if err != nil {
+		m.lastError = err.Error()
+		m.lastMessage = ""
+		return
+	}
+	m.lastMessage = note
+	m.lastError = ""
 }
 
 func (m dashboardModel) renderModules(width int, height int) string {

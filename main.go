@@ -20,37 +20,35 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
 
-var realWinUtilsConsoleMu sync.Mutex
-
 type RealWinUtils struct {
-	stdout io.Writer
-	stderr io.Writer
+	runtime *winutils.Runtime
 }
 
 func (rw *RealWinUtils) WithConsoleOutput(stdout io.Writer, stderr io.Writer) core.WinUtils {
-	cloned := *rw
-	cloned.stdout = stdout
-	cloned.stderr = stderr
-	return &cloned
+	return &RealWinUtils{
+		runtime: rw.withRuntime().WithConsoleOutput(stdout, stderr),
+	}
 }
 
-func (rw *RealWinUtils) withConsoleCapture(fn func() error) error {
-	if rw == nil || (rw.stdout == nil && rw.stderr == nil) {
-		return fn()
-	}
+func NewRealWinUtils() *RealWinUtils {
+	return &RealWinUtils{runtime: winutils.NewRuntime()}
+}
 
-	realWinUtilsConsoleMu.Lock()
-	restore := winutils.SetConsoleOutput(rw.stdout, rw.stderr)
-	defer realWinUtilsConsoleMu.Unlock()
-	defer restore()
-	return fn()
+func (rw *RealWinUtils) ConsoleWriter() io.Writer {
+	return rw.withRuntime().ConsoleWriter()
+}
+
+func (rw *RealWinUtils) withRuntime() *winutils.Runtime {
+	if rw == nil || rw.runtime == nil {
+		return winutils.NewRuntime()
+	}
+	return rw.runtime
 }
 
 func (rw *RealWinUtils) RunCommand(name string, args ...string) (string, error) {
@@ -60,14 +58,10 @@ func (rw *RealWinUtils) ServiceExists(serviceName string) (bool, error) {
 	return winutils.ServiceExists(serviceName)
 }
 func (rw *RealWinUtils) AddDefenderExclusion(path string) error {
-	return rw.withConsoleCapture(func() error {
-		return winutils.AddDefenderExclusion(path)
-	})
+	return rw.withRuntime().AddDefenderExclusion(path)
 }
 func (rw *RealWinUtils) SetServiceTriggers(serviceName string, triggers []string) error {
-	return rw.withConsoleCapture(func() error {
-		return winutils.SetServiceTriggers(serviceName, triggers)
-	})
+	return rw.withRuntime().SetServiceTriggers(serviceName, triggers)
 }
 func (rw *RealWinUtils) Is64BitOS() bool {
 	return winutils.Is64BitOS()
@@ -97,9 +91,7 @@ func (rw *RealWinUtils) GracefulShutdownProcess(processName string) error {
 	return winutils.GracefulShutdownProcess(processName)
 }
 func (rw *RealWinUtils) CreateScheduledTask(taskName, executablePath, arguments, workingDir string) error {
-	return rw.withConsoleCapture(func() error {
-		return winutils.CreateScheduledTask(taskName, executablePath, arguments, workingDir)
-	})
+	return rw.withRuntime().CreateScheduledTask(taskName, executablePath, arguments, workingDir)
 }
 func (rw *RealWinUtils) RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error) {
 	return winutils.RunCommandWithEnv(env, name, args...)
@@ -153,9 +145,7 @@ func (rw *RealWinUtils) ReadRegistryKey(rootKey registry.Key, path, valueName st
 	return winutils.ReadRegistryKey(rootKey, path, valueName)
 }
 func (rw *RealWinUtils) UninstallSystemApp(partialName string) error {
-	return rw.withConsoleCapture(func() error {
-		return winutils.UninstallSystemApp(partialName)
-	})
+	return rw.withRuntime().UninstallSystemApp(partialName)
 }
 func (rw *RealWinUtils) ExtractArchive(archivePath, destDir string, fullPaths bool) error {
 	return winutils.ExtractArchive(archivePath, destDir, fullPaths)
@@ -164,9 +154,7 @@ func (rw *RealWinUtils) GetDesktopDir() (string, error) {
 	return winutils.GetDesktopDir()
 }
 func (rw *RealWinUtils) CreateShortcut(targetPath, shortcutPath, arguments string) error {
-	return rw.withConsoleCapture(func() error {
-		return winutils.CreateShortcut(targetPath, shortcutPath, arguments)
-	})
+	return rw.withRuntime().CreateShortcut(targetPath, shortcutPath, arguments)
 }
 func (rw *RealWinUtils) Reboot() error {
 	return winutils.Reboot()
@@ -364,7 +352,7 @@ func execute() error {
 	defer cleanupTempDir(cfg.RootPath)
 
 	// Инициализация утилит
-	RealWinUtils := &RealWinUtils{}
+	RealWinUtils := NewRealWinUtils()
 
 	// --- САМООБНОВЛЕНИЕ ---\
 	// Пропускаем при режиме возобновления

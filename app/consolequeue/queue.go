@@ -12,10 +12,6 @@ import (
 	"goMH/tui"
 )
 
-type consoleModule struct {
-	dashboard tui.DashboardModule
-}
-
 func Run(cfgModules []config.ModuleDef, registry *moduleregistry.Registry, am core.AssetManager, wu core.WinUtils) error {
 	modules := buildConsoleModules(cfgModules, registry)
 	if len(modules) == 0 {
@@ -30,36 +26,29 @@ func Run(cfgModules []config.ModuleDef, registry *moduleregistry.Registry, am co
 			AssetManager: am,
 			WinUtils:     wu,
 		},
-		ConfigureContext: tui.NewSilentContext(),
+		ConfigureContext: core.NewSilentTaskContext(nil),
 		ImmediateContext: tui.NewConsoleContext(),
 	}
 
 	return runDashboard(modules, queue, service)
 }
 
-func buildConsoleModules(cfgModules []config.ModuleDef, registry *moduleregistry.Registry) []consoleModule {
+func buildConsoleModules(cfgModules []config.ModuleDef, registry *moduleregistry.Registry) []tui.DashboardModule {
 	registered := registry.Enabled(cfgModules)
-	modules := make([]consoleModule, 0, len(registered))
+	modules := make([]tui.DashboardModule, 0, len(registered))
 	for _, module := range registered {
-		modules = append(modules, consoleModule{
-			dashboard: tui.DashboardModule{
-				ID:    module.ID(),
-				Title: module.MenuText(),
-			},
+		modules = append(modules, tui.DashboardModule{
+			ID:    module.ID(),
+			Title: module.MenuText(),
 		})
 	}
 	return modules
 }
 
-func runDashboard(modules []consoleModule, queue *taskqueue.Queue, service modruntime.Service) error {
+func runDashboard(modules []tui.DashboardModule, queue *taskqueue.Queue, service modruntime.Service) error {
 	queue.StartBackground(func(snapshot taskqueue.TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
 		return taskqueue.NewTaskContext(queue, snapshot.ID, runtimeCtx)
 	})
-
-	dashboardModules := make([]tui.DashboardModule, 0, len(modules))
-	for _, module := range modules {
-		dashboardModules = append(dashboardModules, module.dashboard)
-	}
 
 	controller := tui.DashboardController{
 		LoadTasks: func() ([]taskqueue.TaskSnapshot, map[string][]string) {
@@ -77,7 +66,7 @@ func runDashboard(modules []consoleModule, queue *taskqueue.Queue, service modru
 			}
 			return tui.DashboardActionResult{
 				Note:         result.Note,
-				SelectTaskID: selectedTaskID(result),
+				SelectTaskID: taskIDFromResult(result),
 			}, nil
 		},
 		OnRemoveTask: func(taskID string) (string, error) {
@@ -98,10 +87,10 @@ func runDashboard(modules []consoleModule, queue *taskqueue.Queue, service modru
 		},
 	}
 
-	return tui.RunQueueDashboard(dashboardModules, controller)
+	return tui.RunQueueDashboard(modules, controller)
 }
 
-func selectedTaskID(result core.ModuleActionResult) string {
+func taskIDFromResult(result core.ModuleActionResult) string {
 	if !result.SelectTask {
 		return ""
 	}

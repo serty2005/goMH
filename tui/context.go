@@ -7,14 +7,9 @@ import (
 
 // ConsoleContext реализует core.TaskContext для консольного интерфейса.
 type ConsoleContext struct{}
-type SilentContext struct{}
 
 func NewConsoleContext() *ConsoleContext {
 	return &ConsoleContext{}
-}
-
-func NewSilentContext() *SilentContext {
-	return &SilentContext{}
 }
 
 func (c *ConsoleContext) Context() context.Context {
@@ -47,11 +42,3 @@ func (c *ConsoleContext) SetProgress(percent int) {
 	// так как assetmgr (пока что) использует свой progressbar.
 	// Здесь можно реализовать текстовый прогресс, если нужно.
 }
-
-func (c *SilentContext) Context() context.Context { return context.Background() }
-func (c *SilentContext) Info(string)              {}
-func (c *SilentContext) Warn(string)              {}
-func (c *SilentContext) Error(string)             {}
-func (c *SilentContext) Success(string)           {}
-func (c *SilentContext) SetStatus(string)         {}
-func (c *SilentContext) SetProgress(int)          {}
