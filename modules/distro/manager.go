@@ -348,7 +348,7 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 	if cfg.RunAutoUpdatePlugins {
 		ctx.Info("Запуск автообновления плагинов...")
 		pluginsMod := &iikoplugins.Module{}
-		if err := pluginsMod.AutoUpdatePlugins(am, wu); err != nil {
+		if err := pluginsMod.AutoUpdatePlugins(ctx, am, wu); err != nil {
 			ctx.Warn(fmt.Sprintf("Ошибка автообновления плагинов: %v", err))
 		} else {
 			ctx.Success("Плагины обновлены.")

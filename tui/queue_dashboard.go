@@ -70,16 +70,17 @@ type dashboardLayout struct {
 }
 
 type dashboardLogViewerState struct {
-	service     *logstream.Service
-	handle      *logstream.Handle
-	sink        *dashboardLogSink
-	filePath    string
-	lines       []string
-	visible     bool
-	paused      bool
-	scrollTop   int
-	unreadCount int
-	lastError   string
+	service      *logstream.Service
+	handle       *logstream.Handle
+	sink         *dashboardLogSink
+	filePath     string
+	lines        []string
+	selectedLine int
+	visible      bool
+	paused       bool
+	scrollTop    int
+	unreadCount  int
+	lastError    string
 }
 
 type dashboardModel struct {
@@ -174,6 +175,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if liveLogOverlayVisible() {
+			if handled, note, err := handleLiveLogOverlayMouse(msg, m.width, m.height, m.panelStyle); handled {
+				m.applyResult(note, err)
+			}
 			return m, nil
 		}
 		if m.busy {
@@ -662,8 +666,12 @@ func (m dashboardModel) renderLiveLogViewer(width int, height int) string {
 		if len(viewLines) == 0 {
 			lines = append(lines, m.mutedStyle.Render("Ожидание новых строк..."))
 		} else {
-			for _, line := range viewLines {
-				lines = append(lines, truncateText(line, width))
+			for idx, line := range viewLines {
+				rendered := truncateText(line, width)
+				if firstLine+idx-1 == m.logViewer.selectedLine {
+					rendered = m.statusStyle.Width(width).Render(rendered)
+				}
+				lines = append(lines, rendered)
 			}
 			if contentHeight > 0 {
 				indicator := fmt.Sprintf("Строки %d-%d из %d", firstLine, lastLine, len(m.logViewer.lines))
@@ -821,6 +829,10 @@ func (m dashboardModel) formatModuleLine(index int, start int, width int) string
 
 func (m dashboardModel) handleMouse(msg tea.MouseMsg) (dashboardModel, tea.Cmd) {
 	if m.logViewer.visible {
+		if handled, note, err := m.handleLogViewerMouse(msg); handled {
+			m.applyResult(note, err)
+			return m, nil
+		}
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 			if index, ok := m.moduleIndexAt(msg.X, msg.Y); ok && m.modules[index].ID == DashboardLogViewerModuleID {
 				m.moduleIndex = index
@@ -867,6 +879,53 @@ func (m dashboardModel) handleMouse(msg tea.MouseMsg) (dashboardModel, tea.Cmd) 
 	return m, nil
 }
 
+func (m *dashboardModel) handleLogViewerMouse(msg tea.MouseMsg) (bool, string, error) {
+	if msg.Action != tea.MouseActionPress {
+		return false, "", nil
+	}
+	if msg.Button != tea.MouseButtonLeft && msg.Button != tea.MouseButtonRight {
+		return false, "", nil
+	}
+
+	lineIndex, ok := m.logViewerLineIndexAt(msg.X, msg.Y)
+	if !ok {
+		return false, "", nil
+	}
+
+	m.logViewer.selectedLine = lineIndex
+	if msg.Button != tea.MouseButtonRight {
+		return true, "Строка лога выбрана.", nil
+	}
+
+	if lineIndex < 0 || lineIndex >= len(m.logViewer.lines) {
+		return true, "", nil
+	}
+	if err := copyTextToClipboard(m.logViewer.lines[lineIndex]); err != nil {
+		return true, "", err
+	}
+	return true, "Строка лога скопирована.", nil
+}
+
+func (m dashboardModel) logViewerLineIndexAt(x int, y int) (int, bool) {
+	rect := m.logViewerRect()
+	if !rect.contains(x, y) {
+		return 0, false
+	}
+
+	contentHeight := max(0, rect.height-3)
+	viewLines, firstLine, _ := m.visibleLogViewerLines(contentHeight)
+	if len(viewLines) == 0 {
+		return 0, false
+	}
+
+	line := y - rect.y
+	bodyStart := 2
+	if line < bodyStart || line >= bodyStart+len(viewLines) {
+		return 0, false
+	}
+	return firstLine - 1 + (line - bodyStart), true
+}
+
 func (m dashboardModel) moduleIndexAt(x int, y int) (int, bool) {
 	rect := m.modulesRect()
 	if !rect.contains(x, y) {
@@ -904,6 +963,29 @@ func (m dashboardModel) modulesRect() dashboardRect {
 
 func (m dashboardModel) queueRect() dashboardRect {
 	return m.layout().queue
+}
+
+func (m dashboardModel) logViewerRect() dashboardRect {
+	if m.width <= 0 || m.height <= 0 || !m.logViewer.visible {
+		return dashboardRect{}
+	}
+
+	statusHeight := max(1, lipgloss.Height(m.renderStatusLine()))
+	footerHeight := max(1, lipgloss.Height(m.renderFooter()))
+	panelFrameWidth, panelFrameHeight := m.panelStyle.GetFrameSize()
+	availableHeight := m.height - statusHeight - footerHeight
+	topPanelsTotalHeight, _, viewerTotalHeight := computeDashboardHeights(availableHeight, panelFrameHeight, true)
+
+	contentInsetX := panelFrameWidth / 2
+	contentInsetY := panelFrameHeight / 2
+	viewerContentHeight := max(1, viewerTotalHeight-panelFrameHeight)
+
+	return dashboardRect{
+		x:      contentInsetX,
+		y:      topPanelsTotalHeight + contentInsetY,
+		width:  m.width - panelFrameWidth,
+		height: viewerContentHeight,
+	}
 }
 
 func (m dashboardModel) layout() dashboardLayout {
@@ -1036,12 +1118,13 @@ func (m *dashboardModel) openLogViewer(filePath string) error {
 	}
 
 	m.logViewer = dashboardLogViewerState{
-		service:   service,
-		handle:    handle,
-		sink:      sink,
-		filePath:  filePath,
-		visible:   true,
-		scrollTop: 0,
+		service:      service,
+		handle:       handle,
+		sink:         sink,
+		filePath:     filePath,
+		selectedLine: -1,
+		visible:      true,
+		scrollTop:    0,
 	}
 	m.lastError = ""
 	m.lastMessage = "Просмотр лога открыт во встроенной панели."
@@ -1066,6 +1149,10 @@ func (m *dashboardModel) consumeLogViewerUpdates() {
 				trimmed := len(m.logViewer.lines) - maxLogViewerLines
 				m.logViewer.lines = append([]string(nil), m.logViewer.lines[trimmed:]...)
 				m.logViewer.scrollTop = max(0, m.logViewer.scrollTop-trimmed)
+				m.logViewer.selectedLine -= trimmed
+				if m.logViewer.selectedLine < 0 {
+					m.logViewer.selectedLine = -1
+				}
 			}
 			if m.logViewer.visible {
 				if m.logViewer.paused {

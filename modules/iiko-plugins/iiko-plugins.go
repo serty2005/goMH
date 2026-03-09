@@ -1,6 +1,7 @@
 package iikoplugins
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"goMH/core"
@@ -70,6 +71,12 @@ type InstallSelection struct {
 	IsUpdate          bool
 }
 
+type RapidScanProgress struct {
+	ProcessedPages int
+	TotalPages     int
+	URL            string
+}
+
 func (m *Module) ID() string       { return "iiko-plugins" }
 func (m *Module) MenuText() string { return "Установка плагинов iiko" }
 
@@ -108,7 +115,20 @@ func (m *Module) ConfigureInstall(am core.AssetManager, wu core.WinUtils) (*Inst
 	if len(manifest.ApiVersions) == 0 {
 		return nil, fmt.Errorf("в манифесте нет таблицы api_compatibility: невозможно определить совместимость API для iikoFront")
 	}
-	livePlugins, err := LoadLivePlugins()
+	livePlugins, err := tui.RunWithProgress(
+		"Установка плагинов iiko",
+		"Парсинг источника rapid...",
+		func(progress tui.ProgressUpdater) ([]Plugin, error) {
+			progress.Update(0, "Парсинг источника rapid...", "")
+			return LoadLivePluginsWithProgress(context.Background(), func(state RapidScanProgress) {
+				progress.Update(
+					rapidScanPercent(state.ProcessedPages, state.TotalPages),
+					fmt.Sprintf("Парсинг плагинов: страница %d/%d", state.ProcessedPages, state.TotalPages),
+					state.URL,
+				)
+			})
+		},
+	)
 	if err != nil {
 		slog.Error("Ошибка загрузки актуального списка плагинов", "error", err)
 		return nil, err
@@ -194,7 +214,7 @@ func (m *Module) ExecuteInstall(am core.AssetManager, wu core.WinUtils, selectio
 }
 
 // AutoUpdatePlugins выполняет автоматическое обновление плагинов
-func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error {
+func (m *Module) AutoUpdatePlugins(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Запуск автоматического обновления плагинов")
 	cfg := am.Cfg()
 
@@ -210,9 +230,22 @@ func (m *Module) AutoUpdatePlugins(am core.AssetManager, wu core.WinUtils) error
 	if len(manifest.ApiVersions) == 0 {
 		return fmt.Errorf("в манифесте нет таблицы api_compatibility: невозможно определить совместимость API для iikoFront")
 	}
-	livePlugins, err := LoadLivePlugins()
+	if ctx != nil {
+		ctx.SetStatus("Парсинг rapid-источника плагинов")
+		ctx.SetProgress(0)
+	}
+	livePlugins, err := LoadLivePluginsWithProgress(taskContextOrBackground(ctx), func(state RapidScanProgress) {
+		if ctx == nil {
+			return
+		}
+		ctx.SetStatus(fmt.Sprintf("Парсинг плагинов: страница %d/%d", state.ProcessedPages, state.TotalPages))
+		ctx.SetProgress(rapidScanPercent(state.ProcessedPages, state.TotalPages))
+	})
 	if err != nil {
 		return err
+	}
+	if ctx != nil {
+		ctx.SetStatus("Анализ списка плагинов")
 	}
 	manifest.Plugins = livePlugins
 
@@ -484,7 +517,11 @@ func LoadManifest() (*Manifest, error) {
 }
 
 func LoadLivePlugins() ([]Plugin, error) {
-	zipURLs, err := scanPluginZipFiles(RapidPluginsBaseURL, maxScanDepth)
+	return LoadLivePluginsWithProgress(context.Background(), nil)
+}
+
+func LoadLivePluginsWithProgress(ctx context.Context, report func(RapidScanProgress)) ([]Plugin, error) {
+	zipURLs, err := scanPluginZipFilesWithProgress(ctx, RapidPluginsBaseURL, maxScanDepth, report)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +546,7 @@ func LoadLivePlugins() ([]Plugin, error) {
 	return plugins, nil
 }
 
-func scanPluginZipFiles(startURL string, depthLimit int) ([]string, error) {
+func scanPluginZipFiles(ctx context.Context, startURL string, depthLimit int, report func(RapidScanProgress)) ([]string, error) {
 	type queueItem struct {
 		url   string
 		depth int
@@ -524,6 +561,10 @@ func scanPluginZipFiles(startURL string, depthLimit int) ([]string, error) {
 	processedPages := 0
 
 	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		item := queue[0]
 		queue = queue[1:]
 
@@ -565,6 +606,107 @@ func scanPluginZipFiles(startURL string, depthLimit int) ([]string, error) {
 	}
 	sort.Strings(zips)
 	return zips, nil
+}
+
+func scanPluginZipFilesWithProgress(ctx context.Context, startURL string, depthLimit int, report func(RapidScanProgress)) ([]string, error) {
+	type queueItem struct {
+		url   string
+		depth int
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	queue := []queueItem{{url: startURL, depth: 0}}
+	visited := map[string]struct{}{}
+	discovered := map[string]struct{}{startURL: {}}
+	zipSet := map[string]struct{}{}
+	totalPages := 1
+	processedPages := 0
+
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		item := queue[0]
+		queue = queue[1:]
+
+		if item.depth > depthLimit {
+			continue
+		}
+		if _, ok := visited[item.url]; ok {
+			continue
+		}
+
+		visited[item.url] = struct{}{}
+		processedPages++
+
+		dirs, zips, err := readDirectoryListing(client, item.url)
+		if err != nil {
+			reportRapidScanProgress(report, processedPages, totalPages, item.url)
+			slog.Warn("Не удалось прочитать каталог плагинов", "url", item.url, "error", err)
+			continue
+		}
+
+		for _, zipURL := range zips {
+			zipSet[zipURL] = struct{}{}
+		}
+		for _, dirURL := range dirs {
+			if _, ok := discovered[dirURL]; ok {
+				continue
+			}
+			discovered[dirURL] = struct{}{}
+			totalPages++
+			queue = append(queue, queueItem{url: dirURL, depth: item.depth + 1})
+		}
+
+		reportRapidScanProgress(report, processedPages, totalPages, item.url)
+	}
+
+	if len(zipSet) == 0 {
+		return nil, fmt.Errorf("не найдено ни одного zip-плагина по адресу %s", startURL)
+	}
+
+	zips := make([]string, 0, len(zipSet))
+	for zipURL := range zipSet {
+		zips = append(zips, zipURL)
+	}
+	sort.Strings(zips)
+	return zips, nil
+}
+
+func reportRapidScanProgress(report func(RapidScanProgress), processedPages int, totalPages int, pageURL string) {
+	if report == nil {
+		return
+	}
+	report(RapidScanProgress{
+		ProcessedPages: processedPages,
+		TotalPages:     totalPages,
+		URL:            pageURL,
+	})
+}
+
+func rapidScanPercent(processedPages int, totalPages int) int {
+	if totalPages <= 0 {
+		return 0
+	}
+	if processedPages >= totalPages {
+		return 100
+	}
+	percent := (processedPages * 100) / totalPages
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+func taskContextOrBackground(ctx core.TaskContext) context.Context {
+	if ctx == nil || ctx.Context() == nil {
+		return context.Background()
+	}
+	return ctx.Context()
 }
 
 func readDirectoryListing(client *http.Client, pageURL string) ([]string, []string, error) {

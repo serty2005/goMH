@@ -35,6 +35,7 @@ type liveLogOverlayState struct {
 	sink           *liveLogOverlaySink
 	filePath       string
 	lines          []string
+	selectedLine   int
 	visible        bool
 	paused         bool
 	scrollTop      int
@@ -44,13 +45,14 @@ type liveLogOverlayState struct {
 }
 
 type liveLogOverlaySnapshot struct {
-	filePath    string
-	lines       []string
-	visible     bool
-	paused      bool
-	scrollTop   int
-	unreadCount int
-	lastError   string
+	filePath     string
+	lines        []string
+	selectedLine int
+	visible      bool
+	paused       bool
+	scrollTop    int
+	unreadCount  int
+	lastError    string
 }
 
 type liveLogOverlaySink struct {
@@ -88,6 +90,10 @@ func liveLogOverlayHint() string {
 
 func handleLiveLogOverlayKey(msg tea.KeyMsg, height int) bool {
 	return globalLiveLogOverlay.handleKey(msg, height)
+}
+
+func handleLiveLogOverlayMouse(msg tea.MouseMsg, width int, height int, panelStyle lipgloss.Style) (bool, string, error) {
+	return globalLiveLogOverlay.handleMouse(msg, width, height, panelStyle)
 }
 
 func renderLiveLogOverlay(width int, height int, styles LiveLogOverlayRenderStyles) string {
@@ -132,6 +138,7 @@ func (s *liveLogOverlayState) open(filePath string) error {
 	s.sink = sink
 	s.filePath = filePath
 	s.lines = nil
+	s.selectedLine = -1
 	s.visible = true
 	s.paused = false
 	s.scrollTop = 0
@@ -146,6 +153,7 @@ func (s *liveLogOverlayState) shutdown() {
 	s.shutdownLocked()
 	s.filePath = ""
 	s.lines = nil
+	s.selectedLine = -1
 	s.visible = false
 	s.paused = false
 	s.scrollTop = 0
@@ -211,6 +219,7 @@ func (s *liveLogOverlayState) handleKey(msg tea.KeyMsg, height int) bool {
 		s.shutdownLocked()
 		s.filePath = ""
 		s.lines = nil
+		s.selectedLine = -1
 		s.visible = false
 		s.paused = false
 		s.scrollTop = 0
@@ -250,6 +259,36 @@ func (s *liveLogOverlayState) handleKey(msg tea.KeyMsg, height int) bool {
 	return true
 }
 
+func (s *liveLogOverlayState) handleMouse(msg tea.MouseMsg, width int, height int, panelStyle lipgloss.Style) (bool, string, error) {
+	if msg.Action != tea.MouseActionPress {
+		return false, "", nil
+	}
+	if msg.Button != tea.MouseButtonLeft && msg.Button != tea.MouseButtonRight {
+		return false, "", nil
+	}
+
+	lineIndex, ok := s.lineIndexAt(msg.X, msg.Y, width, height, panelStyle)
+	if !ok {
+		return false, "", nil
+	}
+
+	s.mu.Lock()
+	s.selectedLine = lineIndex
+	lineText := ""
+	if lineIndex >= 0 && lineIndex < len(s.lines) {
+		lineText = s.lines[lineIndex]
+	}
+	s.mu.Unlock()
+
+	if msg.Button != tea.MouseButtonRight {
+		return true, "Строка лога выбрана.", nil
+	}
+	if err := copyTextToClipboard(lineText); err != nil {
+		return true, "", err
+	}
+	return true, "Строка лога скопирована.", nil
+}
+
 func (s *liveLogOverlayState) hint() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -277,6 +316,10 @@ func (s *liveLogOverlayState) step() {
 				trimmed := len(s.lines) - maxLines
 				s.lines = append([]string(nil), s.lines[trimmed:]...)
 				s.scrollTop = max(0, s.scrollTop-trimmed)
+				s.selectedLine -= trimmed
+				if s.selectedLine < 0 {
+					s.selectedLine = -1
+				}
 			}
 			if s.visible {
 				if !s.paused {
@@ -340,8 +383,12 @@ func (s *liveLogOverlayState) render(width int, height int, styles LiveLogOverla
 	if len(viewLines) == 0 {
 		body = append(body, styles.Muted.Render("Ожидание новых строк..."))
 	} else {
-		for _, line := range viewLines {
-			body = append(body, styles.Text.Render(truncateText(line, max(1, width-6))))
+		for idx, line := range viewLines {
+			rendered := styles.Text.Render(truncateText(line, max(1, width-6)))
+			if firstLine+idx-1 == snapshot.selectedLine {
+				rendered = styles.Status.Width(max(1, width-6)).Render(truncateText(line, max(1, width-6)))
+			}
+			body = append(body, rendered)
 		}
 	}
 	for len(body) < contentHeight {
@@ -395,13 +442,14 @@ func (s *liveLogOverlayState) snapshot(height int) liveLogOverlaySnapshot {
 	}
 
 	return liveLogOverlaySnapshot{
-		filePath:    s.filePath,
-		lines:       append([]string(nil), s.lines...),
-		visible:     s.visible,
-		paused:      s.paused,
-		scrollTop:   s.scrollTop,
-		unreadCount: s.unreadCount,
-		lastError:   s.lastError,
+		filePath:     s.filePath,
+		lines:        append([]string(nil), s.lines...),
+		selectedLine: s.selectedLine,
+		visible:      s.visible,
+		paused:       s.paused,
+		scrollTop:    s.scrollTop,
+		unreadCount:  s.unreadCount,
+		lastError:    s.lastError,
 	}
 }
 
@@ -429,6 +477,55 @@ func (s *liveLogOverlayState) normalizeScrollLocked() {
 	}
 	if s.scrollTop > maxTop {
 		s.scrollTop = maxTop
+	}
+}
+
+func (s *liveLogOverlayState) lineIndexAt(x int, y int, width int, height int, panelStyle lipgloss.Style) (int, bool) {
+	layout := liveLogOverlayLayout(width, height, panelStyle)
+	if x < layout.contentX || x >= layout.contentX+layout.contentWidth {
+		return 0, false
+	}
+	if y < layout.bodyY || y >= layout.bodyY+layout.bodyHeight {
+		return 0, false
+	}
+
+	snapshot := s.snapshot(height)
+	viewLines, firstLine, _ := visibleLiveLogLines(snapshot.lines, snapshot.scrollTop, layout.bodyHeight)
+	if len(viewLines) == 0 {
+		return 0, false
+	}
+
+	line := y - layout.bodyY
+	if line < 0 || line >= len(viewLines) {
+		return 0, false
+	}
+	return firstLine - 1 + line, true
+}
+
+type liveLogOverlayMouseLayout struct {
+	contentX     int
+	contentWidth int
+	bodyY        int
+	bodyHeight   int
+}
+
+func liveLogOverlayLayout(width int, height int, panelStyle lipgloss.Style) liveLogOverlayMouseLayout {
+	contentWidth := max(1, width-4)
+	contentHeight := liveLogOverlayContentHeight(height)
+	panelContentHeight := contentHeight + 7
+	frameWidth, frameHeight := panelStyle.GetFrameSize()
+	panelWidth := contentWidth + frameWidth
+	panelHeight := panelContentHeight + frameHeight
+	panelX := max(0, (width-panelWidth)/2)
+	panelY := max(0, (height-panelHeight)/2)
+	contentInsetX := frameWidth / 2
+	contentInsetY := frameHeight / 2
+
+	return liveLogOverlayMouseLayout{
+		contentX:     panelX + contentInsetX,
+		contentWidth: contentWidth,
+		bodyY:        panelY + contentInsetY + 3,
+		bodyHeight:   contentHeight,
 	}
 }
 
