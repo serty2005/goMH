@@ -90,7 +90,7 @@ func (s *Service) StartTail(parent context.Context, req TailRequest) (*Handle, e
 	if parent == nil {
 		parent = context.Background()
 	}
-	if req.StartLines <= 0 {
+	if req.StartLines == 0 {
 		req.StartLines = 50
 	}
 	if req.PollInterval <= 0 {
@@ -128,14 +128,18 @@ func (s *Service) runTail(ctx context.Context, handle *Handle, file *os.File, re
 }
 
 func (s *Service) tailFile(ctx context.Context, file *os.File, req TailRequest) error {
-	if stat, err := file.Stat(); err == nil && stat.Size() > 0 {
-		startPos, err := findStartOfLastNLines(file, req.StartLines)
-		if err != nil {
-			return err
+	if req.StartLines >= 0 {
+		if stat, err := file.Stat(); err == nil && stat.Size() > 0 {
+			startPos, err := findStartOfLastNLines(file, req.StartLines)
+			if err != nil {
+				return err
+			}
+			if _, err := file.Seek(startPos, io.SeekStart); err != nil {
+				return err
+			}
 		}
-		if _, err := file.Seek(startPos, io.SeekStart); err != nil {
-			return err
-		}
+	} else if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
 	}
 
 	reader := &tailReader{

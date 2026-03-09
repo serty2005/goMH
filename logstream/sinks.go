@@ -3,7 +3,6 @@ package logstream
 import (
 	"fmt"
 	"goMH/core"
-	"goMH/tui"
 	"io"
 	"os"
 	"sync"
@@ -47,8 +46,8 @@ func NewTaskContextSink(ctx core.TaskContext) Sink {
 func NewConsoleSink() Sink {
 	return sinkFunc{
 		write: func(line string) error {
-			tui.Info(line)
-			return nil
+			_, err := fmt.Fprintln(os.Stdout, line)
+			return err
 		},
 	}
 }

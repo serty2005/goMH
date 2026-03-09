@@ -1,15 +1,22 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"goMH/logstream"
 	"goMH/taskqueue"
 	"io"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+const DashboardLogViewerModuleID = "__dashboard_log_viewer__"
 
 type DashboardModule struct {
 	ID    string
@@ -17,8 +24,9 @@ type DashboardModule struct {
 }
 
 type DashboardActionResult struct {
-	Note         string
-	SelectTaskID string
+	Note            string
+	SelectTaskID    string
+	LogViewFilePath string
 }
 
 type DashboardController struct {
@@ -40,9 +48,10 @@ type refreshMsg struct {
 }
 
 type actionDoneMsg struct {
-	note         string
-	err          error
-	selectTaskID string
+	note            string
+	err             error
+	selectTaskID    string
+	LogViewFilePath string
 }
 
 type refreshTickMsg struct{}
@@ -60,6 +69,19 @@ type dashboardLayout struct {
 	queue   dashboardRect
 }
 
+type dashboardLogViewerState struct {
+	service     *logstream.Service
+	handle      *logstream.Handle
+	sink        *dashboardLogSink
+	filePath    string
+	lines       []string
+	visible     bool
+	paused      bool
+	scrollTop   int
+	unreadCount int
+	lastError   string
+}
+
 type dashboardModel struct {
 	modules        []DashboardModule
 	controller     DashboardController
@@ -75,6 +97,7 @@ type dashboardModel struct {
 	lastError      string
 	pendingTaskID  string
 	queueStarted   bool
+	logViewer      dashboardLogViewerState
 	spinnerIndex   int
 	spinnerFrames  []string
 	titleStyle     lipgloss.Style
@@ -118,6 +141,7 @@ func RunQueueDashboard(modules []DashboardModule, controller DashboardController
 
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	_, err := program.Run()
+	ShutdownLiveLogOverlay()
 	return err
 }
 
@@ -133,6 +157,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case refreshTickMsg:
+		consumeLiveLogOverlayUpdates()
 		return m, tea.Batch(m.fetchTasks(), refreshTickCmd())
 
 	case spinnerTickMsg:
@@ -148,12 +173,18 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleActionDone(msg)
 
 	case tea.MouseMsg:
+		if liveLogOverlayVisible() {
+			return m, nil
+		}
 		if m.busy {
 			return m, nil
 		}
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		if handleLiveLogOverlayKey(msg, m.height) {
+			return m, nil
+		}
 		return m.handleKey(msg)
 	}
 
@@ -163,6 +194,19 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m dashboardModel) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
+	}
+	if liveLogOverlayVisible() {
+		return renderLiveLogOverlay(m.width, m.height, LiveLogOverlayRenderStyles{
+			Title:    m.titleStyle,
+			Subtitle: m.mutedStyle,
+			Panel:    m.panelStyle,
+			Key:      m.keyStyle,
+			Help:     m.mutedStyle,
+			Error:    m.errorStyle,
+			Status:   m.statusStyle,
+			Text:     lipgloss.NewStyle(),
+			Muted:    m.mutedStyle,
+		})
 	}
 
 	status := m.renderStatusLine()
@@ -178,36 +222,23 @@ func (m dashboardModel) View() string {
 	footerHeight := max(1, lipgloss.Height(footer))
 	_, panelFrameHeight := m.panelStyle.GetFrameSize()
 	availableHeight := m.height - statusHeight - footerHeight
-	if availableHeight < (panelFrameHeight+1)*2 {
-		availableHeight = (panelFrameHeight + 1) * 2
-	}
-
-	topPanelsTotalHeight := availableHeight * 2 / 3
-	logPanelTotalHeight := availableHeight - topPanelsTotalHeight
-	minPanelTotalHeight := panelFrameHeight + 1
-	if topPanelsTotalHeight < minPanelTotalHeight {
-		topPanelsTotalHeight = minPanelTotalHeight
-		logPanelTotalHeight = availableHeight - topPanelsTotalHeight
-	}
-	if logPanelTotalHeight < minPanelTotalHeight {
-		logPanelTotalHeight = minPanelTotalHeight
-		topPanelsTotalHeight = availableHeight - logPanelTotalHeight
-	}
-
+	topPanelsTotalHeight, taskLogTotalHeight, viewerTotalHeight := computeDashboardHeights(availableHeight, panelFrameHeight, m.logViewer.visible)
 	topPanelsContentHeight := max(1, topPanelsTotalHeight-panelFrameHeight)
-	logPanelContentHeight := max(1, logPanelTotalHeight-panelFrameHeight)
+	taskLogContentHeight := max(1, taskLogTotalHeight-panelFrameHeight)
 
 	leftPanel := m.panelStyle.Width(leftWidth).Height(topPanelsContentHeight).Render(m.renderModules(leftWidth-4, topPanelsContentHeight))
 	rightPanel := m.panelStyle.Width(rightWidth).Height(topPanelsContentHeight).Render(m.renderQueue(rightWidth-4, topPanelsContentHeight))
-	logPanel := m.panelStyle.Width(m.width).Height(logPanelContentHeight).Render(m.renderLogs(m.width-4, logPanelContentHeight))
-
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
+	panels := []string{
 		lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel),
-		logPanel,
-		status,
-		footer,
-	)
+	}
+	if m.logViewer.visible {
+		viewerContentHeight := max(1, viewerTotalHeight-panelFrameHeight)
+		viewerPanel := m.panelStyle.Width(m.width).Height(viewerContentHeight).Render(m.renderLiveLogViewer(m.width-4, viewerContentHeight))
+		panels = append(panels, viewerPanel)
+	}
+	taskLogPanel := m.panelStyle.Width(m.width).Height(taskLogContentHeight).Render(m.renderLogs(m.width-4, taskLogContentHeight))
+	panels = append(panels, taskLogPanel, status, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, panels...)
 }
 
 func (m dashboardModel) fetchTasks() tea.Cmd {
@@ -236,6 +267,15 @@ func (m dashboardModel) fetchTasks() tea.Cmd {
 
 func (m *dashboardModel) startEnqueueCurrentModule() (dashboardModel, tea.Cmd) {
 	module := m.currentModule()
+	if module.ID == DashboardLogViewerModuleID && m.logViewerConfigured() {
+		m.setLogViewerVisible(!m.logViewer.visible)
+		if m.logViewer.visible {
+			m.applyResult("Просмотр лога развернут.", nil)
+		} else {
+			m.applyResult("Просмотр лога свернут.", nil)
+		}
+		return *m, nil
+	}
 	if m.controller.OnEnqueue == nil || module.ID == "" {
 		return *m, nil
 	}
@@ -272,9 +312,10 @@ func runDashboardInteractive(fn func() (DashboardActionResult, error)) tea.Cmd {
 	command := &dashboardInteractiveCommand{run: fn}
 	return tea.Exec(command, func(err error) tea.Msg {
 		return actionDoneMsg{
-			note:         command.result.Note,
-			err:          err,
-			selectTaskID: command.result.SelectTaskID,
+			note:            command.result.Note,
+			err:             err,
+			selectTaskID:    command.result.SelectTaskID,
+			LogViewFilePath: command.result.LogViewFilePath,
 		}
 	})
 }
@@ -308,6 +349,9 @@ func (m dashboardModel) handleActionDone(msg actionDoneMsg) (dashboardModel, tea
 func (m dashboardModel) handleKey(msg tea.KeyMsg) (dashboardModel, tea.Cmd) {
 	if m.busy {
 		return m.handleBusyKey(msg)
+	}
+	if m.logViewer.visible {
+		return m.handleLogViewerKey(msg)
 	}
 
 	switch msg.String() {
@@ -355,6 +399,54 @@ func (m dashboardModel) handleBusyKey(msg tea.KeyMsg) (dashboardModel, tea.Cmd) 
 	default:
 		return m, nil
 	}
+}
+
+func (m dashboardModel) handleLogViewerKey(msg tea.KeyMsg) (dashboardModel, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	case "esc", "enter":
+		m.setLogViewerVisible(false)
+		m.applyResult("Просмотр лога свернут.", nil)
+		return m, nil
+	case " ":
+		m.logViewer.paused = !m.logViewer.paused
+		if m.logViewer.paused {
+			m.applyResult("Автопрокрутка лога поставлена на паузу.", nil)
+		} else {
+			m.applyResult("Автопрокрутка лога возобновлена.", nil)
+			m.scrollLogViewerToBottom()
+		}
+		return m, nil
+	case "up", "k":
+		m.scrollLogViewer(-1)
+		return m, nil
+	case "down", "j":
+		m.scrollLogViewer(1)
+		return m, nil
+	case "pgup":
+		m.scrollLogViewer(-8)
+		return m, nil
+	case "pgdown":
+		m.scrollLogViewer(8)
+		return m, nil
+	case "home":
+		m.logViewer.scrollTop = 0
+		return m, nil
+	case "end":
+		m.scrollLogViewerToBottom()
+		return m, nil
+	}
+
+	if index, ok := m.shortcutModuleIndex(msg.String()); ok && m.modules[index].ID == DashboardLogViewerModuleID {
+		m.moduleIndex = index
+		m.focus = 0
+		m.setLogViewerVisible(false)
+		m.applyResult("Просмотр лога свернут.", nil)
+		return m, nil
+	}
+
+	return m, nil
 }
 
 func (m *dashboardModel) moveSelection(delta int) {
@@ -510,6 +602,25 @@ func (m dashboardModel) renderStatusLine() string {
 }
 
 func (m dashboardModel) renderFooter() string {
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#BFCBA8")).
+		Width(m.width)
+
+	if m.logViewer.visible {
+		return strings.Join([]string{
+			helpStyle.Render(strings.Join([]string{
+				m.keyStyle.Render("Space") + " пауза/лайв",
+				m.keyStyle.Render("Up/Down") + " прокрутка",
+				m.keyStyle.Render("PgUp/PgDn") + " листать",
+			}, "   ")),
+			helpStyle.Render(strings.Join([]string{
+				m.keyStyle.Render("Home/End") + " начало/конец",
+				m.keyStyle.Render("Esc") + " свернуть",
+				m.keyStyle.Render("Q") + " выход",
+			}, "   ")),
+		}, "\n")
+	}
+
 	firstLine := []string{
 		m.keyStyle.Render("Tab") + " сменить панель",
 		m.keyStyle.Render("1-9,0") + " быстрый запуск",
@@ -521,13 +632,56 @@ func (m dashboardModel) renderFooter() string {
 		m.keyStyle.Render("C") + " очистить",
 		m.keyStyle.Render("Q") + " выход",
 	}
-	helpStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#BFCBA8")).
-		Width(m.width)
-	return strings.Join([]string{
+	lines := []string{
 		helpStyle.Render(strings.Join(firstLine, "   ")),
 		helpStyle.Render(strings.Join(secondLine, "   ")),
-	}, "\n")
+	}
+	if hint := liveLogOverlayHint(); hint != "" {
+		lines = append(lines, helpStyle.Render(hint))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m dashboardModel) renderLiveLogViewer(width int, height int) string {
+	lines := []string{"Просмотр лога"}
+	if m.logViewer.filePath == "" {
+		lines = append(lines, m.mutedStyle.Render("Файл для live-просмотра ещё не выбран."))
+	} else {
+		state := "LIVE"
+		if m.logViewer.paused {
+			state = "ПАУЗА"
+		}
+		status := fmt.Sprintf("%s | %s", filepath.Base(m.logViewer.filePath), state)
+		if m.logViewer.lastError != "" {
+			status += " | ошибка: " + m.logViewer.lastError
+		}
+		lines = append(lines, m.mutedStyle.Render(truncateText(status, width)))
+
+		contentHeight := max(0, height-3)
+		viewLines, firstLine, lastLine := m.visibleLogViewerLines(contentHeight)
+		if len(viewLines) == 0 {
+			lines = append(lines, m.mutedStyle.Render("Ожидание новых строк..."))
+		} else {
+			for _, line := range viewLines {
+				lines = append(lines, truncateText(line, width))
+			}
+			if contentHeight > 0 {
+				indicator := fmt.Sprintf("Строки %d-%d из %d", firstLine, lastLine, len(m.logViewer.lines))
+				if m.logViewer.unreadCount > 0 {
+					indicator += fmt.Sprintf(" | новых с момента раскрытия: %d", m.logViewer.unreadCount)
+				}
+				lines = append(lines, m.mutedStyle.Render(truncateText(indicator, width)))
+			}
+		}
+	}
+
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m dashboardModel) renderLogs(width int, height int) string {
@@ -578,6 +732,7 @@ func (m *dashboardModel) normalize() {
 	if m.taskIndex >= len(m.tasks) {
 		m.taskIndex = len(m.tasks) - 1
 	}
+	m.normalizeLogViewerScroll(0)
 }
 
 func (m dashboardModel) currentModule() DashboardModule {
@@ -658,10 +813,26 @@ func (m dashboardModel) formatModuleLine(index int, start int, width int) string
 	if titleWidth < 0 {
 		titleWidth = 0
 	}
+	if m.modules[index].ID == DashboardLogViewerModuleID {
+		return strings.TrimSpace(label + " " + truncateText(m.logViewerButtonText(titleWidth), titleWidth))
+	}
 	return strings.TrimSpace(label + " " + truncateText(m.modules[index].Title, titleWidth))
 }
 
 func (m dashboardModel) handleMouse(msg tea.MouseMsg) (dashboardModel, tea.Cmd) {
+	if m.logViewer.visible {
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if index, ok := m.moduleIndexAt(msg.X, msg.Y); ok && m.modules[index].ID == DashboardLogViewerModuleID {
+				m.moduleIndex = index
+				m.focus = 0
+				m.normalize()
+				m.setLogViewerVisible(false)
+				m.applyResult("Просмотр лога свернут.", nil)
+			}
+		}
+		return m, nil
+	}
+
 	switch msg.Action {
 	case tea.MouseActionMotion:
 		if index, ok := m.moduleIndexAt(msg.X, msg.Y); ok {
@@ -751,21 +922,7 @@ func (m dashboardModel) layout() dashboardLayout {
 
 	panelFrameWidth, panelFrameHeight := m.panelStyle.GetFrameSize()
 	availableHeight := m.height - statusHeight - footerHeight
-	if availableHeight < (panelFrameHeight+1)*2 {
-		availableHeight = (panelFrameHeight + 1) * 2
-	}
-
-	topPanelsTotalHeight := availableHeight * 2 / 3
-	logPanelTotalHeight := availableHeight - topPanelsTotalHeight
-	minPanelTotalHeight := panelFrameHeight + 1
-	if topPanelsTotalHeight < minPanelTotalHeight {
-		topPanelsTotalHeight = minPanelTotalHeight
-		logPanelTotalHeight = availableHeight - topPanelsTotalHeight
-	}
-	if logPanelTotalHeight < minPanelTotalHeight {
-		logPanelTotalHeight = minPanelTotalHeight
-		topPanelsTotalHeight = availableHeight - logPanelTotalHeight
-	}
+	topPanelsTotalHeight, _, _ := computeDashboardHeights(availableHeight, panelFrameHeight, m.logViewer.visible)
 
 	contentInsetX := panelFrameWidth / 2
 	contentInsetY := panelFrameHeight / 2
@@ -785,6 +942,235 @@ func (m dashboardModel) layout() dashboardLayout {
 			height: contentHeight,
 		},
 	}
+}
+
+func computeDashboardHeights(availableHeight int, panelFrameHeight int, viewerVisible bool) (int, int, int) {
+	minPanelTotalHeight := panelFrameHeight + 1
+	if !viewerVisible {
+		if availableHeight < minPanelTotalHeight*2 {
+			availableHeight = minPanelTotalHeight * 2
+		}
+		topPanelsTotalHeight := availableHeight * 2 / 3
+		taskLogTotalHeight := availableHeight - topPanelsTotalHeight
+		if topPanelsTotalHeight < minPanelTotalHeight {
+			topPanelsTotalHeight = minPanelTotalHeight
+			taskLogTotalHeight = availableHeight - topPanelsTotalHeight
+		}
+		if taskLogTotalHeight < minPanelTotalHeight {
+			taskLogTotalHeight = minPanelTotalHeight
+			topPanelsTotalHeight = availableHeight - taskLogTotalHeight
+		}
+		return topPanelsTotalHeight, taskLogTotalHeight, 0
+	}
+
+	if availableHeight < minPanelTotalHeight*3 {
+		availableHeight = minPanelTotalHeight * 3
+	}
+	topPanelsTotalHeight := availableHeight / 2
+	viewerTotalHeight := availableHeight / 3
+	taskLogTotalHeight := availableHeight - topPanelsTotalHeight - viewerTotalHeight
+	for taskLogTotalHeight < minPanelTotalHeight {
+		if topPanelsTotalHeight > viewerTotalHeight && topPanelsTotalHeight > minPanelTotalHeight {
+			topPanelsTotalHeight--
+		} else if viewerTotalHeight > minPanelTotalHeight {
+			viewerTotalHeight--
+		} else {
+			break
+		}
+		taskLogTotalHeight = availableHeight - topPanelsTotalHeight - viewerTotalHeight
+	}
+	if viewerTotalHeight < minPanelTotalHeight {
+		viewerTotalHeight = minPanelTotalHeight
+		topPanelsTotalHeight = availableHeight - taskLogTotalHeight - viewerTotalHeight
+	}
+	if topPanelsTotalHeight < minPanelTotalHeight {
+		topPanelsTotalHeight = minPanelTotalHeight
+		taskLogTotalHeight = availableHeight - topPanelsTotalHeight - viewerTotalHeight
+	}
+	return topPanelsTotalHeight, taskLogTotalHeight, viewerTotalHeight
+}
+
+func (m dashboardModel) logViewerConfigured() bool {
+	return strings.TrimSpace(m.logViewer.filePath) != ""
+}
+
+func (m *dashboardModel) setLogViewerVisible(visible bool) {
+	if !m.logViewerConfigured() {
+		m.logViewer.visible = false
+		return
+	}
+	m.logViewer.visible = visible
+	if visible {
+		m.logViewer.unreadCount = 0
+		if !m.logViewer.paused {
+			m.scrollLogViewerToBottom()
+		}
+	}
+}
+
+func (m *dashboardModel) openLogViewer(filePath string) error {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return errors.New("не указан файл для просмотра")
+	}
+	if m.logViewer.filePath == filePath && m.logViewer.handle != nil {
+		m.setLogViewerVisible(true)
+		m.logViewer.lastError = ""
+		return nil
+	}
+
+	m.closeLogViewer()
+	service := m.logViewer.service
+	if service == nil {
+		service = logstream.NewService()
+	}
+	sink := &dashboardLogSink{}
+	handle, err := service.StartTail(context.Background(), logstream.TailRequest{
+		FilePath:     filePath,
+		StartLines:   200,
+		PollInterval: 500 * time.Millisecond,
+		Sink:         sink,
+	})
+	if err != nil {
+		return err
+	}
+
+	m.logViewer = dashboardLogViewerState{
+		service:   service,
+		handle:    handle,
+		sink:      sink,
+		filePath:  filePath,
+		visible:   true,
+		scrollTop: 0,
+	}
+	m.lastError = ""
+	m.lastMessage = "Просмотр лога открыт во встроенной панели."
+	return nil
+}
+
+func (m *dashboardModel) closeLogViewer() {
+	if m.logViewer.handle != nil {
+		m.logViewer.handle.Cancel()
+	}
+	m.logViewer.handle = nil
+	m.logViewer.sink = nil
+}
+
+func (m *dashboardModel) consumeLogViewerUpdates() {
+	if m.logViewer.sink != nil {
+		newLines := m.logViewer.sink.Drain()
+		if len(newLines) > 0 {
+			m.logViewer.lines = append(m.logViewer.lines, newLines...)
+			const maxLogViewerLines = 4000
+			if len(m.logViewer.lines) > maxLogViewerLines {
+				trimmed := len(m.logViewer.lines) - maxLogViewerLines
+				m.logViewer.lines = append([]string(nil), m.logViewer.lines[trimmed:]...)
+				m.logViewer.scrollTop = max(0, m.logViewer.scrollTop-trimmed)
+			}
+			if m.logViewer.visible {
+				if m.logViewer.paused {
+					m.normalizeLogViewerScroll(0)
+				} else {
+					m.scrollLogViewerToBottom()
+				}
+			} else {
+				m.logViewer.unreadCount += len(newLines)
+			}
+		}
+	}
+
+	if m.logViewer.handle == nil {
+		return
+	}
+	select {
+	case <-m.logViewer.handle.Done():
+		err := m.logViewer.handle.Wait()
+		m.logViewer.handle = nil
+		if err != nil && !errors.Is(err, context.Canceled) {
+			m.logViewer.lastError = err.Error()
+		}
+	default:
+	}
+}
+
+func (m *dashboardModel) visibleLogViewerLines(height int) ([]string, int, int) {
+	if height <= 0 || len(m.logViewer.lines) == 0 {
+		return nil, 0, 0
+	}
+	maxTop := max(0, len(m.logViewer.lines)-height)
+	top := m.logViewer.scrollTop
+	if top < 0 {
+		top = 0
+	}
+	if top > maxTop {
+		top = maxTop
+	}
+	bottom := top + height
+	if bottom > len(m.logViewer.lines) {
+		bottom = len(m.logViewer.lines)
+	}
+	return m.logViewer.lines[top:bottom], top + 1, bottom
+}
+
+func (m *dashboardModel) scrollLogViewer(delta int) {
+	m.logViewer.scrollTop += delta
+	m.normalizeLogViewerScroll(0)
+}
+
+func (m *dashboardModel) scrollLogViewerToBottom() {
+	m.normalizeLogViewerScroll(0)
+	maxTop := max(0, len(m.logViewer.lines)-m.logViewerContentHeight())
+	m.logViewer.scrollTop = maxTop
+}
+
+func (m dashboardModel) logViewerContentHeight() int {
+	if m.height <= 0 || !m.logViewer.visible {
+		return 0
+	}
+	statusHeight := max(1, lipgloss.Height(m.renderStatusLine()))
+	footerHeight := max(1, lipgloss.Height(m.renderFooter()))
+	_, panelFrameHeight := m.panelStyle.GetFrameSize()
+	availableHeight := m.height - statusHeight - footerHeight
+	_, _, viewerTotalHeight := computeDashboardHeights(availableHeight, panelFrameHeight, true)
+	return max(0, viewerTotalHeight-panelFrameHeight-3)
+}
+
+func (m *dashboardModel) normalizeLogViewerScroll(height int) {
+	if len(m.logViewer.lines) == 0 {
+		m.logViewer.scrollTop = 0
+		return
+	}
+	if height > 0 {
+		maxTop := max(0, len(m.logViewer.lines)-height)
+		if m.logViewer.scrollTop > maxTop {
+			m.logViewer.scrollTop = maxTop
+		}
+	}
+	if m.logViewer.scrollTop < 0 {
+		m.logViewer.scrollTop = 0
+	}
+	if m.logViewer.scrollTop >= len(m.logViewer.lines) {
+		m.logViewer.scrollTop = len(m.logViewer.lines) - 1
+	}
+}
+
+func (m dashboardModel) logViewerButtonText(width int) string {
+	if !m.logViewerConfigured() {
+		return truncateText("Просмотр лога [файл не выбран]", width)
+	}
+	action := "развернуть"
+	if m.logViewer.visible {
+		action = "свернуть"
+	}
+	status := action
+	if m.logViewer.unreadCount > 0 {
+		status = fmt.Sprintf("%s, +%d строк", action, m.logViewer.unreadCount)
+	}
+	if m.logViewer.lastError != "" {
+		status = "ошибка"
+	}
+	text := fmt.Sprintf("Просмотр лога: %s [%s]", filepath.Base(m.logViewer.filePath), status)
+	return truncateText(text, width)
 }
 
 func (r dashboardRect) contains(x int, y int) bool {
@@ -882,6 +1268,33 @@ func spinnerTickCmd() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return spinnerTickMsg{}
 	})
+}
+
+type dashboardLogSink struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (s *dashboardLogSink) WriteLine(line string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lines = append(s.lines, line)
+	return nil
+}
+
+func (s *dashboardLogSink) Close() error {
+	return nil
+}
+
+func (s *dashboardLogSink) Drain() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.lines) == 0 {
+		return nil
+	}
+	lines := append([]string(nil), s.lines...)
+	s.lines = s.lines[:0]
+	return lines
 }
 
 func lastLines(lines []string, limit int) []string {

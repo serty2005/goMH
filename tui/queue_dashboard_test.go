@@ -2,6 +2,7 @@ package tui
 
 import (
 	"goMH/taskqueue"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -184,6 +185,8 @@ func TestDashboardMouseHoverAndQueueClick(t *testing.T) {
 }
 
 func TestDashboardViewFitsWindowHeightWithTwoLineFooter(t *testing.T) {
+	defer ShutdownLiveLogOverlay()
+
 	model := newTestDashboardModel()
 	model.tasks = []dashboardTask{
 		{Snapshot: taskqueue.TaskSnapshot{ID: "t1", Title: "Первая", State: taskqueue.TaskQueued, StageText: "Ожидание"}},
@@ -192,6 +195,46 @@ func TestDashboardViewFitsWindowHeightWithTwoLineFooter(t *testing.T) {
 	view := model.View()
 	if height := lipgloss.Height(view); height > model.height {
 		t.Fatalf("view не должен выходить за высоту окна: %d > %d", height, model.height)
+	}
+}
+
+func TestDashboardFooterShowsLiveLogHintWhenOverlayHidden(t *testing.T) {
+	defer ShutdownLiveLogOverlay()
+
+	globalLiveLogOverlay.mu.Lock()
+	globalLiveLogOverlay.filePath = `C:\logs\goMH.log`
+	globalLiveLogOverlay.unreadCount = 2
+	globalLiveLogOverlay.visible = false
+	globalLiveLogOverlay.mu.Unlock()
+
+	model := newTestDashboardModel()
+	footer := model.renderFooter()
+
+	if !strings.Contains(footer, "Shift+Tab Просмотр лога [goMH.log - 2 новых строк]") {
+		t.Fatalf("ожидалась подсказка о запущенном просмотрщике, получено: %s", footer)
+	}
+}
+
+func TestDashboardShiftTabOpensGlobalLiveLogOverlay(t *testing.T) {
+	defer ShutdownLiveLogOverlay()
+
+	globalLiveLogOverlay.mu.Lock()
+	globalLiveLogOverlay.filePath = `C:\logs\goMH.log`
+	globalLiveLogOverlay.visible = false
+	globalLiveLogOverlay.mu.Unlock()
+
+	model := newTestDashboardModel()
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated := updatedModel.(dashboardModel)
+
+	if cmd != nil {
+		t.Fatal("переключение overlay не должно запускать дополнительную команду")
+	}
+	if !liveLogOverlayVisible() {
+		t.Fatal("overlay должен открываться по Shift+Tab")
+	}
+	if updated.moduleIndex != model.moduleIndex {
+		t.Fatalf("overlay не должен менять выбор меню, получено %d", updated.moduleIndex)
 	}
 }
 

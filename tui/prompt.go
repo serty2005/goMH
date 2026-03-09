@@ -91,7 +91,7 @@ func newSelectionModel(items []ChoiceItem, config SelectionConfig) *selectionMod
 }
 
 func (m *selectionModel) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, liveLogOverlayTickCmd())
 }
 
 func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -107,10 +107,20 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resultErr = msg.err
 		return m, tea.Quit
 
+	case liveLogOverlayTickMsg:
+		consumeLiveLogOverlayUpdates()
+		return m, liveLogOverlayTickCmd()
+
 	case tea.MouseMsg:
+		if liveLogOverlayVisible() {
+			return m, nil
+		}
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		if handleLiveLogOverlayKey(msg, m.height) {
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, func() tea.Msg {
@@ -181,6 +191,20 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *selectionModel) View() string {
+	if liveLogOverlayVisible() {
+		return renderLiveLogOverlay(m.width, m.height, LiveLogOverlayRenderStyles{
+			Title:    m.theme.Title,
+			Subtitle: m.theme.Subtitle,
+			Panel:    m.theme.PanelFocus,
+			Key:      m.theme.Key,
+			Help:     m.theme.Help,
+			Error:    m.theme.Error,
+			Status:   m.theme.Status,
+			Text:     m.theme.Item,
+			Muted:    m.theme.ItemMuted,
+		})
+	}
+
 	width := m.width
 	if width <= 0 {
 		width = 100
@@ -271,10 +295,14 @@ func (m *selectionModel) footerHelp() []string {
 	if m.config.Help != "" {
 		secondLine = append(secondLine, m.theme.Help.Render(m.config.Help))
 	}
-	return []string{
+	lines := []string{
 		m.theme.Help.Render(strings.Join(firstLine, "   ")),
 		m.theme.Help.Render(strings.Join(secondLine, "   ")),
 	}
+	if hint := liveLogOverlayHint(); hint != "" {
+		lines = append(lines, m.theme.Help.Render(hint))
+	}
+	return lines
 }
 
 func (m *selectionModel) applyFilter() {
@@ -562,7 +590,7 @@ func newInputModel(config InputConfig) *inputModel {
 }
 
 func (m *inputModel) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, liveLogOverlayTickCmd())
 }
 
 func (m *inputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -578,7 +606,14 @@ func (m *inputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.finished = true
 		return m, tea.Quit
 
+	case liveLogOverlayTickMsg:
+		consumeLiveLogOverlayUpdates()
+		return m, liveLogOverlayTickCmd()
+
 	case tea.KeyMsg:
+		if handleLiveLogOverlayKey(msg, m.height) {
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, func() tea.Msg {
@@ -609,6 +644,20 @@ func (m *inputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *inputModel) View() string {
+	if liveLogOverlayVisible() {
+		return renderLiveLogOverlay(m.width, m.height, LiveLogOverlayRenderStyles{
+			Title:    m.theme.Title,
+			Subtitle: m.theme.Subtitle,
+			Panel:    m.theme.PanelFocus,
+			Key:      m.theme.Key,
+			Help:     m.theme.Help,
+			Error:    m.theme.Error,
+			Status:   m.theme.Status,
+			Text:     m.theme.Item,
+			Muted:    m.theme.ItemMuted,
+		})
+	}
+
 	width := m.width
 	if width <= 0 {
 		width = 90
@@ -635,6 +684,9 @@ func (m *inputModel) View() string {
 	helpLineTwo := []string{m.theme.Key.Render("Esc") + " назад"}
 	if m.config.Help != "" {
 		helpLineTwo = append(helpLineTwo, m.theme.Help.Render(m.config.Help))
+	}
+	if hint := liveLogOverlayHint(); hint != "" {
+		helpLineTwo = append(helpLineTwo, m.theme.Help.Render(hint))
 	}
 	lines = append(lines, "")
 	lines = append(lines, m.theme.Help.Render(strings.Join(helpParts, "   ")))

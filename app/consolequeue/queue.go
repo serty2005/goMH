@@ -27,7 +27,7 @@ func Run(cfgModules []config.ModuleDef, registry *moduleregistry.Registry, am co
 			WinUtils:     wu,
 		},
 		ConfigureContext: core.NewSilentTaskContext(nil),
-		ImmediateContext: tui.NewConsoleContext(),
+		ImmediateContext: &dashboardImmediateContext{base: core.NewSilentTaskContext(context.Background())},
 		ConfirmPrepared: func(module core.QueueModule, config any, plan core.ModuleTaskPlan) (bool, error) {
 			return tui.ConfirmTaskPlan(plan, config)
 		},
@@ -91,6 +91,46 @@ func runDashboard(modules []tui.DashboardModule, queue *taskqueue.Queue, service
 	}
 
 	return tui.RunQueueDashboard(modules, controller)
+}
+
+type dashboardImmediateContext struct {
+	base core.TaskContext
+}
+
+func (c *dashboardImmediateContext) Context() context.Context {
+	return c.base.Context()
+}
+
+func (c *dashboardImmediateContext) Info(msg string) {
+	c.base.Info(msg)
+}
+
+func (c *dashboardImmediateContext) Warn(msg string) {
+	c.base.Warn(msg)
+}
+
+func (c *dashboardImmediateContext) Error(msg string) {
+	c.base.Error(msg)
+}
+
+func (c *dashboardImmediateContext) Success(msg string) {
+	c.base.Success(msg)
+}
+
+func (c *dashboardImmediateContext) SetStatus(text string) {
+	c.base.SetStatus(text)
+}
+
+func (c *dashboardImmediateContext) SetProgress(percent int) {
+	c.base.SetProgress(percent)
+}
+
+func (c *dashboardImmediateContext) SetCancelable(enabled bool) {
+	c.base.SetCancelable(enabled)
+}
+
+func (c *dashboardImmediateContext) OpenLiveLog(filePath string) error {
+	return tui.OpenLiveLogOverlay(filePath)
 }
 
 func taskIDFromResult(result core.ModuleActionResult) string {

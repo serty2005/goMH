@@ -126,6 +126,12 @@ type TaskConfirmationProvider interface {
 	TaskConfirmation() TaskConfirmation
 }
 
+// LiveLogViewer позволяет интерфейсу перехватить запуск live-просмотра лога
+// и показать его во встроенной панели вместо прямого вывода в консоль.
+type LiveLogViewer interface {
+	OpenLiveLog(filePath string) error
+}
+
 // ModuleTaskPlan описывает, как модуль должен быть выполнен после конфигурации.
 type ModuleTaskPlan struct {
 	Mode   ModuleRunMode

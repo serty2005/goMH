@@ -79,6 +79,36 @@ func TestServiceTailReturnsContextCanceled(t *testing.T) {
 	}
 }
 
+func TestServiceTailReadsFromStartWhenStartLinesNegative(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "full.log")
+	if err := os.WriteFile(path, []byte("line-1\nline-2\nline-3\n"), 0666); err != nil {
+		t.Fatalf("не удалось подготовить лог: %v", err)
+	}
+
+	sink := &captureSink{}
+	service := NewService()
+	handle, err := service.StartTail(context.Background(), TailRequest{
+		FilePath:     path,
+		StartLines:   -1,
+		PollInterval: 20 * time.Millisecond,
+		IdleTimeout:  80 * time.Millisecond,
+		Sink:         sink,
+	})
+	if err != nil {
+		t.Fatalf("не удалось запустить tail: %v", err)
+	}
+
+	if err := handle.Wait(); err != nil {
+		t.Fatalf("tail завершился ошибкой: %v", err)
+	}
+
+	lines := sink.Lines()
+	if len(lines) != 3 || lines[0] != "line-1" || lines[2] != "line-3" {
+		t.Fatalf("ожидалось чтение файла с начала, получено: %#v", lines)
+	}
+}
+
 type captureSink struct {
 	mu    sync.Mutex
 	lines []string

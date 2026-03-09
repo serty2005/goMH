@@ -51,7 +51,7 @@ func RunWithSpinner[T any](title string, subtitle string, fn func() (T, error)) 
 }
 
 func (m *loadingModel[T]) Init() tea.Cmd {
-	return tea.Batch(m.startCmd(), spinnerTickCmd())
+	return tea.Batch(m.startCmd(), spinnerTickCmd(), liveLogOverlayTickCmd())
 }
 
 func (m *loadingModel[T]) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -66,12 +66,18 @@ func (m *loadingModel[T]) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.spinnerIndex = (m.spinnerIndex + 1) % len(m.spinnerFrames)
 		return m, spinnerTickCmd()
+	case liveLogOverlayTickMsg:
+		consumeLiveLogOverlayUpdates()
+		return m, liveLogOverlayTickCmd()
 	case loadingResultMsg[T]:
 		m.value = msg.value
 		m.err = msg.err
 		m.done = true
 		return m, tea.Quit
 	case tea.KeyMsg:
+		if handleLiveLogOverlayKey(msg, m.height) {
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			var zero T
@@ -88,12 +94,28 @@ func (m *loadingModel[T]) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
+	if liveLogOverlayVisible() {
+		return renderLiveLogOverlay(m.width, m.height, LiveLogOverlayRenderStyles{
+			Title:    m.theme.Title,
+			Subtitle: m.theme.Subtitle,
+			Panel:    m.theme.PanelFocus,
+			Key:      m.theme.Key,
+			Help:     m.theme.Help,
+			Error:    m.theme.Error,
+			Status:   m.theme.Status,
+			Text:     m.theme.Item,
+			Muted:    m.theme.ItemMuted,
+		})
+	}
 
 	spinner := m.spinnerFrames[m.spinnerIndex%len(m.spinnerFrames)]
 	lines := []string{
 		m.theme.Title.Render(m.title),
 		"",
 		m.theme.Status.Render(" " + spinner + " " + m.subtitle + " "),
+	}
+	if hint := liveLogOverlayHint(); hint != "" {
+		lines = append(lines, "", m.theme.Help.Render(hint))
 	}
 	panel := m.theme.PanelFocus.Width(minInt(m.width-4, 90)).Render(stringsJoin(lines))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)

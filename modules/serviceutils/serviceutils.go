@@ -155,6 +155,13 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 		return core.ModuleActionResult{}, errors.New("немедленное выполнение поддерживается только для просмотра лога")
 	}
 
+	if viewer, ok := ctx.(core.LiveLogViewer); ok {
+		if err := viewer.OpenLiveLog(cfg.LogFileToView); err != nil {
+			return core.ModuleActionResult{}, err
+		}
+		return core.ModuleActionResult{Note: "Просмотр лога открыт."}, nil
+	}
+
 	_, err = m.StartLogView(ctx.Context(), cfg, nil, logstream.NewStdoutSink())
 	if err != nil {
 		return core.ModuleActionResult{}, err
