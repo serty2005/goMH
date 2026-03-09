@@ -22,6 +22,27 @@ type RegimeInstallConfig struct {
 	Password    string `json:"password"`
 }
 
+func (cfg *RegimeInstallConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{"Режим: новая установка"}
+	if cfg.IsReinstall {
+		details[0] = "Режим: переустановка"
+	} else {
+		details = append(details,
+			"Логин администратора: "+cfg.Username,
+			"Пароль администратора: задан",
+		)
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 const resumeTaskName = "goMH_Regime_Resume"
 
 // checkDotNet48 проверяет установленную версию .NET Framework 4.8

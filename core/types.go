@@ -115,6 +115,17 @@ type ModuleActionResult struct {
 	SelectTask bool
 }
 
+// TaskConfirmation описывает сводку параметров перед запуском действия.
+type TaskConfirmation struct {
+	Details      []string
+	ConfirmLabel string
+}
+
+// TaskConfirmationProvider позволяет конфигу вернуть сводку параметров для финального подтверждения.
+type TaskConfirmationProvider interface {
+	TaskConfirmation() TaskConfirmation
+}
+
 // ModuleTaskPlan описывает, как модуль должен быть выполнен после конфигурации.
 type ModuleTaskPlan struct {
 	Mode   ModuleRunMode

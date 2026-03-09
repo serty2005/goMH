@@ -8,3 +8,4 @@ pipeline*
 *.py
 prompt.md
 AGENTS.md
+*.log

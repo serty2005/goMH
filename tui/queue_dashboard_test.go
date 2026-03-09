@@ -65,6 +65,36 @@ func TestDashboardEnterOnQueueDoesNotEnqueue(t *testing.T) {
 	}
 }
 
+func TestDashboardRefreshKeepsManualQueueSelection(t *testing.T) {
+	model := newTestDashboardModel()
+	model.focus = 1
+	model.tasks = []dashboardTask{
+		{Snapshot: taskqueue.TaskSnapshot{ID: "running", State: taskqueue.TaskRunning}},
+		{Snapshot: taskqueue.TaskSnapshot{ID: "queued", State: taskqueue.TaskQueued}},
+	}
+	model.taskIndex = 1
+
+	updatedModel, _ := model.Update(refreshMsg{
+		tasks: []dashboardTask{
+			{Snapshot: taskqueue.TaskSnapshot{ID: "running", State: taskqueue.TaskRunning}},
+			{Snapshot: taskqueue.TaskSnapshot{ID: "queued", State: taskqueue.TaskQueued}},
+			{Snapshot: taskqueue.TaskSnapshot{ID: "queued-2", State: taskqueue.TaskQueued}},
+		},
+		queueStarted: true,
+	})
+
+	updated := updatedModel.(dashboardModel)
+	if updated.currentTask() == nil {
+		t.Fatal("ожидалась выбранная задача после refresh")
+	}
+	if updated.currentTask().Snapshot.ID != "queued" {
+		t.Fatalf("ручной выбор не должен сбрасываться на выполняемую задачу, получено %q", updated.currentTask().Snapshot.ID)
+	}
+	if updated.taskIndex != 1 {
+		t.Fatalf("ожидался сохраненный индекс выбранной задачи, получено %d", updated.taskIndex)
+	}
+}
+
 func TestDashboardDigitShortcutStartsModule(t *testing.T) {
 	model := newTestDashboardModel()
 	calls := 0
@@ -172,8 +202,15 @@ func newTestDashboardModel() dashboardModel {
 			{ID: "m2", Title: "Модуль 2"},
 			{ID: "m3", Title: "Модуль 3"},
 		},
-		runOutsideUI: func(fn func() error) error {
-			return fn()
+		runInteractive: func(fn func() (DashboardActionResult, error)) tea.Cmd {
+			return func() tea.Msg {
+				result, err := fn()
+				return actionDoneMsg{
+					note:         result.Note,
+					err:          err,
+					selectTaskID: result.SelectTaskID,
+				}
+			}
 		},
 		width:  120,
 		height: 30,

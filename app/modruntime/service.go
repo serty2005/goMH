@@ -34,6 +34,7 @@ type Service struct {
 	Services         core.ModuleServices
 	ConfigureContext core.TaskContext
 	ImmediateContext core.TaskContext
+	ConfirmPrepared  func(module core.QueueModule, config any, plan core.ModuleTaskPlan) (bool, error)
 }
 
 func (s Service) EnqueueModule(moduleID string) (core.ModuleActionResult, error) {
@@ -59,6 +60,21 @@ func (s Service) EnqueuePrepared(moduleID string, config any) (core.ModuleAction
 	plan, err := module.BuildTask(config)
 	if err != nil {
 		return core.ModuleActionResult{}, err
+	}
+	confirmed, err := s.confirmPrepared(module, config, plan)
+	if err != nil {
+		return core.ModuleActionResult{}, err
+	}
+	if !confirmed {
+		result := plan.Result
+		if result.Note == "" {
+			if plan.Mode == core.ModuleRunModeQueue {
+				result.Note = "Постановка задачи отменена."
+			} else {
+				result.Note = "Выполнение отменено."
+			}
+		}
+		return result, nil
 	}
 
 	switch plan.Mode {
@@ -143,6 +159,13 @@ func (s Service) immediateContext() core.TaskContext {
 		return s.ImmediateContext
 	}
 	return core.NewSilentTaskContext(context.Background())
+}
+
+func (s Service) confirmPrepared(module core.QueueModule, config any, plan core.ModuleTaskPlan) (bool, error) {
+	if s.ConfirmPrepared == nil {
+		return true, nil
+	}
+	return s.ConfirmPrepared(module, config, plan)
 }
 
 func isNilConfig(config any) bool {

@@ -715,6 +715,9 @@ func Confirm(title, subtitle string, yesLabel string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if index < 0 {
+		return false, ErrExitToMainMenu
+	}
 	return index == 0, nil
 }
 

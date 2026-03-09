@@ -20,6 +20,20 @@ type DriverInstallConfig struct {
 	Driver config.FiscalDriver
 }
 
+func (cfg *DriverInstallConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	return core.TaskConfirmation{
+		Details: []string{
+			"Драйвер: " + cfg.Driver.MenuText,
+			"Идентификатор: " + cfg.Driver.ID,
+		},
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 func (m *Module) ID() string {
 	return "FiscalDrivers"
 }

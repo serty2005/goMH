@@ -55,6 +55,40 @@ type ServiceUtilsConfig struct {
 	DatabaseType       string // "db" or "sdf"
 }
 
+func (cfg *ServiceUtilsConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{"Действие: " + cfg.actionLabel()}
+	switch cfg.Action {
+	case ActionCollectLogs:
+		details = append(details,
+			fmt.Sprintf("Период: %d дн.", cfg.LogDays),
+			"Каталоги: "+strings.Join(cfg.LogDirs, ", "),
+		)
+	case ActionViewLog:
+		details = append(details, "Файл: "+cfg.LogFileToView)
+	case ActionOrderCheck, ActionFrontTools:
+		if cfg.TargetDatabasePath != "" {
+			details = append(details, "База: "+cfg.TargetDatabasePath)
+		}
+		if cfg.DatabaseType != "" {
+			details = append(details, "Тип БД: "+strings.ToUpper(cfg.DatabaseType))
+		}
+	}
+
+	confirmLabel := "Добавить в очередь"
+	if cfg.Action == ActionViewLog {
+		confirmLabel = "Запустить"
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: confirmLabel,
+	}
+}
+
 type Module struct{}
 
 func (m *Module) ID() string       { return "ServiceUtils" }
@@ -214,6 +248,23 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return m.runFrontToolsFlow(ctx, am, wu, cfg)
 	}
 	return nil
+}
+
+func (cfg *ServiceUtilsConfig) actionLabel() string {
+	switch cfg.Action {
+	case ActionCleanTemp:
+		return "Очистка временных файлов"
+	case ActionCollectLogs:
+		return "Сбор логов"
+	case ActionViewLog:
+		return "Просмотр лога"
+	case ActionOrderCheck:
+		return "OrderCheck"
+	case ActionFrontTools:
+		return "FrontTools"
+	default:
+		return "Неизвестно"
+	}
 }
 
 func (m *Module) StartLogView(parent context.Context, cfg *ServiceUtilsConfig, service *logstream.Service, sinks ...logstream.Sink) (*logstream.Handle, error) {

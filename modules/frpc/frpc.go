@@ -53,6 +53,26 @@ type FrpcInstallConfig struct {
 	RemotePort int // Вычисленный или введенный пользователем порт
 }
 
+func (cfg *FrpcInstallConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{"Действие: " + cfg.actionLabel()}
+	if cfg.Action != ActionUninstall {
+		details = append(details,
+			"Локальный порт: "+cfg.LocalPort,
+			"Алиас: "+cfg.Alias,
+			fmt.Sprintf("Удаленный порт: %d", cfg.RemotePort),
+		)
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 func (m *Module) ID() string { return "FRPC" }
 func (m *Module) MenuText() string {
 	return "Fast Reverse Proxy Client (проброс портов)"
@@ -127,6 +147,21 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 		return m.Execute(ctx, am, wu, cfg)
 	}
 	return nil
+}
+
+func (cfg *FrpcInstallConfig) actionLabel() string {
+	switch cfg.Action {
+	case ActionInstall:
+		return "Установка"
+	case ActionAddPort:
+		return "Добавление порта"
+	case ActionReinstall:
+		return "Переустановка"
+	case ActionUninstall:
+		return "Удаление"
+	default:
+		return "Неизвестно"
+	}
 }
 
 // Configure - опрос пользователя и подготовка данных

@@ -28,6 +28,9 @@ func Run(cfgModules []config.ModuleDef, registry *moduleregistry.Registry, am co
 		},
 		ConfigureContext: core.NewSilentTaskContext(nil),
 		ImmediateContext: tui.NewConsoleContext(),
+		ConfirmPrepared: func(module core.QueueModule, config any, plan core.ModuleTaskPlan) (bool, error) {
+			return tui.ConfirmTaskPlan(plan, config)
+		},
 	}
 
 	return runDashboard(modules, queue, service)

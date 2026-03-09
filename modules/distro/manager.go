@@ -43,6 +43,51 @@ type DistroInstallConfig struct {
 	PortableFTPPath      string
 }
 
+func (cfg *DistroInstallConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{
+		"Действие: " + cfg.actionLabel(),
+		"Бренд: " + cfg.Brand,
+	}
+	if cfg.Component.MenuText != "" {
+		details = append(details, "Компонент: "+cfg.Component.MenuText)
+	}
+	if cfg.Version != "" {
+		details = append(details, "Версия: "+cfg.Version)
+	}
+	if cfg.Patch != nil && cfg.Patch.ShortName != "" {
+		details = append(details, "Патч: "+cfg.Patch.ShortName)
+	}
+	if cfg.UninstallOldVersion {
+		details = append(details, "Старая версия будет удалена: "+cfg.OldVersionString)
+	}
+	if cfg.PluginSelection != nil && cfg.PluginSelection.Plugin != nil {
+		details = append(details, "Плагин: "+cfg.PluginSelection.Plugin.Name)
+	}
+	if cfg.RunAutoUpdatePlugins {
+		details = append(details, "После установки будет запущено автообновление плагинов")
+	}
+	if cfg.Action == ActionInstallPortable {
+		if cfg.PortableSourceType != "" {
+			details = append(details, "Источник portable: "+cfg.PortableSourceType)
+		}
+		if cfg.PortableArchiveName != "" {
+			details = append(details, "Архив: "+cfg.PortableArchiveName)
+		}
+		if cfg.PortableFTPPath != "" {
+			details = append(details, "FTP-путь: "+cfg.PortableFTPPath)
+		}
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 // Module реализует интерфейс core.Installer.
 type Module struct{}
 
@@ -106,6 +151,21 @@ func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices,
 		return err
 	}
 	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
+func (cfg *DistroInstallConfig) actionLabel() string {
+	switch cfg.Action {
+	case ActionInstallComponent:
+		return "Установка компонента"
+	case ActionInstallPortable:
+		return "Установка portable"
+	case ActionManualPatch:
+		return "Ручная установка патча"
+	case ActionPlugins:
+		return "Автообновление плагинов"
+	default:
+		return "Неизвестно"
+	}
 }
 
 // brandHandler определяет интерфейс для специфичной логики бренда при конфигурации.

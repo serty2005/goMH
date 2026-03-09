@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"goMH/taskqueue"
+	"io"
 	"strings"
 	"time"
 
@@ -60,48 +61,37 @@ type dashboardLayout struct {
 }
 
 type dashboardModel struct {
-	modules       []DashboardModule
-	controller    DashboardController
-	runOutsideUI  func(fn func() error) error
-	tasks         []dashboardTask
-	moduleIndex   int
-	taskIndex     int
-	focus         int
-	width         int
-	height        int
-	busy          bool
-	lastMessage   string
-	lastError     string
-	pendingTaskID string
-	queueStarted  bool
-	spinnerIndex  int
-	spinnerFrames []string
-	titleStyle    lipgloss.Style
-	panelStyle    lipgloss.Style
-	focusStyle    lipgloss.Style
-	mutedStyle    lipgloss.Style
-	keyStyle      lipgloss.Style
-	errorStyle    lipgloss.Style
-	statusStyle   lipgloss.Style
+	modules        []DashboardModule
+	controller     DashboardController
+	runInteractive func(fn func() (DashboardActionResult, error)) tea.Cmd
+	tasks          []dashboardTask
+	moduleIndex    int
+	taskIndex      int
+	focus          int
+	width          int
+	height         int
+	busy           bool
+	lastMessage    string
+	lastError      string
+	pendingTaskID  string
+	queueStarted   bool
+	spinnerIndex   int
+	spinnerFrames  []string
+	titleStyle     lipgloss.Style
+	panelStyle     lipgloss.Style
+	focusStyle     lipgloss.Style
+	mutedStyle     lipgloss.Style
+	keyStyle       lipgloss.Style
+	errorStyle     lipgloss.Style
+	statusStyle    lipgloss.Style
 }
 
 func RunQueueDashboard(modules []DashboardModule, controller DashboardController) error {
-	var program *tea.Program
-
 	model := dashboardModel{
-		modules:    modules,
-		controller: controller,
-		runOutsideUI: func(fn func() error) error {
-			if program == nil {
-				return fn()
-			}
-			if err := program.ReleaseTerminal(); err != nil {
-				return err
-			}
-			defer program.RestoreTerminal()
-			return fn()
-		},
-		spinnerFrames: []string{"|", "/", "-", "\\"},
+		modules:        modules,
+		controller:     controller,
+		runInteractive: runDashboardInteractive,
+		spinnerFrames:  []string{"|", "/", "-", "\\"},
 		titleStyle: lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#F3E9D2")),
@@ -126,7 +116,7 @@ func RunQueueDashboard(modules []DashboardModule, controller DashboardController
 			Padding(0, 1),
 	}
 
-	program = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	_, err := program.Run()
 	return err
 }
@@ -244,23 +234,6 @@ func (m dashboardModel) fetchTasks() tea.Cmd {
 	}
 }
 
-func (m dashboardModel) runBlocking(fn func() (DashboardActionResult, error)) tea.Cmd {
-	return func() tea.Msg {
-		var (
-			result DashboardActionResult
-			err    error
-		)
-		runErr := m.runOutsideUI(func() error {
-			result, err = fn()
-			return err
-		})
-		if runErr != nil {
-			return actionDoneMsg{err: runErr}
-		}
-		return actionDoneMsg{note: result.Note, err: err, selectTaskID: result.SelectTaskID}
-	}
-}
-
 func (m *dashboardModel) startEnqueueCurrentModule() (dashboardModel, tea.Cmd) {
 	module := m.currentModule()
 	if m.controller.OnEnqueue == nil || module.ID == "" {
@@ -269,8 +242,40 @@ func (m *dashboardModel) startEnqueueCurrentModule() (dashboardModel, tea.Cmd) {
 	m.busy = true
 	m.lastMessage = "Настройка задачи..."
 	m.lastError = ""
-	return *m, m.runBlocking(func() (DashboardActionResult, error) {
+	if m.runInteractive == nil {
+		m.runInteractive = runDashboardInteractive
+	}
+	return *m, m.runInteractive(func() (DashboardActionResult, error) {
 		return m.controller.OnEnqueue(module)
+	})
+}
+
+type dashboardInteractiveCommand struct {
+	run    func() (DashboardActionResult, error)
+	result DashboardActionResult
+}
+
+func (c *dashboardInteractiveCommand) Run() error {
+	if c.run == nil {
+		return nil
+	}
+	result, err := c.run()
+	c.result = result
+	return err
+}
+
+func (c *dashboardInteractiveCommand) SetStdin(io.Reader)  {}
+func (c *dashboardInteractiveCommand) SetStdout(io.Writer) {}
+func (c *dashboardInteractiveCommand) SetStderr(io.Writer) {}
+
+func runDashboardInteractive(fn func() (DashboardActionResult, error)) tea.Cmd {
+	command := &dashboardInteractiveCommand{run: fn}
+	return tea.Exec(command, func(err error) tea.Msg {
+		return actionDoneMsg{
+			note:         command.result.Note,
+			err:          err,
+			selectTaskID: command.result.SelectTaskID,
+		}
 	})
 }
 
@@ -806,16 +811,13 @@ func (m *dashboardModel) resolveTaskSelection(currentTaskID string) (string, boo
 		}
 	}
 
-	running := firstTaskWithState(m.tasks, taskqueue.TaskRunning)
-	if running != nil {
-		if currentTaskID != running.Snapshot.ID {
-			return running.Snapshot.ID, currentTaskID != ""
-		}
-		return running.Snapshot.ID, false
-	}
-
 	if currentTaskID != "" && hasTaskWithID(m.tasks, currentTaskID) {
 		return currentTaskID, false
+	}
+
+	running := firstTaskWithState(m.tasks, taskqueue.TaskRunning)
+	if running != nil {
+		return running.Snapshot.ID, currentTaskID != ""
 	}
 
 	if len(m.tasks) > 0 {

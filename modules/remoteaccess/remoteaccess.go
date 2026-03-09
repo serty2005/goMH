@@ -18,7 +18,10 @@ import (
 	"time"
 )
 
-type Module struct{}
+type Module struct {
+	selectItem             func(items []tui.ChoiceItem, config tui.SelectionConfig) (int, error)
+	promptRustDeskPassword func() (bool, string, error)
+}
 
 func (m *Module) ID() string { return "RemoteAccess" }
 func (m *Module) MenuText() string {
@@ -88,7 +91,31 @@ const (
 
 // RemoteAccessConfig хранит выбор пользователя
 type RemoteAccessConfig struct {
-	Tool ToolType
+	Tool        ToolType
+	SetPassword bool
+	Password    string
+}
+
+func (cfg *RemoteAccessConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{
+		"Инструмент: " + cfg.toolLabel(),
+	}
+	if cfg.Tool == ToolRustDesk {
+		if cfg.SetPassword {
+			details = append(details, "Пароль RustDesk: будет установлен")
+		} else {
+			details = append(details, "Пароль RustDesk: не задавать")
+		}
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
 }
 
 // Run - точка входа (UI)
@@ -155,26 +182,18 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		},
 	}
 
-	choice, err := tui.SelectItem(items, tui.SelectionConfig{
+	choice, err := m.selectRemoteAccessItem(items, tui.SelectionConfig{
 		Title:    "Средства удаленного доступа",
 		Subtitle: "Недоступные варианты уже установлены",
 	})
 	if err != nil {
+		if err == tui.ErrExitToMainMenu {
+			return nil, nil
+		}
 		return nil, err
 	}
 
-	switch choice {
-	case 0:
-		return &RemoteAccessConfig{Tool: ToolTeamViewer}, nil
-	case 1:
-		return &RemoteAccessConfig{Tool: ToolLiteManager}, nil
-	case 2:
-		return &RemoteAccessConfig{Tool: ToolRustDesk}, nil
-	case 3:
-		return &RemoteAccessConfig{Tool: ToolPOSRelayd}, nil
-	default:
-		return nil, nil
-	}
+	return m.configFromChoice(choice)
 }
 
 // Execute - выполнение установки
@@ -188,7 +207,7 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return m.installLiteManager(ctx, am, wu)
 	case ToolRustDesk:
 		ctx.SetStatus("Установка RustDesk")
-		return m.installRustDesk(ctx, am, wu)
+		return m.installRustDesk(ctx, am, wu, cfg)
 	case ToolPOSRelayd:
 		ctx.SetStatus("Установка POSRelayd Agent")
 		return m.installPOSRelayd(ctx, am, wu)
@@ -308,12 +327,11 @@ func (m *Module) installLiteManager(ctx core.TaskContext, am core.AssetManager, 
 	return err
 }
 
-func (m *Module) installRustDesk(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
+func (m *Module) installRustDesk(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *RemoteAccessConfig) error {
 	slog.Info("Начало установки RustDesk")
-
-	setPassword, password, err := askRustDeskPassword()
-	if err != nil {
-		return err
+	password := strings.TrimSpace(cfg.Password)
+	if cfg.SetPassword && password == "" {
+		return fmt.Errorf("не задан пароль RustDesk")
 	}
 
 	ctx.Info("Получение актуального релиза RustDesk...")
@@ -336,7 +354,7 @@ func (m *Module) installRustDesk(ctx core.TaskContext, am core.AssetManager, wu 
 		return err
 	}
 
-	if setPassword {
+	if cfg.SetPassword {
 		if err := waitForRustDeskExecutable(30 * time.Second); err != nil {
 			return err
 		}
@@ -500,6 +518,65 @@ func askRustDeskPassword() (bool, string, error) {
 			return false, "", nil
 		}
 		return true, strings.TrimSpace(password), nil
+	}
+}
+
+func (m *Module) selectRemoteAccessItem(items []tui.ChoiceItem, config tui.SelectionConfig) (int, error) {
+	if m.selectItem != nil {
+		return m.selectItem(items, config)
+	}
+	return tui.SelectItem(items, config)
+}
+
+func (m *Module) promptForRustDeskPassword() (bool, string, error) {
+	if m.promptRustDeskPassword != nil {
+		return m.promptRustDeskPassword()
+	}
+	return askRustDeskPassword()
+}
+
+func (m *Module) configFromChoice(choice int) (*RemoteAccessConfig, error) {
+	switch choice {
+	case 0:
+		return &RemoteAccessConfig{Tool: ToolTeamViewer}, nil
+	case 1:
+		return &RemoteAccessConfig{Tool: ToolLiteManager}, nil
+	case 2:
+		return m.configForRustDesk()
+	case 3:
+		return &RemoteAccessConfig{Tool: ToolPOSRelayd}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (m *Module) configForRustDesk() (*RemoteAccessConfig, error) {
+	setPassword, password, err := m.promptForRustDeskPassword()
+	if err != nil {
+		if err == tui.ErrExitToMainMenu {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &RemoteAccessConfig{
+		Tool:        ToolRustDesk,
+		SetPassword: setPassword,
+		Password:    strings.TrimSpace(password),
+	}, nil
+}
+
+func (cfg *RemoteAccessConfig) toolLabel() string {
+	switch cfg.Tool {
+	case ToolTeamViewer:
+		return "TeamViewer"
+	case ToolLiteManager:
+		return "LiteManager"
+	case ToolRustDesk:
+		return "RustDesk"
+	case ToolPOSRelayd:
+		return "POSRelayd Agent"
+	default:
+		return "Неизвестно"
 	}
 }
 

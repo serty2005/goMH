@@ -42,6 +42,26 @@ type VComCasterConfig struct {
 	InstallPath     string           // Куда ставить (C:\MH\vcomcaster)
 }
 
+func (cfg *VComCasterConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{"Действие: " + cfg.actionLabel()}
+	if cfg.Action != ActionUninstall {
+		details = append(details,
+			"Сканер: "+cfg.SelectedScanner.Caption,
+			"VID/PID: "+cfg.ScannerDeviceID,
+			"Путь установки: "+cfg.InstallPath,
+		)
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 type Module struct{}
 
 func (m *Module) ID() string       { return "VComCaster" }
@@ -121,6 +141,19 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 
 	// Если установки нет - конфигурируем новую установку
 	return m.configureInstall(wu, vcomcasterBaseDir)
+}
+
+func (cfg *VComCasterConfig) actionLabel() string {
+	switch cfg.Action {
+	case ActionInstall:
+		return "Установка"
+	case ActionReinstall:
+		return "Переустановка"
+	case ActionUninstall:
+		return "Удаление"
+	default:
+		return "Неизвестно"
+	}
 }
 
 // Execute выполняет задачу на основе подготовленного конфига.
