@@ -25,6 +25,7 @@ import (
 
 var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
 var contentRangeRegex = regexp.MustCompile(`^bytes\s+(\d+)-(\d+)/(\d+|\*)$`)
+var contentRangeUnsatisfiedRegex = regexp.MustCompile(`^bytes\s+\*/(\d+|\*)$`)
 
 const (
 	downloadMaxAttempts = 5
@@ -184,60 +185,28 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
 	}
 
-	hostWithPort := ftpCfg.Host
-	if ftpCfg.Port != 0 && !strings.Contains(hostWithPort, ":") {
-		hostWithPort = fmt.Sprintf("%s:%d", ftpCfg.Host, ftpCfg.Port)
-	}
-
-	c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(10*time.Second))
-	if err != nil {
-		return false, fmt.Errorf("не удалось подключиться к FTP %s: %w", hostWithPort, err)
-	}
-	defer c.Quit()
-
-	if err := c.Login(ftpCfg.User, ftpCfg.Pass); err != nil {
-		return false, fmt.Errorf("ошибка входа на FTP %s: %w", hostWithPort, err)
-	}
-
-	remoteSize, err := c.FileSize(ftpPath)
-	if err != nil {
-		m.consolePrintf("Предупреждение: не удалось получить размер файла '%s' на FTP: %v. Загрузка будет выполнена без проверки.\n", fileName, err)
-		remoteSize = -1
-	}
-
-	if fi, err := os.Stat(localPath); err == nil {
-		if remoteSize > 0 && fi.Size() == remoteSize {
-			m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
-			m.reportProgress(fileName, 100)
-			return true, nil
+	var lastErr error
+	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
+		alreadyDownloaded, err := m.downloadFTPAttempt(ftpCfg, ftpPath, localPath, fileName)
+		if err == nil {
+			return alreadyDownloaded, nil
 		}
-		m.consolePrintf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
+		if errors.Is(err, context.Canceled) {
+			return false, err
+		}
+
+		lastErr = err
+		if attempt == downloadMaxAttempts {
+			break
+		}
+
+		m.consolePrintf("Попытка %d/%d загрузки '%s' завершилась ошибкой: %v. Повтор через %s.\n", attempt, downloadMaxAttempts, fileName, err, downloadRetryDelay)
+		if err := m.waitDownloadRetry(); err != nil {
+			return false, err
+		}
 	}
 
-	resp, err := c.Retr(ftpPath)
-	if err != nil {
-		return false, fmt.Errorf("не удалось начать скачивание с FTP: %w", err)
-	}
-	defer resp.Close()
-	m.cancelFTPDownload(c, resp)
-
-	destFile, err := os.Create(localPath)
-	if err != nil {
-		return false, fmt.Errorf("не удалось создать локальный файл: %w", err)
-	}
-	defer destFile.Close()
-
-	bar := m.createProgressBar(remoteSize, fileName)
-	tracker := newProgressTracker(remoteSize, fileName)
-	tracker.report = m.reportProgress
-	reader := m.wrapDownloadReader(resp)
-	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
-		os.Remove(localPath)
-		return false, fmt.Errorf("ошибка во время копирования потока: %w", err)
-	}
-	m.reportProgress(fileName, 100)
-
-	return false, nil
+	return false, fmt.Errorf("не удалось скачать '%s' по FTP после %d попыток: %w", fileName, downloadMaxAttempts, lastErr)
 }
 
 // DownloadHTTPWithProgress скачивает файл по HTTP с проверкой размера и прогресс-баром.
@@ -252,49 +221,28 @@ func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, err
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
 	}
 
-	req, err := http.NewRequestWithContext(m.downloadContext(), "GET", httpURL, nil)
-	if err != nil {
-		return false, err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	remoteSize := resp.ContentLength
-
-	if fi, err := os.Stat(localPath); err == nil {
-		if remoteSize > 0 && fi.Size() == remoteSize {
-			m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
-			m.reportProgress(fileName, 100)
-			return true, nil
+	var lastErr error
+	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
+		alreadyDownloaded, err := m.downloadHTTPAttempt(httpURL, localPath, fileName)
+		if err == nil {
+			return alreadyDownloaded, nil
 		}
-		m.consolePrintf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
+		if errors.Is(err, context.Canceled) {
+			return false, err
+		}
+
+		lastErr = err
+		if attempt == downloadMaxAttempts {
+			break
+		}
+
+		m.consolePrintf("Попытка %d/%d загрузки '%s' завершилась ошибкой: %v. Повтор через %s.\n", attempt, downloadMaxAttempts, fileName, err, downloadRetryDelay)
+		if err := m.waitDownloadRetry(); err != nil {
+			return false, err
+		}
 	}
 
-	destFile, err := os.Create(localPath)
-	if err != nil {
-		return false, err
-	}
-	defer destFile.Close()
-
-	bar := m.createProgressBar(remoteSize, fileName)
-	tracker := newProgressTracker(remoteSize, fileName)
-	tracker.report = m.reportProgress
-	reader := m.wrapDownloadReader(resp.Body)
-	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
-		os.Remove(localPath)
-		return false, err
-	}
-	m.reportProgress(fileName, 100)
-
-	return false, nil
+	return false, fmt.Errorf("не удалось скачать '%s' по HTTP после %d попыток: %w", fileName, downloadMaxAttempts, lastErr)
 }
 
 // UnpackToFlatDir распаковывает архив в указанную директорию,
@@ -372,11 +320,16 @@ type progressTracker struct {
 	report      func(string, int)
 }
 
-func newProgressTracker(total int64, description string) *progressTracker {
+func newProgressTracker(total int64, description string, initialWritten int64) *progressTracker {
+	lastPercent := -1
+	if total > 0 && initialWritten > 0 {
+		lastPercent = clampPercent(int((initialWritten * 100) / total))
+	}
 	return &progressTracker{
 		total:       total,
+		written:     initialWritten,
 		description: description,
-		lastPercent: -1,
+		lastPercent: lastPercent,
 	}
 }
 
@@ -397,6 +350,16 @@ func (w *progressTracker) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+func clampPercent(percent int) int {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
 }
 
 func (m *Manager) ListFTP(ftpCfg config.FTPConfig, path string) ([]core.FTPEntry, error) {
@@ -705,6 +668,314 @@ func (m *Manager) wrapDownloadReader(reader io.Reader) io.Reader {
 	return &downloadReader{
 		ctx:    m.downloadContext(),
 		reader: reader,
+	}
+}
+
+func (m *Manager) downloadHTTPAttempt(httpURL, localPath, fileName string) (bool, error) {
+	localSize, err := fileSize(localPath)
+	if err != nil {
+		return false, err
+	}
+
+	req, err := http.NewRequestWithContext(m.downloadContext(), "GET", httpURL, nil)
+	if err != nil {
+		return false, err
+	}
+	if localSize > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", localSize))
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	mode, resumeOffset, totalSize, err := resolveHTTPDownloadPlan(resp, localSize)
+	if err != nil {
+		if errors.Is(err, errHTTPRangeReset) {
+			if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				return false, removeErr
+			}
+		}
+		return false, err
+	}
+
+	if totalSize > 0 && resumeOffset == totalSize {
+		m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+		m.reportProgress(fileName, 100)
+		return true, nil
+	}
+
+	if mode == downloadModeRestart && localSize > 0 {
+		m.consolePrintf("Файл '%s' существует, но сервер не подтвердил докачку. Перезапуск загрузки с начала.\n", fileName)
+	}
+	if mode == downloadModeResume && resumeOffset > 0 {
+		m.consolePrintf("Возобновление загрузки '%s' с байта %d.\n", fileName, resumeOffset)
+	}
+
+	destFile, err := openDownloadFile(localPath, mode)
+	if err != nil {
+		return false, err
+	}
+	defer destFile.Close()
+
+	initialPercent := initialDownloadPercent(totalSize, resumeOffset)
+	m.reportProgress(fileName, initialPercent)
+	bar, tracker := m.newDownloadProgress(totalSize, fileName, resumeOffset)
+	reader := m.wrapDownloadReader(resp.Body)
+	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
+		return false, err
+	}
+
+	if totalSize > 0 {
+		sizeAfterCopy, err := fileSize(localPath)
+		if err != nil {
+			return false, err
+		}
+		if sizeAfterCopy != totalSize {
+			return false, fmt.Errorf("скачанный размер '%s' не совпадает с ожидаемым: %d != %d", fileName, sizeAfterCopy, totalSize)
+		}
+	}
+
+	m.reportProgress(fileName, 100)
+	return false, nil
+}
+
+func (m *Manager) downloadFTPAttempt(ftpCfg config.FTPConfig, ftpPath, localPath, fileName string) (bool, error) {
+	hostWithPort := ftpCfg.Host
+	if ftpCfg.Port != 0 && !strings.Contains(hostWithPort, ":") {
+		hostWithPort = fmt.Sprintf("%s:%d", ftpCfg.Host, ftpCfg.Port)
+	}
+
+	c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(10*time.Second))
+	if err != nil {
+		return false, fmt.Errorf("не удалось подключиться к FTP %s: %w", hostWithPort, err)
+	}
+	defer c.Quit()
+
+	if err := c.Login(ftpCfg.User, ftpCfg.Pass); err != nil {
+		return false, fmt.Errorf("ошибка входа на FTP %s: %w", hostWithPort, err)
+	}
+
+	remoteSize, err := c.FileSize(ftpPath)
+	if err != nil {
+		m.consolePrintf("Предупреждение: не удалось получить размер файла '%s' на FTP: %v. Загрузка будет выполнена без проверки.\n", fileName, err)
+		remoteSize = -1
+	}
+
+	localSize, err := fileSize(localPath)
+	if err != nil {
+		return false, err
+	}
+	if remoteSize > 0 {
+		switch {
+		case localSize == remoteSize:
+			m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+			m.reportProgress(fileName, 100)
+			return true, nil
+		case localSize > remoteSize:
+			m.consolePrintf("Локальный файл '%s' больше удалённого. Перезапуск загрузки с начала.\n", fileName)
+			if err := os.Remove(localPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, err
+			}
+			localSize = 0
+		}
+	}
+
+	resp, mode, resumeOffset, err := startFTPDownload(c, ftpPath, localSize)
+	if err != nil {
+		return false, fmt.Errorf("не удалось начать скачивание с FTP: %w", err)
+	}
+	defer resp.Close()
+	m.cancelFTPDownload(c, resp)
+
+	if mode == downloadModeRestart && localSize > 0 {
+		m.consolePrintf("FTP-сервер не поддержал докачку '%s'. Перезапуск загрузки с начала.\n", fileName)
+	}
+	if mode == downloadModeResume && resumeOffset > 0 {
+		m.consolePrintf("Возобновление FTP-загрузки '%s' с байта %d.\n", fileName, resumeOffset)
+	}
+
+	destFile, err := openDownloadFile(localPath, mode)
+	if err != nil {
+		return false, fmt.Errorf("не удалось создать локальный файл: %w", err)
+	}
+	defer destFile.Close()
+
+	initialPercent := initialDownloadPercent(remoteSize, resumeOffset)
+	m.reportProgress(fileName, initialPercent)
+	bar, tracker := m.newDownloadProgress(remoteSize, fileName, resumeOffset)
+	reader := m.wrapDownloadReader(resp)
+	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
+		return false, fmt.Errorf("ошибка во время копирования потока: %w", err)
+	}
+
+	if remoteSize > 0 {
+		sizeAfterCopy, err := fileSize(localPath)
+		if err != nil {
+			return false, err
+		}
+		if sizeAfterCopy != remoteSize {
+			return false, fmt.Errorf("скачанный размер '%s' не совпадает с ожидаемым: %d != %d", fileName, sizeAfterCopy, remoteSize)
+		}
+	}
+
+	m.reportProgress(fileName, 100)
+	return false, nil
+}
+
+type downloadMode int
+
+const (
+	downloadModeRestart downloadMode = iota
+	downloadModeResume
+)
+
+var errHTTPRangeReset = errors.New("reset partial download")
+
+func resolveHTTPDownloadPlan(resp *http.Response, localSize int64) (downloadMode, int64, int64, error) {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		totalSize := resp.ContentLength
+		if totalSize > 0 && localSize == totalSize {
+			return downloadModeRestart, totalSize, totalSize, nil
+		}
+		return downloadModeRestart, 0, totalSize, nil
+	case http.StatusPartialContent:
+		start, totalSize, ok := parsePartialContentRange(resp.Header.Get("Content-Range"))
+		if ok {
+			if start != localSize {
+				return downloadModeRestart, 0, 0, fmt.Errorf("сервер вернул неожиданный диапазон %q для локального смещения %d: %w", resp.Header.Get("Content-Range"), localSize, errHTTPRangeReset)
+			}
+			return downloadModeResume, localSize, totalSize, nil
+		}
+		totalSize = resp.ContentLength
+		if totalSize > 0 {
+			totalSize += localSize
+		}
+		return downloadModeResume, localSize, totalSize, nil
+	case http.StatusRequestedRangeNotSatisfiable:
+		totalSize, ok := parseUnsatisfiedContentRange(resp.Header.Get("Content-Range"))
+		if ok && totalSize > 0 && localSize == totalSize {
+			return downloadModeResume, totalSize, totalSize, nil
+		}
+		return downloadModeRestart, 0, 0, fmt.Errorf("сервер отклонил Range-запрос (%s): %w", resp.Status, errHTTPRangeReset)
+	default:
+		return downloadModeRestart, 0, 0, fmt.Errorf("bad status: %s", resp.Status)
+	}
+}
+
+func parsePartialContentRange(header string) (int64, int64, bool) {
+	matches := contentRangeRegex.FindStringSubmatch(strings.TrimSpace(header))
+	if len(matches) != 4 {
+		return 0, 0, false
+	}
+
+	start, err := parseInt64(matches[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	totalSize := int64(-1)
+	if matches[3] != "*" {
+		totalSize, err = parseInt64(matches[3])
+		if err != nil {
+			return 0, 0, false
+		}
+	}
+	return start, totalSize, true
+}
+
+func parseUnsatisfiedContentRange(header string) (int64, bool) {
+	matches := contentRangeUnsatisfiedRegex.FindStringSubmatch(strings.TrimSpace(header))
+	if len(matches) != 2 || matches[1] == "*" {
+		return 0, false
+	}
+	totalSize, err := parseInt64(matches[1])
+	if err != nil {
+		return 0, false
+	}
+	return totalSize, true
+}
+
+func parseInt64(value string) (int64, error) {
+	var result int64
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid integer %q", value)
+		}
+		result = result*10 + int64(r-'0')
+	}
+	return result, nil
+}
+
+func fileSize(path string) (int64, error) {
+	fi, err := os.Stat(path)
+	if err == nil {
+		return fi.Size(), nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	return 0, err
+}
+
+func openDownloadFile(localPath string, mode downloadMode) (*os.File, error) {
+	flags := os.O_CREATE | os.O_WRONLY
+	if mode == downloadModeResume {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	return os.OpenFile(localPath, flags, 0644)
+}
+
+func startFTPDownload(c *ftp.ServerConn, ftpPath string, localSize int64) (io.ReadCloser, downloadMode, int64, error) {
+	if localSize > 0 {
+		resp, err := c.RetrFrom(ftpPath, uint64(localSize))
+		if err == nil {
+			return resp, downloadModeResume, localSize, nil
+		}
+		resp, retryErr := c.Retr(ftpPath)
+		if retryErr != nil {
+			return nil, downloadModeRestart, 0, err
+		}
+		return resp, downloadModeRestart, 0, nil
+	}
+
+	resp, err := c.Retr(ftpPath)
+	if err != nil {
+		return nil, downloadModeRestart, 0, err
+	}
+	return resp, downloadModeRestart, 0, nil
+}
+
+func initialDownloadPercent(totalSize, offset int64) int {
+	if totalSize <= 0 || offset <= 0 {
+		return 0
+	}
+	return clampPercent(int((offset * 100) / totalSize))
+}
+
+func (m *Manager) newDownloadProgress(totalSize int64, fileName string, initialWritten int64) (*progressbar.ProgressBar, *progressTracker) {
+	bar := m.createProgressBar(totalSize, fileName)
+	if initialWritten > 0 {
+		_ = bar.Add64(initialWritten)
+	}
+	tracker := newProgressTracker(totalSize, fileName, initialWritten)
+	tracker.report = m.reportProgress
+	return bar, tracker
+}
+
+func (m *Manager) waitDownloadRetry() error {
+	timer := time.NewTimer(downloadRetryDelay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-m.downloadContext().Done():
+		return m.downloadContext().Err()
 	}
 }
 

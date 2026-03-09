@@ -55,6 +55,12 @@ func (rw *RealWinUtils) withRuntime() *winutils.Runtime {
 func (rw *RealWinUtils) RunCommand(name string, args ...string) (string, error) {
 	return winutils.RunCommand(name, args...)
 }
+func (rw *RealWinUtils) StartDetachedProcess(name string, args ...string) error {
+	return rw.withRuntime().StartDetachedProcess(name, args...)
+}
+func (rw *RealWinUtils) StartDetachedProcessInDir(name string, workingDir string, args ...string) error {
+	return rw.withRuntime().StartDetachedProcessInDir(name, workingDir, args...)
+}
 func (rw *RealWinUtils) ServiceExists(serviceName string) (bool, error) {
 	return winutils.ServiceExists(serviceName)
 }

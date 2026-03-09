@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"goMH/dependencies"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -55,6 +56,41 @@ func RunCommandWithEnv(env map[string]string, name string, args ...string) (stri
 		return "", fmt.Errorf("ошибка выполнения '%s %v' с кастомным env: %v, вывод: %s", name, args, err, string(output))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+func StartDetachedProcess(name string, args ...string) error {
+	return NewRuntime().StartDetachedProcess(name, args...)
+}
+
+func (r *Runtime) StartDetachedProcess(name string, args ...string) error {
+	workingDir := filepath.Dir(name)
+	if workingDir == "." {
+		workingDir = ""
+	}
+	return r.StartDetachedProcessInDir(name, workingDir, args...)
+}
+
+func StartDetachedProcessInDir(name string, workingDir string, args ...string) error {
+	return NewRuntime().StartDetachedProcessInDir(name, workingDir, args...)
+}
+
+func (r *Runtime) StartDetachedProcessInDir(name string, workingDir string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.Stdin = nil
+	if workingDir != "" {
+		cmd.Dir = workingDir
+	}
+	cmd.SysProcAttr = &windows.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("ошибка запуска '%s %v': %w", name, args, err)
+	}
+	return cmd.Process.Release()
 }
 
 // CreateScheduledTask создает или обновляет задачу в Планировщике Windows через импорт XML.

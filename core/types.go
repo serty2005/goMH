@@ -34,6 +34,8 @@ type ScannerInfo struct {
 type WinUtils interface {
 	RunCommand(name string, args ...string) (string, error)
 	RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error)
+	StartDetachedProcess(name string, args ...string) error
+	StartDetachedProcessInDir(name string, workingDir string, args ...string) error
 	ServiceExists(serviceName string) (bool, error)
 	AddDefenderExclusion(path string) error
 	SetServiceTriggers(serviceName string, triggers []string) error
@@ -134,9 +136,10 @@ type LiveLogViewer interface {
 
 // ModuleTaskPlan описывает, как модуль должен быть выполнен после конфигурации.
 type ModuleTaskPlan struct {
-	Mode   ModuleRunMode
-	Task   ModuleTaskSpec
-	Result ModuleActionResult
+	Mode             ModuleRunMode
+	Task             ModuleTaskSpec
+	Result           ModuleActionResult
+	SkipConfirmation bool
 }
 
 // QueueModule описывает единый контракт модуля для конфигурации, сборки task spec и выполнения.

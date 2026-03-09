@@ -162,6 +162,9 @@ func (s Service) immediateContext() core.TaskContext {
 }
 
 func (s Service) confirmPrepared(module core.QueueModule, config any, plan core.ModuleTaskPlan) (bool, error) {
+	if plan.SkipConfirmation {
+		return true, nil
+	}
 	if s.ConfirmPrepared == nil {
 		return true, nil
 	}

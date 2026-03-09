@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
 	"goMH/logstream"
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mholt/archives"
@@ -79,7 +81,7 @@ func (cfg *ServiceUtilsConfig) TaskConfirmation() core.TaskConfirmation {
 	}
 
 	confirmLabel := "Добавить в очередь"
-	if cfg.Action == ActionViewLog {
+	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools {
 		confirmLabel = "Запустить"
 	}
 
@@ -131,9 +133,18 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 			Signature: signature,
 		},
 	}
-	if cfg.Action == ActionViewLog {
+	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools {
 		plan.Mode = core.ModuleRunModeImmediate
-		plan.Result.Note = "Поток лога запущен в stdout."
+		switch cfg.Action {
+		case ActionViewLog:
+			plan.Result.Note = "Поток лога запущен в stdout."
+		case ActionOrderCheck:
+			plan.Result.Note = "OrderCheck запущен."
+			plan.SkipConfirmation = true
+		case ActionFrontTools:
+			plan.Result.Note = "FrontTools запущен."
+			plan.SkipConfirmation = true
+		}
 	}
 	return plan, nil
 }
@@ -151,22 +162,128 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 	if err != nil {
 		return core.ModuleActionResult{}, err
 	}
-	if cfg.Action != ActionViewLog {
-		return core.ModuleActionResult{}, errors.New("немедленное выполнение поддерживается только для просмотра лога")
-	}
+	switch cfg.Action {
+	case ActionViewLog:
+		if viewer, ok := ctx.(core.LiveLogViewer); ok {
+			if err := viewer.OpenLiveLog(cfg.LogFileToView); err != nil {
+				return core.ModuleActionResult{}, err
+			}
+			return core.ModuleActionResult{Note: "Просмотр лога открыт."}, nil
+		}
 
-	if viewer, ok := ctx.(core.LiveLogViewer); ok {
-		if err := viewer.OpenLiveLog(cfg.LogFileToView); err != nil {
+		_, err = m.StartLogView(ctx.Context(), cfg, nil, logstream.NewStdoutSink())
+		if err != nil {
 			return core.ModuleActionResult{}, err
 		}
-		return core.ModuleActionResult{Note: "Просмотр лога открыт."}, nil
+		return core.ModuleActionResult{Note: "Поток лога запущен в stdout."}, nil
+	case ActionOrderCheck, ActionFrontTools:
+		err = executeImmediateWithRuntime(ctx, services, func(taskServices core.ModuleServices) error {
+			return m.Execute(ctx, taskServices.AssetManager, taskServices.WinUtils, cfg)
+		})
+		result := core.ModuleActionResult{}
+		if err == nil {
+			switch cfg.Action {
+			case ActionOrderCheck:
+				result.Note = "OrderCheck запущен."
+			case ActionFrontTools:
+				result.Note = "FrontTools запущен."
+			}
+		}
+		return result, err
+	default:
+		return core.ModuleActionResult{}, errors.New("немедленное выполнение для этого действия не поддерживается")
+	}
+}
+
+type consoleOutputWinUtils interface {
+	WithConsoleOutput(stdout io.Writer, stderr io.Writer) core.WinUtils
+}
+
+func executeImmediateWithRuntime(ctx core.TaskContext, services core.ModuleServices, fn func(taskServices core.ModuleServices) error) error {
+	writer := newImmediateTaskLogWriter(ctx)
+	defer writer.Flush()
+
+	taskServices := core.ModuleServices{
+		AssetManager: withImmediateAssetManager(services.AssetManager, writer, ctx),
+		WinUtils:     withImmediateWinUtils(services.WinUtils, writer),
 	}
 
-	_, err = m.StartLogView(ctx.Context(), cfg, nil, logstream.NewStdoutSink())
-	if err != nil {
-		return core.ModuleActionResult{}, err
+	return fn(taskServices)
+}
+
+func withImmediateAssetManager(am core.AssetManager, writer io.Writer, taskCtx core.TaskContext) core.AssetManager {
+	manager, ok := am.(*assetmgr.Manager)
+	if !ok {
+		return am
 	}
-	return core.ModuleActionResult{Note: "Поток лога запущен в stdout."}, nil
+
+	return manager.WithTaskRuntime(
+		writer,
+		io.Discard,
+		taskCtx.SetStatus,
+		func(description string, percent int) {
+			taskCtx.SetStatus("Скачивание " + description)
+			taskCtx.SetProgress(percent)
+		},
+		taskCtx.SetCancelable,
+		taskCtx.Context(),
+	)
+}
+
+func withImmediateWinUtils(wu core.WinUtils, writer io.Writer) core.WinUtils {
+	real, ok := wu.(consoleOutputWinUtils)
+	if !ok {
+		return wu
+	}
+	return real.WithConsoleOutput(writer, writer)
+}
+
+type immediateTaskLogWriter struct {
+	mu     sync.Mutex
+	ctx    core.TaskContext
+	buffer strings.Builder
+}
+
+func newImmediateTaskLogWriter(ctx core.TaskContext) *immediateTaskLogWriter {
+	return &immediateTaskLogWriter{ctx: ctx}
+}
+
+func (w *immediateTaskLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.buffer.Write(p)
+	w.flushLocked(false)
+	return len(p), nil
+}
+
+func (w *immediateTaskLogWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.flushLocked(true)
+}
+
+func (w *immediateTaskLogWriter) flushLocked(force bool) {
+	for {
+		text := w.buffer.String()
+		index := strings.IndexByte(text, '\n')
+		if index == -1 {
+			if force && text != "" {
+				w.ctx.Info(strings.TrimSpace(text))
+				w.buffer.Reset()
+			}
+			return
+		}
+
+		line := strings.TrimSpace(text[:index])
+		if line != "" {
+			w.ctx.Info(line)
+		}
+
+		rest := text[index+1:]
+		w.buffer.Reset()
+		w.buffer.WriteString(rest)
+	}
 }
 
 // Run - точка входа (UI)
@@ -469,13 +586,9 @@ func (m *Module) configureOrderCheck(wu core.WinUtils) (*ServiceUtilsConfig, err
 	slog.Info("Поиск баз данных для OrderCheck")
 	// Поиск БД
 	alcoholDb, errAlc := m.findAlcoholMarkingPluginDb(wu)
-	dbType, errType := m.detectIikoFrontDbType()
+	_, iikoFrontDb, errType := m.detectIikoFrontDb()
 
-	var iikoFrontDb string
-	if errType == nil {
-		appData := os.ExpandEnv("$APPDATA")
-		iikoFrontDb = filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities."+dbType)
-	} else {
+	if errType != nil {
 		slog.Warn("Не удалось определить тип БД iikoFront", "error", errType)
 	}
 
@@ -518,17 +631,20 @@ func (m *Module) configureOrderCheck(wu core.WinUtils) (*ServiceUtilsConfig, err
 
 func (m *Module) configureFrontTools() (*ServiceUtilsConfig, error) {
 	slog.Info("Определение типа БД для FrontTools")
-	dbType, err := m.detectIikoFrontDbType()
+	dbType, dbPath, err := m.detectIikoFrontDb()
 	if err != nil {
 		slog.Warn("Не удалось определить тип БД, fallback to sdf", "error", err)
 		tui.Warn("Не удалось определить тип БД автоматически. Используем .sdf по умолчанию.")
 		dbType = "sdf"
+		appData := os.ExpandEnv("$APPDATA")
+		dbPath = filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities.sdf")
 	} else {
-		slog.Info("Определен тип БД", "type", dbType)
+		slog.Info("Определен тип БД", "type", dbType, "path", dbPath)
 	}
 	return &ServiceUtilsConfig{
-		Action:       ActionFrontTools,
-		DatabaseType: dbType,
+		Action:             ActionFrontTools,
+		DatabaseType:       dbType,
+		TargetDatabasePath: dbPath,
 	}, nil
 }
 
@@ -772,9 +888,9 @@ func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, w
 	ctx.Info(fmt.Sprintf("Открытие БД: %s", cfg.TargetDatabasePath))
 	slog.Info("Выполнение команды", "exe", exePath, "arg", cfg.TargetDatabasePath)
 
-	_, err = wu.RunCommand(exePath, cfg.TargetDatabasePath)
+	err = wu.StartDetachedProcess(exePath, cfg.TargetDatabasePath)
 	if err == nil {
-		ctx.Success("OrderCheck завершен.")
+		ctx.Success("OrderCheck запущен.")
 	} else {
 		slog.Error("Ошибка выполнения OrderCheck", "error", err)
 	}
@@ -810,22 +926,25 @@ func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, w
 	}
 
 	// Запуск
+	workingDir := filepath.Dir(cfg.TargetDatabasePath)
 	if wu.IsAdmin() {
 		ctx.Info("Запуск процесса...")
-		slog.Info("Запуск FrontTools (Admin)", "path", exePath)
-		_, err := wu.RunCommand(exePath)
+		slog.Info("Запуск FrontTools (Admin)", "path", exePath, "working_dir", workingDir)
+		err := wu.StartDetachedProcessInDir(exePath, workingDir)
+		if err == nil {
+			ctx.Success("FrontTools запущен.")
+		}
 		return err
 	} else {
 		ctx.Warn("Попытка запуска через Планировщик (требуются права)...")
-		slog.Info("Запуск FrontTools через TaskScheduler", "path", exePath)
+		slog.Info("Запуск FrontTools через TaskScheduler", "path", exePath, "working_dir", workingDir)
 		taskName := "goMH_FrontTools_Run"
-		if err := wu.CreateScheduledTask(taskName, exePath, "", filepath.Dir(exePath)); err != nil {
+		if err := wu.CreateScheduledTask(taskName, exePath, "", workingDir); err != nil {
 			return err
 		}
 		_, err := wu.RunCommand("schtasks", "/Run", "/TN", taskName)
-		if waitErr := waitForTaskContext(ctx, 2*time.Second); waitErr != nil {
-			_ = wu.DeleteScheduledTaskByName(taskName)
-			return waitErr
+		if err == nil {
+			ctx.Success("FrontTools запущен.")
 		}
 		_ = wu.DeleteScheduledTaskByName(taskName)
 		return err
@@ -864,16 +983,16 @@ func (m *Module) findLogDirectories(cfg *config.Config) []string {
 	return res
 }
 
-func (m *Module) detectIikoFrontDbType() (string, error) {
+func (m *Module) detectIikoFrontDb() (string, string, error) {
 	appData := os.ExpandEnv("$APPDATA")
 	base := filepath.Join(appData, "iiko", "CashServer", "EntitiesStorage", "Entities", "entities")
 	if _, err := os.Stat(base + ".db"); err == nil {
-		return "db", nil
+		return "db", base + ".db", nil
 	}
 	if _, err := os.Stat(base + ".sdf"); err == nil {
-		return "sdf", nil
+		return "sdf", base + ".sdf", nil
 	}
-	return "", errors.New("not found")
+	return "", "", errors.New("not found")
 }
 
 func (m *Module) findAlcoholMarkingPluginDb(wu core.WinUtils) (string, error) {

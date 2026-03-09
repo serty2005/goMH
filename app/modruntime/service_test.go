@@ -34,7 +34,7 @@ type testQueueModule struct {
 
 func (m testQueueModule) ID() string { return m.id }
 
-func (m testQueueModule) MenuText() string { return "Тестовый модуль" }
+func (m testQueueModule) MenuText() string { return "test module" }
 
 func (m testQueueModule) Run(am core.AssetManager, wu core.WinUtils) error { return nil }
 
@@ -56,7 +56,7 @@ func TestEnqueuePreparedDoesNotSubmitWithoutConfirmation(t *testing.T) {
 		plan: core.ModuleTaskPlan{
 			Mode: core.ModuleRunModeQueue,
 			Task: core.ModuleTaskSpec{
-				Title:     "Тестовая задача",
+				Title:     "test task",
 				Signature: "test|queue",
 			},
 		},
@@ -72,16 +72,16 @@ func TestEnqueuePreparedDoesNotSubmitWithoutConfirmation(t *testing.T) {
 
 	result, err := service.EnqueuePrepared("test", struct{}{})
 	if err != nil {
-		t.Fatalf("не ожидалась ошибка при отмене подтверждения: %v", err)
+		t.Fatalf("unexpected error while cancelling confirmation: %v", err)
 	}
 	if submitter.calls != 0 {
-		t.Fatalf("submit не должен вызываться при отмене, вызовов: %d", submitter.calls)
+		t.Fatalf("submit should not be called on cancellation, got %d", submitter.calls)
 	}
 	if result.TaskID != "" {
-		t.Fatalf("при отмене TaskID должен быть пустым, получено %q", result.TaskID)
+		t.Fatalf("expected empty TaskID on cancellation, got %q", result.TaskID)
 	}
 	if result.Note != "Постановка задачи отменена." {
-		t.Fatalf("неожиданная заметка при отмене: %q", result.Note)
+		t.Fatalf("unexpected cancellation note: %q", result.Note)
 	}
 }
 
@@ -91,7 +91,7 @@ func TestEnqueuePreparedSubmitsAfterConfirmation(t *testing.T) {
 		plan: core.ModuleTaskPlan{
 			Mode: core.ModuleRunModeQueue,
 			Task: core.ModuleTaskSpec{
-				Title:     "Тестовая задача",
+				Title:     "test task",
 				Signature: "test|queue",
 			},
 		},
@@ -107,12 +107,45 @@ func TestEnqueuePreparedSubmitsAfterConfirmation(t *testing.T) {
 
 	result, err := service.EnqueuePrepared("test", struct{}{})
 	if err != nil {
-		t.Fatalf("не ожидалась ошибка постановки задачи: %v", err)
+		t.Fatalf("unexpected enqueue error: %v", err)
 	}
 	if submitter.calls != 1 {
-		t.Fatalf("ожидался один вызов submit, получено: %d", submitter.calls)
+		t.Fatalf("expected one submit call, got %d", submitter.calls)
 	}
 	if result.TaskID != "task-1" {
-		t.Fatalf("ожидался task-1, получено %q", result.TaskID)
+		t.Fatalf("expected task-1, got %q", result.TaskID)
+	}
+}
+
+func TestEnqueuePreparedSkipsConfirmationWhenRequestedByPlan(t *testing.T) {
+	module := testQueueModule{
+		id: "test",
+		plan: core.ModuleTaskPlan{
+			Mode:             core.ModuleRunModeImmediate,
+			SkipConfirmation: true,
+			Result: core.ModuleActionResult{
+				Note: "started",
+			},
+		},
+	}
+
+	confirmCalls := 0
+	service := Service{
+		Resolver: testResolver{module: module},
+		ConfirmPrepared: func(module core.QueueModule, config any, plan core.ModuleTaskPlan) (bool, error) {
+			confirmCalls++
+			return false, nil
+		},
+	}
+
+	result, err := service.EnqueuePrepared("test", struct{}{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if confirmCalls != 0 {
+		t.Fatalf("confirmation should be skipped, got %d calls", confirmCalls)
+	}
+	if result.Note != "started" {
+		t.Fatalf("unexpected result note: %q", result.Note)
 	}
 }
