@@ -1,7 +1,6 @@
 package regime
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"goMH/core"
@@ -23,34 +22,28 @@ type RegimeInstallConfig struct {
 	Password    string `json:"password"`
 }
 
-const resumeTaskName = "goMH_Regime_Resume"
-
-// getCredentials запрашивает у пользователя логин и пароль для установки Regime
-func getCredentials() (username, password string, err error) {
-	scanner := bufio.NewScanner(os.Stdin)
-
-	// Запрос логина
-	fmt.Print("Введите логин администратора: ")
-	if !scanner.Scan() {
-		return "", "", fmt.Errorf("ошибка чтения логина")
-	}
-	username = strings.TrimSpace(scanner.Text())
-	if username == "" {
-		return "", "", fmt.Errorf("логин не может быть пустым")
+func (cfg *RegimeInstallConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
 	}
 
-	// Запрос пароля
-	fmt.Print("Введите пароль администратора: ")
-	if !scanner.Scan() {
-		return "", "", fmt.Errorf("ошибка чтения пароля")
-	}
-	password = strings.TrimSpace(scanner.Text())
-	if password == "" {
-		return "", "", fmt.Errorf("пароль не может быть пустым")
+	details := []string{"Режим: новая установка"}
+	if cfg.IsReinstall {
+		details[0] = "Режим: переустановка"
+	} else {
+		details = append(details,
+			"Логин администратора: "+cfg.Username,
+			"Пароль администратора: задан",
+		)
 	}
 
-	return username, password, nil
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
 }
+
+const resumeTaskName = "goMH_Regime_Resume"
 
 // checkDotNet48 проверяет установленную версию .NET Framework 4.8
 func checkDotNet48() (bool, error) {
@@ -98,7 +91,6 @@ func installDotNet48(ctx core.TaskContext, am core.AssetManager, wu core.WinUtil
 	// Используем стандартные флаги тихого установщика Microsoft: /q /norestart
 	output, err := wu.RunCommand(installerPath, "/q", "/norestart")
 	if err != nil {
-		// ОБНОВЛЕНО: Проверяем код 3010 (ERROR_SUCCESS_REBOOT_REQUIRED)
 		if strings.Contains(err.Error(), "exit status 3010") {
 			ctx.Info("Установщик вернул код 3010 (требуется перезагрузка). Это нормальное поведение.")
 			return nil
@@ -118,37 +110,103 @@ func (m *Module) MenuText() string {
 	return "Regime (Локальный модуль ЧестныйЗнак)"
 }
 
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	title := "Regime: новая установка"
+	signature := "regime|install|" + cfg.Username
+	if cfg.IsReinstall {
+		title = "Regime: переустановка"
+		signature = "regime|reinstall"
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+			Exclusive: true,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, *cfg)
+}
+
 // Run - точка входа (UI слой)
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	ctx := tui.NewConsoleContext()
 	ctx.SetStatus("Подготовка к установке Regime")
 
-	// 1. Проверяем, установлена ли служба "regime"
+	installCfg, err := m.Configure(wu)
+	if err != nil {
+		return err
+	}
+	if installCfg == nil {
+		return nil
+	}
+
+	return m.Execute(ctx, am, wu, *installCfg)
+}
+
+func (m *Module) Configure(wu core.WinUtils) (*RegimeInstallConfig, error) {
 	const serviceName = "regime"
 	isReinstall, err := wu.ServiceExists(serviceName)
 	if err != nil {
-		return fmt.Errorf("не удалось проверить наличие службы '%s': %w", serviceName, err)
+		return nil, fmt.Errorf("не удалось проверить наличие службы '%s': %w", serviceName, err)
 	}
 
-	// 2. Собираем конфиг
-	installCfg := RegimeInstallConfig{
-		IsReinstall: isReinstall,
+	cfg := &RegimeInstallConfig{IsReinstall: isReinstall}
+	if isReinstall {
+		return cfg, nil
 	}
 
-	if !isReinstall {
-		tui.Info("Новая установка 'regime'.")
-		username, password, err := getCredentials()
-		if err != nil {
-			return fmt.Errorf("не удалось получить учетные данные: %w", err)
-		}
-		installCfg.Username = username
-		installCfg.Password = password
-	} else {
-		tui.Warn("Обнаружена существующая служба 'regime'. Будет выполнена переустановка с сохранением данных.")
+	username, err := tui.PromptText(tui.InputConfig{
+		Title:       "Regime: логин администратора",
+		Subtitle:    "Укажите логин для новой установки",
+		Placeholder: "admin",
+		Validate: func(value string) error {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("логин не может быть пустым")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	// 3. Передаем управление логике
-	return m.Execute(ctx, am, wu, installCfg)
+	password, err := tui.PromptText(tui.InputConfig{
+		Title:       "Regime: пароль администратора",
+		Subtitle:    "Пароль будет передан в MSI-пакет",
+		Placeholder: "Введите пароль",
+		Password:    true,
+		Validate: func(value string) error {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("пароль не может быть пустым")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Username = strings.TrimSpace(username)
+	cfg.Password = strings.TrimSpace(password)
+	return cfg, nil
 }
 
 // Resume - точка входа для автоматического продолжения после перезагрузки
@@ -226,8 +284,7 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 			return fmt.Errorf("не удалось инициировать перезагрузку: %w", err)
 		}
 
-		// Завершаем программу, чтобы не идти дальше
-		os.Exit(0)
+		return nil
 	} else {
 		ctx.Success(".NET Framework 4.8 установлен.")
 	}
@@ -308,4 +365,18 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	}
 
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*RegimeInstallConfig, error) {
+	switch cfg := config.(type) {
+	case RegimeInstallConfig:
+		return &cfg, nil
+	case *RegimeInstallConfig:
+		if cfg == nil {
+			return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+		}
+		return cfg, nil
+	default:
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
 }

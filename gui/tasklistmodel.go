@@ -24,7 +24,7 @@ func (m *TaskListModel) Value(row, col int) interface{} {
 	item := m.items[row]
 	switch col {
 	case 0:
-		return string(item.State)
+		return formatTaskState(item.State)
 	case 1:
 		return item.ModuleID
 	case 2:
@@ -39,9 +39,9 @@ func (m *TaskListModel) Value(row, col int) interface{} {
 	case 5:
 		if item.FinishedAt.IsZero() {
 			if item.StartedAt.IsZero() {
-				return fmt.Sprintf("queued %s", item.EnqueuedAt.Format("15:04:05"))
+				return fmt.Sprintf("в очереди %s", item.EnqueuedAt.Format("15:04:05"))
 			}
-			return fmt.Sprintf("started %s", item.StartedAt.Format("15:04:05"))
+			return fmt.Sprintf("старт %s", item.StartedAt.Format("15:04:05"))
 		}
 		d := item.FinishedAt.Sub(item.StartedAt)
 		if d < 0 {
@@ -55,6 +55,21 @@ func (m *TaskListModel) Value(row, col int) interface{} {
 func (m *TaskListModel) Replace(items []TaskSnapshot) {
 	m.items = append(m.items[:0], items...)
 	m.PublishRowsReset()
+}
+
+func formatTaskState(state TaskState) string {
+	switch state {
+	case TaskQueued:
+		return "В очереди"
+	case TaskRunning:
+		return "Выполняется"
+	case TaskSuccess:
+		return "Успешно"
+	case TaskFailed:
+		return "Ошибка"
+	default:
+		return string(state)
+	}
 }
 
 func humanDuration(d time.Duration) string {

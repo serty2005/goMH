@@ -7,3 +7,5 @@ pipeline*
 *.pdf
 *.py
 prompt.md
+AGENTS.md
+*.log

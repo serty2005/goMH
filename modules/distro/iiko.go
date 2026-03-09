@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"goMH/config"
 	"goMH/core"
+	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/tui"
-	"log/slog" // Импорт логгера
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/jlaffaye/ftp"
-	"github.com/manifoldco/promptui"
 )
 
 const (
@@ -69,7 +69,19 @@ func (h *iikoHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager,
 	// Индекс плагинов = len(components)
 	// Индекс патчей = len(components) + 1
 	if selectedIdx == len(components) {
-		return &DistroInstallConfig{Action: ActionPlugins, Brand: "iiko"}, nil
+		pluginMod := &iikoplugins.Module{}
+		selection, err := pluginMod.ConfigureInstall(am, wu)
+		if err != nil {
+			return nil, err
+		}
+		if selection == nil {
+			return nil, nil
+		}
+		return &DistroInstallConfig{
+			Action:          ActionPlugins,
+			Brand:           "iiko",
+			PluginSelection: selection,
+		}, nil
 	} else if selectedIdx == len(components)+1 {
 		return h.configureManualPatch(ctx, am, wu)
 	}
@@ -96,13 +108,16 @@ func (h *iikoHandler) configureComponent(ctx core.TaskContext, am core.AssetMana
 	if comp.RunAfter != "" {
 		if ver, err := wu.GetFileVersion(comp.RunAfter); err == nil {
 			installedVer = ver
-			tui.InfoF("Установлена версия: %s", installedVer)
 		}
 	}
 
 	// Выбор режима (Portable / Install)
 	if comp.PortableArchiveKey != "" {
-		mode, err := tui.SelectSimple([]string{"Стандартная установка", "Портативная версия"}, "Выберите режим")
+		label := "Выберите режим"
+		if installedVer != "" {
+			label = fmt.Sprintf("Выберите режим (установлена %s)", installedVer)
+		}
+		mode, err := tui.SelectSimple([]string{"Стандартная установка", "Портативная версия"}, label)
 		if err != nil {
 			return nil, err
 		}
@@ -112,8 +127,11 @@ func (h *iikoHandler) configureComponent(ctx core.TaskContext, am core.AssetMana
 	}
 
 	// Получение списка версий
-	ctx.Info("Получение списка версий с FTP...")
-	versions, err := h.fetchOfficialVersions()
+	versions, err := tui.RunWithSpinner(
+		"Версии iiko",
+		"Получение списка релизов с FTP...",
+		h.fetchOfficialVersions,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -134,15 +152,16 @@ func (h *iikoHandler) configureComponent(ctx core.TaskContext, am core.AssetMana
 
 	// Проверка даунгрейда
 	if installedVer != "" && compareSemanticVersions(version, installedVer) < 0 {
-		tui.Warn(fmt.Sprintf("\nВНИМАНИЕ: Понижение версии с %s до %s.", installedVer, version))
-		tui.Warn("Требуется удаление старой версии.")
-
-		confirm := promptui.Prompt{
-			Label:     "Удалить старую версию автоматически? (Y/N)",
-			IsConfirm: true,
+		confirm, err := tui.Confirm(
+			"Понижение версии iiko",
+			fmt.Sprintf("Обнаружено понижение с %s до %s. Удалить старую версию автоматически?", installedVer, version),
+			"Удалить старую версию",
+		)
+		if err != nil {
+			return nil, err
 		}
-		if _, err := confirm.Run(); err != nil {
-			return nil, nil // Отмена
+		if !confirm {
+			return nil, nil
 		}
 		cfg.UninstallOldVersion = true
 		cfg.OldVersionString = installedVer
@@ -152,7 +171,7 @@ func (h *iikoHandler) configureComponent(ctx core.TaskContext, am core.AssetMana
 	if comp.ID == "iiko_front" {
 		patches, err := FindPatches(am.Cfg().DistroConfig.Iiko.PatchesBaseURL, version)
 		if err != nil {
-			tui.Warn(fmt.Sprintf("Ошибка поиска патчей: %v", err))
+			slog.Warn("Ошибка поиска патчей", "error", err)
 		} else if len(patches) > 0 {
 			patch, err := SelectPatchMenu(patches)
 			if err == nil && patch.ShortName != "SKIP" {
@@ -190,11 +209,16 @@ func (h *iikoHandler) configurePortable(ctx core.TaskContext, am core.AssetManag
 		return nil, fmt.Errorf("шаблон архива не найден для %s", comp.PortableArchiveKey)
 	}
 
-	ctx.Info("Поиск portable версий...")
 	ftpCfg := am.Cfg().FTP[0]
 	dir := pCfg.FtpSource.Directory
 
-	entries, err := am.ListFTP(ftpCfg, dir)
+	entries, err := tui.RunWithSpinner(
+		"Portable iiko",
+		"Чтение каталога FTP с portable-версиями...",
+		func() ([]core.FTPEntry, error) {
+			return am.ListFTP(ftpCfg, dir)
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +262,6 @@ func (h *iikoHandler) configureManualPatch(ctx core.TaskContext, am core.AssetMa
 	if err != nil {
 		return nil, fmt.Errorf("iikoFront не найден: %w", err)
 	}
-	tui.InfoF("Версия iikoFront: %s", ver)
 
 	patches, err := FindPatches(am.Cfg().DistroConfig.Iiko.PatchesBaseURL, ver)
 	if err != nil || len(patches) == 0 {

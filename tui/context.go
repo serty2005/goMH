@@ -1,12 +1,19 @@
 package tui
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // ConsoleContext реализует core.TaskContext для консольного интерфейса.
 type ConsoleContext struct{}
 
 func NewConsoleContext() *ConsoleContext {
 	return &ConsoleContext{}
+}
+
+func (c *ConsoleContext) Context() context.Context {
+	return context.Background()
 }
 
 func (c *ConsoleContext) Info(msg string) {
@@ -35,3 +42,5 @@ func (c *ConsoleContext) SetProgress(percent int) {
 	// так как assetmgr (пока что) использует свой progressbar.
 	// Здесь можно реализовать текстовый прогресс, если нужно.
 }
+
+func (c *ConsoleContext) SetCancelable(bool) {}

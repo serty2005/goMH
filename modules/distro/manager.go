@@ -32,6 +32,7 @@ type DistroInstallConfig struct {
 	Component            config.DistroComponent
 	Version              string
 	Patch                *core.PatchInfo // Может быть nil
+	PluginSelection      *iikoplugins.InstallSelection
 	RunAutoUpdatePlugins bool
 	UninstallOldVersion  bool
 	OldVersionString     string // Версия для удаления (если UninstallOldVersion=true)
@@ -42,12 +43,129 @@ type DistroInstallConfig struct {
 	PortableFTPPath      string
 }
 
+func (cfg *DistroInstallConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{
+		"Действие: " + cfg.actionLabel(),
+		"Бренд: " + cfg.Brand,
+	}
+	if cfg.Component.MenuText != "" {
+		details = append(details, "Компонент: "+cfg.Component.MenuText)
+	}
+	if cfg.Version != "" {
+		details = append(details, "Версия: "+cfg.Version)
+	}
+	if cfg.Patch != nil && cfg.Patch.ShortName != "" {
+		details = append(details, "Патч: "+cfg.Patch.ShortName)
+	}
+	if cfg.UninstallOldVersion {
+		details = append(details, "Старая версия будет удалена: "+cfg.OldVersionString)
+	}
+	if cfg.PluginSelection != nil && cfg.PluginSelection.Plugin != nil {
+		details = append(details, "Плагин: "+cfg.PluginSelection.Plugin.Name)
+	}
+	if cfg.RunAutoUpdatePlugins {
+		details = append(details, "После установки будет запущено автообновление плагинов")
+	}
+	if cfg.Action == ActionInstallPortable {
+		if cfg.PortableSourceType != "" {
+			details = append(details, "Источник portable: "+cfg.PortableSourceType)
+		}
+		if cfg.PortableArchiveName != "" {
+			details = append(details, "Архив: "+cfg.PortableArchiveName)
+		}
+		if cfg.PortableFTPPath != "" {
+			details = append(details, "FTP-путь: "+cfg.PortableFTPPath)
+		}
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 // Module реализует интерфейс core.Installer.
 type Module struct{}
 
 func (m *Module) ID() string { return "iiko" }
 func (m *Module) MenuText() string {
 	return "iiko / Syrve (Дистрибутивы и плагины)"
+}
+
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager, services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	patchName := ""
+	if cfg.Patch != nil {
+		patchName = cfg.Patch.ShortName
+	}
+
+	title := "Задача iiko / Syrve"
+	signature := "distro|generic"
+	switch cfg.Action {
+	case ActionInstallComponent:
+		parts := []string{cfg.Brand, cfg.Component.MenuText}
+		if cfg.Version != "" {
+			parts = append(parts, cfg.Version)
+		}
+		if patchName != "" {
+			parts = append(parts, "патч "+patchName)
+		}
+		title = "Установка " + strings.Join(parts, " ")
+		signature = fmt.Sprintf("distro|component|%s|%s|%s|%s", cfg.Brand, cfg.Component.ID, cfg.Version, patchName)
+	case ActionInstallPortable:
+		title = fmt.Sprintf("Portable %s %s %s", cfg.Brand, cfg.Component.MenuText, cfg.Version)
+		signature = fmt.Sprintf("distro|portable|%s|%s|%s", cfg.Brand, cfg.Component.ID, cfg.Version)
+	case ActionManualPatch:
+		title = fmt.Sprintf("Ручной патч %s %s", cfg.Brand, patchName)
+		signature = fmt.Sprintf("distro|manual_patch|%s|%s|%s", cfg.Brand, cfg.Version, patchName)
+	case ActionPlugins:
+		title = fmt.Sprintf("Автообновление плагинов %s", cfg.Brand)
+		signature = fmt.Sprintf("distro|plugins|%s", cfg.Brand)
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+			Exclusive: cfg.Action == ActionInstallComponent,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
+
+func (cfg *DistroInstallConfig) actionLabel() string {
+	switch cfg.Action {
+	case ActionInstallComponent:
+		return "Установка компонента"
+	case ActionInstallPortable:
+		return "Установка portable"
+	case ActionManualPatch:
+		return "Ручная установка патча"
+	case ActionPlugins:
+		return "Автообновление плагинов"
+	default:
+		return "Неизвестно"
+	}
 }
 
 // brandHandler определяет интерфейс для специфичной логики бренда при конфигурации.
@@ -86,14 +204,13 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 // Configure управляет выбором бренда и передает управление хендлеру бренда.
 func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
 	for {
-		tui.ClearScreen()
-		tui.Title("\n--- Выберите продукт ---")
-		fmt.Println(" 1. iiko")
-		fmt.Println(" 2. Syrve")
-		fmt.Println("\n 0. Назад в главное меню")
-		fmt.Print("Ваш выбор: ")
-
-		key, err := tui.ReadKey()
+		choice, err := tui.SelectItem([]tui.ChoiceItem{
+			{Title: "iiko", Description: "Дистрибутивы, плагины и патчи"},
+			{Title: "Syrve", Description: "Дистрибутивы и portable-сборки"},
+		}, tui.SelectionConfig{
+			Title:    "Выберите продукт",
+			Subtitle: "Esc для возврата в главное меню",
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -101,17 +218,15 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		var handler brandHandler
 		var brandName string
 
-		switch key {
-		case "1":
+		switch choice {
+		case 0:
 			brandName = "iiko"
 			handler = &iikoHandler{}
-		case "2":
+		case 1:
 			brandName = "syrve"
 			handler = &syrveHandler{}
-		case "0":
-			return nil, nil
 		default:
-			continue
+			return nil, nil
 		}
 
 		slog.Info("Выбран бренд", "brand", brandName)
@@ -137,9 +252,8 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *DistroInstallConfig) error {
 	switch cfg.Action {
 	case ActionPlugins:
-		// Делегируем модулю плагинов
 		pluginMod := &iikoplugins.Module{}
-		return pluginMod.Run(am, wu)
+		return pluginMod.ExecuteInstall(am, wu, cfg.PluginSelection)
 
 	case ActionManualPatch:
 		return m.executeManualPatch(ctx, am, wu, cfg)
@@ -151,6 +265,14 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return m.executeInstallPortable(ctx, am, wu, cfg)
 	}
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*DistroInstallConfig, error) {
+	cfg, ok := config.(*DistroInstallConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
 }
 
 // --- EXECUTE IMPLEMENTATIONS ---

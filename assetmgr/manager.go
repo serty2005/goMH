@@ -10,13 +10,11 @@ import (
 	"goMH/tui"
 	"html"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +32,17 @@ const (
 )
 
 type Manager struct {
-	cfg *config.Config
+	cfg     *config.Config
+	runtime runtimeHooks
+}
+
+type runtimeHooks struct {
+	stdout     io.Writer
+	progress   io.Writer
+	statusFn   func(string)
+	percentFn  func(string, int)
+	cancelFn   func(bool)
+	runtimeCtx context.Context
 }
 
 func New(cfg *config.Config) (*Manager, error) {
@@ -44,12 +52,47 @@ func New(cfg *config.Config) (*Manager, error) {
 	if err := os.MkdirAll(cfg.AssetsCachePath, 0755); err != nil {
 		return nil, fmt.Errorf("не удалось создать директорию кэша %s: %w", cfg.AssetsCachePath, err)
 	}
-	return &Manager{cfg: cfg}, nil
+	return &Manager{
+		cfg: cfg,
+		runtime: runtimeHooks{
+			stdout:   os.Stdout,
+			progress: os.Stderr,
+		},
+	}, nil
 }
 
 // Cfg предоставляет доступ к конфигурации из других пакетов.
 func (m *Manager) Cfg() *config.Config {
 	return m.cfg
+}
+
+func (m *Manager) WithTaskRuntime(stdout io.Writer, progress io.Writer, statusFn func(string), percentFn func(string, int), cancelFn func(bool), runtimeCtx context.Context) *Manager {
+	cloned := *m
+	cloned.runtime = runtimeHooks{
+		stdout:     stdout,
+		progress:   progress,
+		statusFn:   statusFn,
+		percentFn:  percentFn,
+		cancelFn:   cancelFn,
+		runtimeCtx: runtimeCtx,
+	}
+	if cloned.runtime.stdout == nil {
+		cloned.runtime.stdout = io.Discard
+	}
+	if cloned.runtime.progress == nil {
+		cloned.runtime.progress = io.Discard
+	}
+	if cloned.runtime.runtimeCtx == nil {
+		cloned.runtime.runtimeCtx = context.Background()
+	}
+	return &cloned
+}
+
+func (m *Manager) ConsoleWriter() io.Writer {
+	if m == nil || m.runtime.stdout == nil {
+		return io.Discard
+	}
+	return m.runtime.stdout
 }
 
 func (m *Manager) DownloadToCache(assetName string) (string, error) {
@@ -108,7 +151,7 @@ func (m *Manager) ProcessFromCache(assetName, cachePath string) error {
 		return fmt.Errorf("неизвестный тип ресурса: %s", assetInfo.Type)
 	}
 
-	fmt.Printf("Ресурс '%s' успешно обработан из кэша в '%s'.\n", assetName, finalDestPath)
+	m.consolePrintf("Ресурс '%s' успешно обработан из кэша в '%s'.\n", assetName, finalDestPath)
 	return nil
 }
 
@@ -132,7 +175,10 @@ func (m *Manager) Get(assetName string) (string, error) {
 // ftpPath - это путь на сервере, например /distr/iiko/Setup.Front.exe
 func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, localPath string) (bool, error) {
 	fileName := sanitizeProgressLabel(filepath.Base(ftpPath))
-	partPath := localPath + ".part"
+	m.setCancelable(true)
+	defer m.setCancelable(false)
+	m.reportStatus("Скачивание " + fileName)
+	m.reportProgress(fileName, 0)
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
@@ -143,392 +189,112 @@ func (m *Manager) DownloadFTPWithProgress(ftpCfg config.FTPConfig, ftpPath, loca
 		hostWithPort = fmt.Sprintf("%s:%d", ftpCfg.Host, ftpCfg.Port)
 	}
 
-	remoteSize := int64(-1)
+	c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(10*time.Second))
+	if err != nil {
+		return false, fmt.Errorf("не удалось подключиться к FTP %s: %w", hostWithPort, err)
+	}
+	defer c.Quit()
+
+	if err := c.Login(ftpCfg.User, ftpCfg.Pass); err != nil {
+		return false, fmt.Errorf("ошибка входа на FTP %s: %w", hostWithPort, err)
+	}
+
+	remoteSize, err := c.FileSize(ftpPath)
+	if err != nil {
+		m.consolePrintf("Предупреждение: не удалось получить размер файла '%s' на FTP: %v. Загрузка будет выполнена без проверки.\n", fileName, err)
+		remoteSize = -1
+	}
+
 	if fi, err := os.Stat(localPath); err == nil {
-		if err := os.Rename(localPath, partPath); err != nil {
-			return false, fmt.Errorf("не удалось подготовить файл для докачки '%s': %w", localPath, err)
+		if remoteSize > 0 && fi.Size() == remoteSize {
+			m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+			m.reportProgress(fileName, 100)
+			return true, nil
 		}
-		if fi.Size() == 0 {
-			_ = os.Remove(partPath)
-		}
+		m.consolePrintf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
 	}
 
-	var lastErr error
-	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
-		c, err := ftp.Dial(hostWithPort, ftp.DialWithTimeout(10*time.Second))
-		if err != nil {
-			lastErr = fmt.Errorf("не удалось подключиться к FTP %s: %w", hostWithPort, err)
-			if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-				break
-			}
-			time.Sleep(downloadRetryDelay * time.Duration(attempt))
-			continue
-		}
-
-		if err := c.Login(ftpCfg.User, ftpCfg.Pass); err != nil {
-			_ = c.Quit()
-			lastErr = fmt.Errorf("ошибка входа на FTP %s: %w", hostWithPort, err)
-			if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-				break
-			}
-			time.Sleep(downloadRetryDelay * time.Duration(attempt))
-			continue
-		}
-
-		if remoteSize <= 0 {
-			sz, err := c.FileSize(ftpPath)
-			if err != nil {
-				fmt.Printf("Предупреждение: не удалось получить размер файла '%s' на FTP: %v. Загрузка будет выполнена без проверки.\n", fileName, err)
-			} else {
-				remoteSize = sz
-			}
-		}
-
-		currentSize := int64(0)
-		if fi, err := os.Stat(partPath); err == nil {
-			currentSize = fi.Size()
-		}
-
-		if remoteSize > 0 {
-			if currentSize == remoteSize {
-				_ = c.Quit()
-				if err := finalizePartFile(partPath, localPath); err != nil {
-					return false, err
-				}
-				fmt.Printf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
-				return true, nil
-			}
-			if currentSize > remoteSize {
-				if err := truncateFile(partPath); err != nil {
-					_ = c.Quit()
-					return false, err
-				}
-				currentSize = 0
-			}
-		}
-
-		var resp *ftp.Response
-		if currentSize > 0 {
-			resp, err = c.RetrFrom(ftpPath, uint64(currentSize))
-			if err != nil {
-				if truncErr := truncateFile(partPath); truncErr != nil {
-					_ = c.Quit()
-					return false, truncErr
-				}
-				currentSize = 0
-				resp, err = c.Retr(ftpPath)
-			}
-		} else {
-			resp, err = c.Retr(ftpPath)
-		}
-		if err != nil {
-			_ = c.Quit()
-			lastErr = fmt.Errorf("не удалось начать скачивание с FTP: %w", err)
-			if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-				break
-			}
-			time.Sleep(downloadRetryDelay * time.Duration(attempt))
-			continue
-		}
-
-		flags := os.O_CREATE | os.O_WRONLY
-		if currentSize > 0 {
-			flags |= os.O_APPEND
-		} else {
-			flags |= os.O_TRUNC
-		}
-		destFile, err := os.OpenFile(partPath, flags, 0644)
-		if err != nil {
-			resp.Close()
-			_ = c.Quit()
-			return false, fmt.Errorf("не удалось открыть локальный файл для записи: %w", err)
-		}
-
-		bar := CreateProgressBar(remoteSize, fileName)
-		if currentSize > 0 {
-			_ = bar.Add64(currentSize)
-		}
-		written, copyErr := io.Copy(io.MultiWriter(destFile, bar), resp)
-
-		closeErr := destFile.Close()
-		respCloseErr := resp.Close()
-		quitErr := c.Quit()
-
-		if copyErr != nil {
-			lastErr = fmt.Errorf("ошибка во время копирования потока FTP: %w", copyErr)
-		} else if closeErr != nil {
-			lastErr = closeErr
-		} else if respCloseErr != nil {
-			lastErr = respCloseErr
-		} else if quitErr != nil {
-			lastErr = quitErr
-		} else {
-			totalWritten := currentSize + written
-			if remoteSize > 0 && totalWritten < remoteSize {
-				lastErr = io.ErrUnexpectedEOF
-			} else {
-				if err := finalizePartFile(partPath, localPath); err != nil {
-					return false, err
-				}
-				return false, nil
-			}
-		}
-
-		if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-			break
-		}
-		time.Sleep(downloadRetryDelay * time.Duration(attempt))
+	resp, err := c.Retr(ftpPath)
+	if err != nil {
+		return false, fmt.Errorf("не удалось начать скачивание с FTP: %w", err)
 	}
+	defer resp.Close()
+	m.cancelFTPDownload(c, resp)
 
-	return false, fmt.Errorf("ошибка скачивания FTP '%s' после %d попыток: %w", fileName, downloadMaxAttempts, lastErr)
+	destFile, err := os.Create(localPath)
+	if err != nil {
+		return false, fmt.Errorf("не удалось создать локальный файл: %w", err)
+	}
+	defer destFile.Close()
+
+	bar := m.createProgressBar(remoteSize, fileName)
+	tracker := newProgressTracker(remoteSize, fileName)
+	tracker.report = m.reportProgress
+	reader := m.wrapDownloadReader(resp)
+	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
+		os.Remove(localPath)
+		return false, fmt.Errorf("ошибка во время копирования потока: %w", err)
+	}
+	m.reportProgress(fileName, 100)
+
+	return false, nil
 }
 
 // DownloadHTTPWithProgress скачивает файл по HTTP с проверкой размера и прогресс-баром.
 func (m *Manager) DownloadHTTPWithProgress(httpURL, localPath string) (bool, error) {
 	fileName := sanitizeProgressLabel(filepath.Base(httpURL))
-	partPath := localPath + ".part"
+	m.setCancelable(true)
+	defer m.setCancelable(false)
+	m.reportStatus("Скачивание " + fileName)
+	m.reportProgress(fileName, 0)
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return false, fmt.Errorf("не удалось создать директорию %s: %w", filepath.Dir(localPath), err)
 	}
 
-	client := &http.Client{Timeout: 90 * time.Second}
-	remoteSize, _ := probeHTTPRemoteSize(client, httpURL)
-	if fi, err := os.Stat(localPath); err == nil {
-		if remoteSize > 0 && fi.Size() == remoteSize {
-			fmt.Printf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
-			return true, nil
-		}
-		if err := os.Rename(localPath, partPath); err != nil {
-			return false, fmt.Errorf("не удалось подготовить файл для докачки '%s': %w", localPath, err)
-		}
-		if fi.Size() == 0 {
-			_ = os.Remove(partPath)
-		}
-	}
-
-	var lastErr error
-	for attempt := 1; attempt <= downloadMaxAttempts; attempt++ {
-		currentSize := int64(0)
-		if fi, err := os.Stat(partPath); err == nil {
-			currentSize = fi.Size()
-		}
-
-		if remoteSize > 0 {
-			if currentSize == remoteSize {
-				if err := finalizePartFile(partPath, localPath); err != nil {
-					return false, err
-				}
-				fmt.Printf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
-				return true, nil
-			}
-			if currentSize > remoteSize {
-				if err := truncateFile(partPath); err != nil {
-					return false, err
-				}
-				currentSize = 0
-			}
-		}
-
-		req, err := http.NewRequest(http.MethodGet, httpURL, nil)
-		if err != nil {
-			return false, err
-		}
-		if currentSize > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", currentSize))
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-				break
-			}
-			time.Sleep(downloadRetryDelay * time.Duration(attempt))
-			continue
-		}
-
-		if currentSize > 0 && resp.StatusCode == http.StatusOK {
-			resp.Body.Close()
-			if err := truncateFile(partPath); err != nil {
-				return false, err
-			}
-			currentSize = 0
-			req, err = http.NewRequest(http.MethodGet, httpURL, nil)
-			if err != nil {
-				return false, err
-			}
-			resp, err = client.Do(req)
-			if err != nil {
-				lastErr = err
-				if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-					break
-				}
-				time.Sleep(downloadRetryDelay * time.Duration(attempt))
-				continue
-			}
-		}
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			resp.Body.Close()
-			lastErr = fmt.Errorf("bad status: %s (%s)", resp.Status, strings.TrimSpace(string(bodyPreview)))
-			if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-				break
-			}
-			time.Sleep(downloadRetryDelay * time.Duration(attempt))
-			continue
-		}
-
-		expectedTotal := remoteSize
-		if resp.StatusCode == http.StatusPartialContent {
-			totalFromRange, rangeErr := parseContentRangeTotal(resp.Header.Get("Content-Range"))
-			if rangeErr == nil && totalFromRange > 0 {
-				expectedTotal = totalFromRange
-			}
-		} else if resp.ContentLength > 0 {
-			expectedTotal = resp.ContentLength
-		}
-
-		flags := os.O_CREATE | os.O_WRONLY
-		if currentSize > 0 && resp.StatusCode == http.StatusPartialContent {
-			flags |= os.O_APPEND
-		} else {
-			flags |= os.O_TRUNC
-			currentSize = 0
-		}
-		destFile, err := os.OpenFile(partPath, flags, 0644)
-		if err != nil {
-			resp.Body.Close()
-			return false, err
-		}
-
-		bar := CreateProgressBar(expectedTotal, fileName)
-		if currentSize > 0 {
-			_ = bar.Add64(currentSize)
-		}
-
-		written, copyErr := io.Copy(io.MultiWriter(destFile, bar), resp.Body)
-		closeErr := destFile.Close()
-		respCloseErr := resp.Body.Close()
-
-		if copyErr != nil {
-			lastErr = copyErr
-		} else if closeErr != nil {
-			lastErr = closeErr
-		} else if respCloseErr != nil {
-			lastErr = respCloseErr
-		} else {
-			totalWritten := currentSize + written
-			if expectedTotal > 0 && totalWritten < expectedTotal {
-				lastErr = io.ErrUnexpectedEOF
-			} else if expectedTotal > 0 && totalWritten > expectedTotal {
-				lastErr = fmt.Errorf("получено больше данных, чем ожидалось: %d > %d", totalWritten, expectedTotal)
-			} else {
-				if err := finalizePartFile(partPath, localPath); err != nil {
-					return false, err
-				}
-				return false, nil
-			}
-		}
-
-		if !isRetriableDownloadError(lastErr) || attempt == downloadMaxAttempts {
-			break
-		}
-		time.Sleep(downloadRetryDelay * time.Duration(attempt))
-	}
-
-	return false, fmt.Errorf("ошибка скачивания HTTP '%s' после %d попыток: %w", fileName, downloadMaxAttempts, lastErr)
-}
-
-func probeHTTPRemoteSize(client *http.Client, rawURL string) (int64, error) {
-	req, err := http.NewRequest(http.MethodHead, rawURL, nil)
+	req, err := http.NewRequestWithContext(m.downloadContext(), "GET", httpURL, nil)
 	if err != nil {
-		return -1, err
+		return false, err
 	}
-	resp, err := client.Do(req)
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return -1, err
+		return false, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return -1, fmt.Errorf("head status: %s", resp.Status)
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-	if resp.ContentLength > 0 {
-		return resp.ContentLength, nil
-	}
-	return -1, nil
-}
+	remoteSize := resp.ContentLength
 
-func parseContentRangeTotal(headerVal string) (int64, error) {
-	matches := contentRangeRegex.FindStringSubmatch(strings.TrimSpace(headerVal))
-	if len(matches) != 4 {
-		return -1, fmt.Errorf("invalid Content-Range: %q", headerVal)
-	}
-	if matches[3] == "*" {
-		return -1, nil
-	}
-	total, err := strconv.ParseInt(matches[3], 10, 64)
-	if err != nil {
-		return -1, err
-	}
-	return total, nil
-}
-
-func truncateFile(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_TRUNC, 0644)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	if fi, err := os.Stat(localPath); err == nil {
+		if remoteSize > 0 && fi.Size() == remoteSize {
+			m.consolePrintf("Файл '%s' уже существует и размер совпадает. Пропускаем.\n", fileName)
+			m.reportProgress(fileName, 100)
+			return true, nil
 		}
-		return err
+		m.consolePrintf("Файл '%s' существует, но размер отличается. Перезагрузка...\n", fileName)
 	}
-	return f.Close()
-}
 
-func finalizePartFile(partPath, finalPath string) error {
-	if _, err := os.Stat(partPath); err != nil {
-		return err
+	destFile, err := os.Create(localPath)
+	if err != nil {
+		return false, err
 	}
-	_ = os.Remove(finalPath)
-	if err := os.Rename(partPath, finalPath); err != nil {
-		return fmt.Errorf("не удалось переместить временный файл '%s' в '%s': %w", partPath, finalPath, err)
-	}
-	return nil
-}
+	defer destFile.Close()
 
-func isRetriableDownloadError(err error) bool {
-	if err == nil {
-		return false
+	bar := m.createProgressBar(remoteSize, fileName)
+	tracker := newProgressTracker(remoteSize, fileName)
+	tracker.report = m.reportProgress
+	reader := m.wrapDownloadReader(resp.Body)
+	if _, err := io.Copy(io.MultiWriter(destFile, bar, tracker), reader); err != nil {
+		os.Remove(localPath)
+		return false, err
 	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	retriableSubstrings := []string{
-		"connection reset",
-		"broken pipe",
-		"timeout",
-		"temporary",
-		"unexpected eof",
-		"eof",
-		"use of closed network connection",
-		"bad gateway",
-		"service unavailable",
-		"too many requests",
-	}
-	for _, part := range retriableSubstrings {
-		if strings.Contains(msg, part) {
-			return true
-		}
-	}
-	return false
+	m.reportProgress(fileName, 100)
+
+	return false, nil
 }
 
 // UnpackToFlatDir распаковывает архив в указанную директорию,
@@ -565,17 +331,17 @@ func (m *Manager) UnpackToFlatDir(assetName, cachePath, destDir string) error {
 // --- Вспомогательные функции ---
 
 // createProgressBar создает и настраивает общий прогресс-бар для скачиваний.
-func CreateProgressBar(totalSize int64, description string) *progressbar.ProgressBar {
+func (m *Manager) createProgressBar(totalSize int64, description string) *progressbar.ProgressBar {
 	description = sanitizeProgressLabel(description)
 	return progressbar.NewOptions64(
 		totalSize,
 		progressbar.OptionSetDescription(fmt.Sprintf("Скачивание %s", description)),
-		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionSetWriter(m.progressWriter()),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(40),
 		progressbar.OptionThrottle(100*time.Millisecond),
 		progressbar.OptionShowCount(),
-		progressbar.OptionOnCompletion(func() { fmt.Fprint(os.Stderr, "\n") }),
+		progressbar.OptionOnCompletion(func() { m.consoleFprintProgress("\n") }),
 		progressbar.OptionSpinnerType(14),
 		progressbar.OptionFullWidth(),
 		progressbar.OptionClearOnFinish(),
@@ -596,6 +362,41 @@ func sanitizeProgressLabel(label string) string {
 		return string(runes[:47]) + "..."
 	}
 	return label
+}
+
+type progressTracker struct {
+	total       int64
+	written     int64
+	description string
+	lastPercent int
+	report      func(string, int)
+}
+
+func newProgressTracker(total int64, description string) *progressTracker {
+	return &progressTracker{
+		total:       total,
+		description: description,
+		lastPercent: -1,
+	}
+}
+
+func (w *progressTracker) Write(p []byte) (int, error) {
+	if w.total <= 0 {
+		return len(p), nil
+	}
+
+	w.written += int64(len(p))
+	percent := int((w.written * 100) / w.total)
+	if percent > 100 {
+		percent = 100
+	}
+	if percent != w.lastPercent {
+		w.lastPercent = percent
+		if w.report != nil {
+			w.report(w.description, percent)
+		}
+	}
+	return len(p), nil
 }
 
 func (m *Manager) ListFTP(ftpCfg config.FTPConfig, path string) ([]core.FTPEntry, error) {
@@ -830,10 +631,10 @@ func (m *Manager) PurgeAsset(assetName string) error {
 	fileName := filepath.Base(assetInfo.URL)
 	localCachePath := filepath.Join(m.cfg.AssetsCachePath, fileName)
 	if _, err := os.Stat(localCachePath); err == nil {
-		fmt.Printf("Удаление файла из кэша: %s\n", localCachePath)
+		m.consolePrintf("Удаление файла из кэша: %s\n", localCachePath)
 		if err := os.Remove(localCachePath); err != nil {
 			// Не критичная ошибка, просто предупреждаем
-			fmt.Printf("Предупреждение: не удалось удалить файл из кэша %s: %v\n", localCachePath, err)
+			m.consolePrintf("Предупреждение: не удалось удалить файл из кэша %s: %v\n", localCachePath, err)
 		}
 	}
 
@@ -841,13 +642,96 @@ func (m *Manager) PurgeAsset(assetName string) error {
 	if assetInfo.Destination != "" {
 		finalDestPath := filepath.Join(m.cfg.RootPath, assetInfo.Destination)
 		if _, err := os.Stat(finalDestPath); err == nil {
-			fmt.Printf("Удаление директории назначения: %s\n", finalDestPath)
+			m.consolePrintf("Удаление директории назначения: %s\n", finalDestPath)
 			if err := os.RemoveAll(finalDestPath); err != nil {
 				// Тоже не критично, но нужно предупредить
-				fmt.Printf("Предупреждение: не удалось удалить директорию назначения %s: %v\n", finalDestPath, err)
+				m.consolePrintf("Предупреждение: не удалось удалить директорию назначения %s: %v\n", finalDestPath, err)
 			}
 		}
 	}
 
 	return nil
+}
+
+func (m *Manager) consolePrintf(format string, args ...interface{}) {
+	writer := m.runtime.stdout
+	if writer == nil {
+		writer = io.Discard
+	}
+	fmt.Fprintf(writer, format, args...)
+}
+
+func (m *Manager) consoleFprintProgress(text string) {
+	writer := m.runtime.progress
+	if writer == nil {
+		writer = io.Discard
+	}
+	fmt.Fprint(writer, text)
+}
+
+func (m *Manager) progressWriter() io.Writer {
+	if m.runtime.progress == nil {
+		return io.Discard
+	}
+	return m.runtime.progress
+}
+
+func (m *Manager) reportStatus(text string) {
+	if m.runtime.statusFn != nil {
+		m.runtime.statusFn(text)
+	}
+}
+
+func (m *Manager) reportProgress(description string, percent int) {
+	if m.runtime.percentFn != nil {
+		m.runtime.percentFn(description, percent)
+	}
+}
+
+func (m *Manager) setCancelable(enabled bool) {
+	if m.runtime.cancelFn != nil {
+		m.runtime.cancelFn(enabled)
+	}
+}
+
+func (m *Manager) downloadContext() context.Context {
+	if m.runtime.runtimeCtx == nil {
+		return context.Background()
+	}
+	return m.runtime.runtimeCtx
+}
+
+func (m *Manager) wrapDownloadReader(reader io.Reader) io.Reader {
+	return &downloadReader{
+		ctx:    m.downloadContext(),
+		reader: reader,
+	}
+}
+
+func (m *Manager) cancelFTPDownload(conn *ftp.ServerConn, reader io.Closer) {
+	if m.runtime.runtimeCtx == nil {
+		return
+	}
+	ctx := m.runtime.runtimeCtx
+	go func() {
+		<-ctx.Done()
+		_ = reader.Close()
+		_ = conn.Quit()
+	}()
+}
+
+type downloadReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *downloadReader) Read(p []byte) (int, error) {
+	if r.ctx != nil {
+		select {
+		case <-r.ctx.Done():
+			return 0, r.ctx.Err()
+		default:
+		}
+	}
+	return r.reader.Read(p)
 }

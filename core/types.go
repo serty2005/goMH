@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"goMH/config"
 
 	"golang.org/x/sys/windows/registry"
@@ -8,6 +9,7 @@ import (
 
 // TaskContext определяет методы для взаимодействия логики с интерфейсом (CLI или GUI).
 type TaskContext interface {
+	Context() context.Context
 	Info(msg string)
 	Warn(msg string)
 	Error(msg string)
@@ -16,6 +18,8 @@ type TaskContext interface {
 	SetStatus(text string)
 	// SetProgress устанавливает процент выполнения (0-100). -1 для неопределенного прогресса.
 	SetProgress(percent int)
+	// SetCancelable переключает доступность безопасной отмены для текущего этапа задачи.
+	SetCancelable(enabled bool)
 }
 
 // ScannerInfo содержит информацию о найденном устройстве-сканере.
@@ -77,11 +81,75 @@ type AssetManager interface {
 	Cfg() *config.Config
 }
 
-// Installer — это единый интерфейс для всех устанавливаемых модулей.
+// Installer — базовый интерфейс модуля приложения.
 type Installer interface {
 	ID() string
 	MenuText() string
 	Run(am AssetManager, wu WinUtils) error
+}
+
+// ModuleServices объединяет зависимости, доступные модулям на уровне приложения.
+type ModuleServices struct {
+	AssetManager AssetManager
+	WinUtils     WinUtils
+}
+
+// ModuleTaskSpec описывает задачу, которую модуль хочет поставить в очередь.
+type ModuleTaskSpec struct {
+	Title     string
+	Signature string
+	Exclusive bool
+}
+
+type ModuleRunMode int
+
+const (
+	ModuleRunModeQueue ModuleRunMode = iota
+	ModuleRunModeImmediate
+)
+
+// ModuleActionResult описывает результат постановки задачи или немедленного действия.
+type ModuleActionResult struct {
+	Note       string
+	TaskID     string
+	SelectTask bool
+}
+
+// TaskConfirmation описывает сводку параметров перед запуском действия.
+type TaskConfirmation struct {
+	Details      []string
+	ConfirmLabel string
+}
+
+// TaskConfirmationProvider позволяет конфигу вернуть сводку параметров для финального подтверждения.
+type TaskConfirmationProvider interface {
+	TaskConfirmation() TaskConfirmation
+}
+
+// LiveLogViewer позволяет интерфейсу перехватить запуск live-просмотра лога
+// и показать его во встроенной панели вместо прямого вывода в консоль.
+type LiveLogViewer interface {
+	OpenLiveLog(filePath string) error
+}
+
+// ModuleTaskPlan описывает, как модуль должен быть выполнен после конфигурации.
+type ModuleTaskPlan struct {
+	Mode   ModuleRunMode
+	Task   ModuleTaskSpec
+	Result ModuleActionResult
+}
+
+// QueueModule описывает единый контракт модуля для конфигурации, сборки task spec и выполнения.
+type QueueModule interface {
+	Installer
+	ConfigureTask(ctx TaskContext, services ModuleServices) (any, error)
+	BuildTask(config any) (ModuleTaskPlan, error)
+	ExecuteTask(ctx TaskContext, services ModuleServices, config any) error
+}
+
+// ImmediateModuleAction позволяет модулю выполнить особое действие без постановки в очередь.
+type ImmediateModuleAction interface {
+	ExecuteImmediate(ctx TaskContext, services ModuleServices, config any) (ModuleActionResult, error)
 }
 
 type FTPEntry struct {

@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -22,6 +23,10 @@ func NewGuiContext(mw *walk.MainWindow, logText *walk.TextEdit, status *walk.Sta
 		statusBar: status,
 		progress:  progress,
 	}
+}
+
+func (c *GuiContext) Context() context.Context {
+	return context.Background()
 }
 
 func (c *GuiContext) appendLog(prefix, msg string) {
@@ -75,39 +80,4 @@ func (c *GuiContext) SetProgress(percent int) {
 	})
 }
 
-// TaskGuiContext is created per task and forwards telemetry to TaskManager.
-type TaskGuiContext struct {
-	tm     *TaskManager
-	taskID string
-	module string
-}
-
-func (c *TaskGuiContext) log(level, msg string) {
-	line := fmt.Sprintf("[%s][%s][%s][%s] %s", time.Now().Format("15:04:05"), c.module, c.taskID, level, msg)
-	c.tm.appendLog(c.taskID, line)
-}
-
-func (c *TaskGuiContext) Info(msg string) {
-	c.log("INFO", msg)
-}
-
-func (c *TaskGuiContext) Warn(msg string) {
-	c.log("WARN", msg)
-}
-
-func (c *TaskGuiContext) Error(msg string) {
-	c.log("ERROR", msg)
-}
-
-func (c *TaskGuiContext) Success(msg string) {
-	c.log("SUCCESS", msg)
-}
-
-func (c *TaskGuiContext) SetStatus(text string) {
-	c.tm.updateStatus(c.taskID, text)
-	c.log("STAGE", text)
-}
-
-func (c *TaskGuiContext) SetProgress(percent int) {
-	c.tm.updateProgress(c.taskID, percent)
-}
+func (c *GuiContext) SetCancelable(bool) {}

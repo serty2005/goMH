@@ -59,7 +59,11 @@ func RunCommandWithEnv(env map[string]string, name string, args ...string) (stri
 
 // CreateScheduledTask создает или обновляет задачу в Планировщике Windows через импорт XML.
 func CreateScheduledTask(taskName, executablePath, arguments, workingDir string) error {
-	fmt.Printf("Создание/обновление задачи '%s' через XML...\n", taskName)
+	return NewRuntime().CreateScheduledTask(taskName, executablePath, arguments, workingDir)
+}
+
+func (r *Runtime) CreateScheduledTask(taskName, executablePath, arguments, workingDir string) error {
+	r.printf("Создание/обновление задачи '%s' через XML...\n", taskName)
 
 	// 1. Генерируем XML-содержимое для задачи
 	xmlContent, err := generateTaskXML(taskName, executablePath, arguments, workingDir)
@@ -93,7 +97,7 @@ func CreateScheduledTask(taskName, executablePath, arguments, workingDir string)
 		return fmt.Errorf("не удалось создать задачу из XML: %w", err)
 	}
 
-	fmt.Printf("Задача '%s' успешно создана/обновлена. Вывод schtasks: %s\n", taskName, output)
+	r.printf("Задача '%s' успешно создана/обновлена. Вывод schtasks: %s\n", taskName, output)
 	return nil
 }
 
@@ -233,29 +237,37 @@ func IsProcessRunning(processName string) (bool, error) {
 }
 
 func ManageService(action, serviceName string) error {
+	return NewRuntime().ManageService(action, serviceName)
+}
+
+func (r *Runtime) ManageService(action, serviceName string) error {
 	_, err := RunCommand("sc.exe", action, serviceName)
 	if err != nil {
 		// Ошибки от sc.exe часто не являются критичными (например, попытка остановить уже остановленную службу).
 		// Мы просто логируем их как предупреждение.
-		fmt.Printf("Предупреждение при выполнении 'sc %s %s': %v\n", action, serviceName, err)
+		r.printf("Предупреждение при выполнении 'sc %s %s': %v\n", action, serviceName, err)
 		// Возвращаем nil, чтобы не прерывать выполнение скрипта.
 		return nil
 	}
-	fmt.Printf("Команда 'sc %s %s' выполнена.\n", action, serviceName)
+	r.printf("Команда 'sc %s %s' выполнена.\n", action, serviceName)
 	return nil
 }
 
 func AddDefenderExclusion(path string) error {
+	return NewRuntime().AddDefenderExclusion(path)
+}
+
+func (r *Runtime) AddDefenderExclusion(path string) error {
 	// Эта команда PowerShell требует запуска от имени администратора.
 	powerShellCommand := fmt.Sprintf("Add-MpPreference -ExclusionPath '%s'", path)
 	_, err := RunCommand("powershell", "-NoProfile", "-Command", powerShellCommand)
 	if err != nil {
 		// Ошибка может означать, что Defender не активен, или исключение уже существует.
 		// Логируем как предупреждение.
-		fmt.Printf("Предупреждение при добавлении исключения для Defender: %v\n", err)
+		r.printf("Предупреждение при добавлении исключения для Defender: %v\n", err)
 		return nil
 	}
-	fmt.Printf("Путь '%s' добавлен в исключения Defender (или уже был там).\n", path)
+	r.printf("Путь '%s' добавлен в исключения Defender (или уже был там).\n", path)
 	return nil
 }
 
@@ -290,6 +302,10 @@ func ServiceExists(serviceName string) (bool, error) {
 // SetServiceTriggers устанавливает триггеры запуска для службы Windows.
 // triggers - это слайс строк, например ["start/machinepolicy", "start/userpolicy"]
 func SetServiceTriggers(serviceName string, triggers []string) error {
+	return NewRuntime().SetServiceTriggers(serviceName, triggers)
+}
+
+func (r *Runtime) SetServiceTriggers(serviceName string, triggers []string) error {
 	args := []string{"triggerinfo", serviceName}
 	args = append(args, triggers...)
 
@@ -298,7 +314,7 @@ func SetServiceTriggers(serviceName string, triggers []string) error {
 		// Ошибка здесь может быть критичной, поэтому возвращаем ее.
 		return fmt.Errorf("не удалось установить триггеры для службы '%s': %s. Ошибка: %w", serviceName, output, err)
 	}
-	fmt.Printf("Триггеры для службы '%s' успешно установлены.\n", serviceName)
+	r.printf("Триггеры для службы '%s' успешно установлены.\n", serviceName)
 	return nil
 }
 
@@ -742,7 +758,11 @@ func ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, erro
 
 // UninstallSystemApp ищет приложение в реестре по части имени и запускает его деинсталлятор.
 func UninstallSystemApp(partialName string) error {
-	fmt.Printf("Поиск системного деинсталлятора для: '%s'...\n", partialName)
+	return NewRuntime().UninstallSystemApp(partialName)
+}
+
+func (r *Runtime) UninstallSystemApp(partialName string) error {
+	r.printf("Поиск системного деинсталлятора для: '%s'...\n", partialName)
 
 	// Пути к веткам деинсталляции (x64 и x86)
 	uninstallPaths := []string{
@@ -792,7 +812,7 @@ func UninstallSystemApp(partialName string) error {
 	return fmt.Errorf("приложение с именем, содержащим '%s', не найдено в установленных программах", partialName)
 
 Found:
-	fmt.Printf("Найдено приложение: %s\n", foundName)
+	r.printf("Найдено приложение: %s\n", foundName)
 
 	// Приоритет 1: QuietUninstallString (обычно уже содержит тихие ключи)
 	finalCommand := quietUninstallString
@@ -815,7 +835,7 @@ Found:
 		return fmt.Errorf("строка деинсталляции для '%s' пуста", foundName)
 	}
 
-	fmt.Printf("Запуск команды удаления: %s\n", finalCommand)
+	r.printf("Запуск команды удаления: %s\n", finalCommand)
 
 	// Парсинг команды (простой, разделяем по пробелам, учитывая кавычки)
 	// Для надежности лучше использовать cmd /C, чтобы винда сама разобрала строку
@@ -843,7 +863,11 @@ func ExtractArchive(archivePath, destDir string, fullPaths bool) error {
 // CreateShortcut создает ярлык (.lnk) через PowerShell.
 // Мы формируем скрипт целиком внутри Go, чтобы избежать проблем с передачей аргументов с пробелами.
 func CreateShortcut(targetPath, shortcutPath, arguments string) error {
-	fmt.Printf("Создание ярлыка:\n  Цель: %s\n  Путь: %s\n  Аргументы: %s\n", targetPath, shortcutPath, arguments)
+	return NewRuntime().CreateShortcut(targetPath, shortcutPath, arguments)
+}
+
+func (r *Runtime) CreateShortcut(targetPath, shortcutPath, arguments string) error {
+	r.printf("Создание ярлыка:\n  Цель: %s\n  Путь: %s\n  Аргументы: %s\n", targetPath, shortcutPath, arguments)
 
 	// Экранируем одиночные кавычки (для PowerShell ' заменяется на '')
 	safeTarget := strings.ReplaceAll(targetPath, "'", "''")
@@ -878,10 +902,14 @@ func CreateShortcut(targetPath, shortcutPath, arguments string) error {
 
 // SetConsoleSize задает размер окна консоли (колонки и строки).
 func SetConsoleSize(cols, lines int) error {
+	return NewRuntime().SetConsoleSize(cols, lines)
+}
+
+func (r *Runtime) SetConsoleSize(cols, lines int) error {
 	// Формируем команду "mode con cols=XX lines=YY"
 	cmd := exec.Command("mode", "con", fmt.Sprintf("cols=%d", cols), fmt.Sprintf("lines=%d", lines))
 	// Направляем вывод в текущую консоль, чтобы команда применилась к ней
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = r.stdoutWriter()
+	cmd.Stderr = r.stderrWriter()
 	return cmd.Run()
 }

@@ -2,15 +2,13 @@
 	"root_path": "C:\\MH",
 	"assets_cache_path": "C:\\MH\\_assets",
 	"log_level": "debug",
+	"logging": {
+		"level": "debug",
+		"file_enabled": true
+	},
 	"ftp_config": [
 		{
 			"host": "ftp.serty.top",
-			"port": 21,
-			"user": "ftpuser",
-			"pass": "11"
-		},
-		{
-			"host": "176.98.191.43",
 			"port": 21,
 			"user": "ftpuser",
 			"pass": "11"

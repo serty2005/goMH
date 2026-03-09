@@ -3,7 +3,6 @@
 package vcomcaster
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"goMH/core"
@@ -13,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -44,10 +42,72 @@ type VComCasterConfig struct {
 	InstallPath     string           // Куда ставить (C:\MH\vcomcaster)
 }
 
+func (cfg *VComCasterConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	details := []string{"Действие: " + cfg.actionLabel()}
+	if cfg.Action != ActionUninstall {
+		details = append(details,
+			"Сканер: "+cfg.SelectedScanner.Caption,
+			"VID/PID: "+cfg.ScannerDeviceID,
+			"Путь установки: "+cfg.InstallPath,
+		)
+	}
+
+	return core.TaskConfirmation{
+		Details:      details,
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 type Module struct{}
 
 func (m *Module) ID() string       { return "VComCaster" }
 func (m *Module) MenuText() string { return "VComCaster (для сканера штрих-кодов)" }
+
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager, services.WinUtils)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	title := "VComCaster"
+	signature := "vcomcaster|generic"
+	switch cfg.Action {
+	case ActionInstall:
+		title = fmt.Sprintf("VComCaster: установка для %s", cfg.SelectedScanner.Caption)
+		signature = fmt.Sprintf("vcomcaster|install|%s", cfg.ScannerDeviceID)
+	case ActionReinstall:
+		title = fmt.Sprintf("VComCaster: переустановка для %s", cfg.SelectedScanner.Caption)
+		signature = fmt.Sprintf("vcomcaster|reinstall|%s", cfg.ScannerDeviceID)
+	case ActionUninstall:
+		title = "VComCaster: удаление"
+		signature = "vcomcaster|uninstall"
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     title,
+			Signature: signature,
+			Exclusive: cfg.Action == ActionInstall || cfg.Action == ActionReinstall || cfg.Action == ActionUninstall,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+}
 
 // Run - точка входа (UI слой). Здесь мы общаемся с пользователем.
 func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
@@ -83,6 +143,19 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 	return m.configureInstall(wu, vcomcasterBaseDir)
 }
 
+func (cfg *VComCasterConfig) actionLabel() string {
+	switch cfg.Action {
+	case ActionInstall:
+		return "Установка"
+	case ActionReinstall:
+		return "Переустановка"
+	case ActionUninstall:
+		return "Удаление"
+	default:
+		return "Неизвестно"
+	}
+}
+
 // Execute выполняет задачу на основе подготовленного конфига.
 func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *VComCasterConfig) error {
 	switch cfg.Action {
@@ -100,13 +173,17 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	}
 }
 
+func (m *Module) taskConfig(config any) (*VComCasterConfig, error) {
+	cfg, ok := config.(*VComCasterConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
+}
+
 // --- CONFIGURATION HELPERS ---
 
 func (m *Module) configureInstall(wu core.WinUtils, installPath string) (*VComCasterConfig, error) {
-	tui.Title("\n--- Настройка установки VComCaster ---")
-
-	// 1. Поиск сканеров
-	tui.Info("Поиск подключенных сканеров...")
 	scanners, err := wu.GetScanners()
 	if err != nil {
 		return nil, fmt.Errorf("ошибка при поиске сканеров: %w", err)
@@ -115,39 +192,31 @@ func (m *Module) configureInstall(wu core.WinUtils, installPath string) (*VComCa
 		return nil, errors.New("не найдено ни одного USB-сканера. Проверьте подключение")
 	}
 
-	// 2. Меню выбора
-	tui.Title("\n--- Найдены следующие устройства ---")
-	for i, scanner := range scanners {
+	items := make([]tui.ChoiceItem, 0, len(scanners))
+	for _, scanner := range scanners {
 		portInCaption := fmt.Sprintf("(%s)", scanner.Port)
+		title := scanner.Caption
 		if strings.Contains(scanner.Caption, portInCaption) {
-			fmt.Printf(" %d. %s\n", i+1, scanner.Caption)
+			title = scanner.Caption
 		} else {
-			fmt.Printf(" %d. %s (%s)\n", i+1, scanner.Caption, scanner.Port)
+			title = fmt.Sprintf("%s (%s)", scanner.Caption, scanner.Port)
 		}
-	}
-	fmt.Println("\n 0. Отмена")
-	fmt.Print("Выберите номер вашего сканера: ")
-
-	reader := bufio.NewReader(os.Stdin)
-	choiceStr, _ := reader.ReadString('\n')
-	choiceStr = strings.TrimSpace(choiceStr)
-
-	if choiceStr == "0" {
-		return nil, nil // Отмена
+		items = append(items, tui.ChoiceItem{Title: title, Meta: scanner.Port})
 	}
 
-	choice, err := strconv.Atoi(choiceStr)
-	if err != nil || choice < 1 || choice > len(scanners) {
-		return nil, errors.New("неверный выбор")
+	choice, err := tui.SelectItem(items, tui.SelectionConfig{
+		Title:    "Выберите USB-сканер",
+		Subtitle: "Esc для отмены",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if choice < 0 || choice >= len(scanners) {
+		return nil, nil
 	}
 
-	selectedScanner := scanners[choice-1]
+	selectedScanner := scanners[choice]
 	deviceID := extractDeviceID(selectedScanner.PNPDeviceID)
-
-	tui.SuccessF("Выбран: %s (%s)", selectedScanner.Caption, selectedScanner.Port)
-	if deviceID == "" {
-		tui.Warn("VID/PID не определен, конфиг будет неполным.")
-	}
 
 	return &VComCasterConfig{
 		Action:          ActionInstall,
@@ -158,7 +227,6 @@ func (m *Module) configureInstall(wu core.WinUtils, installPath string) (*VComCa
 }
 
 func (m *Module) configureDiagnostics(wu core.WinUtils, baseDir string) (*VComCasterConfig, error) {
-	// Простая диагностика для вывода пользователю
 	var problems []string
 	configPath := filepath.Join(baseDir, "config.ini")
 	if _, err := os.Stat(configPath); err != nil {
@@ -168,43 +236,35 @@ func (m *Module) configureDiagnostics(wu core.WinUtils, baseDir string) (*VComCa
 		problems = append(problems, fmt.Sprintf("x Задача '%s' не найдена.", taskName))
 	}
 
+	subtitle := "Проблем не обнаружено."
 	if len(problems) > 0 {
-		tui.Warn("\n[ДИАГНОСТИКА] Найдены проблемы:")
-		for _, p := range problems {
-			tui.Warn(p)
-		}
-	} else {
-		tui.Success("\n[ДИАГНОСТИКА] Проблем не обнаружено.")
+		subtitle = strings.Join(problems, "\n")
 	}
 
-	fmt.Println("\nВыберите действие:")
-	fmt.Println(" 1. Полностью удалить VComCaster")
-	fmt.Println(" 2. Переустановить (Удаление + Установка)")
-	fmt.Println(" 0. Назад")
-	fmt.Print("Ваш выбор: ")
-
-	reader := bufio.NewReader(os.Stdin)
-	choice, _ := reader.ReadString('\n')
-	choice = strings.TrimSpace(choice)
-
+	choice, err := tui.SelectItem([]tui.ChoiceItem{
+		{Title: "Удалить", Description: "Полностью удалить VComCaster"},
+		{Title: "Переустановить", Description: "Удалить и настроить заново"},
+	}, tui.SelectionConfig{
+		Title:    "VComCaster уже установлен",
+		Subtitle: subtitle,
+	})
+	if err != nil {
+		return nil, err
+	}
 	switch choice {
-	case "1":
+	case 0:
 		return &VComCasterConfig{Action: ActionUninstall, InstallPath: baseDir}, nil
-	case "2":
-		// Для переустановки нам нужно снова выбрать сканер, так как конфиг будет пересоздан
-		tui.Info("Для переустановки необходимо заново выбрать сканер.")
+	case 1:
 		cfg, err := m.configureInstall(wu, baseDir)
 		if err != nil {
 			return nil, err
 		}
 		if cfg != nil {
-			cfg.Action = ActionReinstall // Переопределяем действие на Reinstall
+			cfg.Action = ActionReinstall
 		}
 		return cfg, nil
-	case "0":
-		return nil, nil
 	default:
-		return nil, errors.New("неверный выбор")
+		return nil, nil
 	}
 }
 

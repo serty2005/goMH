@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -21,12 +20,54 @@ type DriverInstallConfig struct {
 	Driver config.FiscalDriver
 }
 
+func (cfg *DriverInstallConfig) TaskConfirmation() core.TaskConfirmation {
+	if cfg == nil {
+		return core.TaskConfirmation{}
+	}
+
+	return core.TaskConfirmation{
+		Details: []string{
+			"Драйвер: " + cfg.Driver.MenuText,
+			"Идентификатор: " + cfg.Driver.ID,
+		},
+		ConfirmLabel: "Добавить в очередь",
+	}
+}
+
 func (m *Module) ID() string {
 	return "FiscalDrivers"
 }
 
 func (m *Module) MenuText() string {
 	return "Установка драйверов фискальных регистраторов"
+}
+
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services.AssetManager)
+}
+
+func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return core.ModuleTaskPlan{}, err
+	}
+
+	return core.ModuleTaskPlan{
+		Mode: core.ModuleRunModeQueue,
+		Task: core.ModuleTaskSpec{
+			Title:     "Установка драйвера: " + cfg.Driver.MenuText,
+			Signature: "fiscal|" + cfg.Driver.ID,
+			Exclusive: true,
+		},
+	}, nil
+}
+
+func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices, config any) error {
+	cfg, err := m.taskConfig(config)
+	if err != nil {
+		return err
+	}
+	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
 }
 
 // Run - точка входа (UI слой)
@@ -60,32 +101,28 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager) (*DriverI
 		return nil, errors.New("в конфигурации не определено ни одного драйвера")
 	}
 
-	for {
-		tui.ClearScreen()
-		tui.Title("\n--- Выберите драйвер для установки ---")
-		for i, driver := range drivers {
-			fmt.Printf(" %d. %s\n", i+1, driver.MenuText)
-		}
-		fmt.Println("\n 0. Назад")
-		fmt.Print("Выберите пункт: ")
-
-		key, err := tui.ReadKey()
-		if err != nil {
-			return nil, err
-		}
-		if key == "0" {
-			return nil, nil // Назад
-		}
-
-		choice, err := strconv.Atoi(key)
-		if err != nil || choice < 1 || choice > len(drivers) {
-			continue // Игнорируем неверный ввод
-		}
-
-		selected := drivers[choice-1]
-		slog.Info("Пользователь выбрал драйвер", "name", selected.MenuText, "id", selected.ID)
-		return &DriverInstallConfig{Driver: selected}, nil
+	items := make([]tui.ChoiceItem, 0, len(drivers))
+	for _, driver := range drivers {
+		items = append(items, tui.ChoiceItem{
+			Title: driver.MenuText,
+			Meta:  driver.ID,
+		})
 	}
+
+	choice, err := tui.SelectItem(items, tui.SelectionConfig{
+		Title:    "Выберите драйвер",
+		Subtitle: "Esc для возврата в меню",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if choice < 0 || choice >= len(drivers) {
+		return nil, nil
+	}
+
+	selected := drivers[choice]
+	slog.Info("Пользователь выбрал драйвер", "name", selected.MenuText, "id", selected.ID)
+	return &DriverInstallConfig{Driver: selected}, nil
 }
 
 // Execute - скачивание и установка (фоновый процесс)
@@ -130,6 +167,14 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	ctx.Success("Драйвер успешно установлен.")
 	slog.Info("Установка драйвера завершена успешно")
 	return nil
+}
+
+func (m *Module) taskConfig(config any) (*DriverInstallConfig, error) {
+	cfg, ok := config.(*DriverInstallConfig)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+	}
+	return cfg, nil
 }
 
 // uninstallExistingDrivers ищет и удаляет драйверы Штрих/Ритейл по стандартным путям.

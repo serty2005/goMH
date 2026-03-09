@@ -1,13 +1,14 @@
 package gui
 
 import (
+	"goMH/app/modruntime"
 	"goMH/core"
 
 	"github.com/lxn/walk"
 )
 
 // ModuleFormFactory - функция, создающая виджет настроек модуля.
-type ModuleFormFactory func(parent walk.Container, am core.AssetManager, wu core.WinUtils, tm *TaskManager, ctx *GuiContext) (walk.Widget, error)
+type ModuleFormFactory func(parent walk.Container, am core.AssetManager, wu core.WinUtils, queueService *modruntime.Service, ctx *GuiContext) (walk.Widget, error)
 
 // Registry хранит соответствие ID модуля и его формы.
 var Registry = make(map[string]ModuleFormFactory)
