@@ -99,6 +99,7 @@ type dashboardModel struct {
 	pendingTaskID  string
 	queueStarted   bool
 	logViewer      dashboardLogViewerState
+	taskLogOverlay dashboardTaskLogOverlayState
 	spinnerIndex   int
 	spinnerFrames  []string
 	titleStyle     lipgloss.Style
@@ -180,12 +181,29 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.taskLogOverlay.visible {
+			if handled, note, err := m.handleTaskLogOverlayMouse(msg); handled {
+				m.applyResult(note, err)
+			}
+			return m, nil
+		}
 		if m.busy {
 			return m, nil
 		}
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		if liveLogOverlayVisible() && handleLiveLogOverlayKey(msg, m.height) {
+			return m, nil
+		}
+		if m.taskLogOverlay.visible {
+			return m.handleTaskLogOverlayKey(msg)
+		}
+		if msg.String() == "shift+tab" && m.focus == 1 && m.currentTask() != nil {
+			m.openTaskLogOverlay(*m.currentTask())
+			m.applyResult("Полный лог задачи открыт.", nil)
+			return m, nil
+		}
 		if handleLiveLogOverlayKey(msg, m.height) {
 			return m, nil
 		}
@@ -211,6 +229,9 @@ func (m dashboardModel) View() string {
 			Text:     lipgloss.NewStyle(),
 			Muted:    m.mutedStyle,
 		})
+	}
+	if m.taskLogOverlay.visible {
+		return m.renderTaskLogOverlay()
 	}
 
 	status := m.renderStatusLine()
@@ -325,6 +346,7 @@ func runDashboardInteractive(fn func() (DashboardActionResult, error)) tea.Cmd {
 }
 
 func (m dashboardModel) handleRefresh(msg refreshMsg) (dashboardModel, tea.Cmd) {
+	m.syncTaskLogOverlay(msg.tasks)
 	currentTaskID := ""
 	if current := m.currentTask(); current != nil {
 		currentTaskID = current.Snapshot.ID
@@ -635,6 +657,9 @@ func (m dashboardModel) renderFooter() string {
 		m.keyStyle.Render("Мышь") + " выбор/клик",
 		m.keyStyle.Render("C") + " очистить",
 		m.keyStyle.Render("Q") + " выход",
+	}
+	if m.focus == 1 && m.currentTask() != nil {
+		secondLine = append(secondLine, m.keyStyle.Render("Shift+Tab")+" весь лог")
 	}
 	lines := []string{
 		helpStyle.Render(strings.Join(firstLine, "   ")),

@@ -445,6 +445,10 @@ func (q *Queue) updateStatus(taskID, status string) {
 		q.mu.Unlock()
 		return
 	}
+	if rec.snapshot.StageText == status {
+		q.mu.Unlock()
+		return
+	}
 
 	now := time.Now()
 	line := fmt.Sprintf("[%s] [STAGE] %s", now.Format("15:04:05"), status)

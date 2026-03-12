@@ -355,6 +355,14 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 		}
 	}
 
+	if cfg.Component.RunAfter != "" {
+		ctx.Info(fmt.Sprintf("Запуск приложения: %s", cfg.Component.RunAfter))
+		if err := startConfiguredExecutable(wu, cfg.Component.RunAfter); err != nil {
+			return err
+		}
+		ctx.Success("Приложение запущено.")
+	}
+
 	ctx.Success("Установка завершена успешно.")
 	return nil
 }

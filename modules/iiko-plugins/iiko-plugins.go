@@ -291,11 +291,11 @@ func (m *Module) AutoUpdatePlugins(ctx core.TaskContext, am core.AssetManager, w
 		slog.Info("Автообновление плагина", "name", pluginName, "version", bestPlugin.PluginVersion)
 		if err := deployPlugin(am, wu, opts); err != nil {
 			slog.Error("Ошибка автообновления", "plugin", pluginName, "error", err)
-			tui.Warn(fmt.Sprintf("Не удалось обновить %s: %v", pluginName, err))
+			logTaskWarn(ctx, "Не удалось обновить %s: %v", pluginName, err)
 			continue
 		}
 		updatedCount++
-		tui.InfoF("Автообновление: %s -> v%s OK", pluginName, bestPlugin.PluginVersion)
+		logTaskInfo(ctx, "Автообновление: %s -> v%s OK", pluginName, bestPlugin.PluginVersion)
 	}
 
 	slog.Info("Автообновление завершено", "updated_count", updatedCount)
@@ -707,6 +707,24 @@ func taskContextOrBackground(ctx core.TaskContext) context.Context {
 		return context.Background()
 	}
 	return ctx.Context()
+}
+
+func logTaskInfo(ctx core.TaskContext, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if ctx != nil {
+		ctx.Info(msg)
+		return
+	}
+	tui.Info(msg)
+}
+
+func logTaskWarn(ctx core.TaskContext, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if ctx != nil {
+		ctx.Warn(msg)
+		return
+	}
+	tui.Warn(msg)
 }
 
 func readDirectoryListing(client *http.Client, pageURL string) ([]string, []string, error) {

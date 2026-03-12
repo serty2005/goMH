@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"goMH/core"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -119,6 +120,44 @@ func TestQueueTracksFailureAndLogs(t *testing.T) {
 	}
 	if snapshots[0].LastError != "boom" {
 		t.Fatalf("unexpected last error: %s", snapshots[0].LastError)
+	}
+}
+
+func TestQueueDoesNotDuplicateStageLogForSameStatus(t *testing.T) {
+	queue := New()
+
+	snapshot, err := queue.Enqueue(TaskSpec{
+		ID:        "same-status",
+		ModuleID:  "test",
+		Title:     "same-status",
+		Signature: "same-status",
+		Run: func(ctx core.TaskContext) error {
+			ctx.SetStatus("Скачивание asset.exe")
+			ctx.SetStatus("Скачивание asset.exe")
+			ctx.SetStatus("Скачивание asset.exe")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue failed: %v", err)
+	}
+
+	summary := queue.RunPending(func(s TaskSnapshot, runtimeCtx context.Context) core.TaskContext {
+		return NewTaskContext(queue, s.ID, runtimeCtx)
+	})
+	if summary.Success != 1 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	logs := queue.Logs(snapshot.ID)
+	count := 0
+	for _, line := range logs {
+		if strings.Contains(line, "[STAGE] Скачивание asset.exe") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one stage log entry, got %d: %#v", count, logs)
 	}
 }
 

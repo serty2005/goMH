@@ -238,6 +238,57 @@ func TestDashboardShiftTabOpensGlobalLiveLogOverlay(t *testing.T) {
 	}
 }
 
+func TestDashboardShiftTabOpensTaskLogOverlayFromQueue(t *testing.T) {
+	model := newTestDashboardModel()
+	model.focus = 1
+	model.tasks = []dashboardTask{
+		{
+			Snapshot: taskqueue.TaskSnapshot{ID: "task-1", Title: "Установка iikoFront", State: taskqueue.TaskRunning},
+			Logs:     []string{"строка 1", "строка 2", "строка 3"},
+		},
+	}
+
+	updatedModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated := updatedModel.(dashboardModel)
+
+	if cmd != nil {
+		t.Fatal("открытие task-log overlay не должно запускать дополнительную команду")
+	}
+	if !updated.taskLogOverlay.visible {
+		t.Fatal("task-log overlay должен открываться по Shift+Tab из панели очереди")
+	}
+	if updated.taskLogOverlay.taskID != "task-1" {
+		t.Fatalf("overlay должен быть привязан к выбранной задаче, получено %q", updated.taskLogOverlay.taskID)
+	}
+	if len(updated.taskLogOverlay.lines) != 3 {
+		t.Fatalf("overlay должен содержать полный лог задачи, получено %d строк", len(updated.taskLogOverlay.lines))
+	}
+}
+
+func TestDashboardRefreshSyncsTaskLogOverlayLines(t *testing.T) {
+	model := newTestDashboardModel()
+	model.focus = 1
+	model.openTaskLogOverlay(dashboardTask{
+		Snapshot: taskqueue.TaskSnapshot{ID: "task-1", Title: "Установка iikoFront", State: taskqueue.TaskRunning},
+		Logs:     []string{"строка 1"},
+	})
+
+	updatedModel, _ := model.Update(refreshMsg{
+		tasks: []dashboardTask{
+			{
+				Snapshot: taskqueue.TaskSnapshot{ID: "task-1", Title: "Установка iikoFront", State: taskqueue.TaskRunning},
+				Logs:     []string{"строка 1", "строка 2", "строка 3"},
+			},
+		},
+		queueStarted: true,
+	})
+	updated := updatedModel.(dashboardModel)
+
+	if len(updated.taskLogOverlay.lines) != 3 {
+		t.Fatalf("expected synced task log lines, got %d", len(updated.taskLogOverlay.lines))
+	}
+}
+
 func newTestDashboardModel() dashboardModel {
 	return dashboardModel{
 		modules: []DashboardModule{
