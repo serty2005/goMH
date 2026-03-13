@@ -82,14 +82,9 @@ func ApplyPatch(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, pa
 	}
 
 	// 2. Скачивание
-	ext := filepath.Ext(patch.Description)
-	if ext == "" {
-		ext = ".7z"
-	}
-	fileName := patch.ShortName + ext
-	patchCachePath := filepath.Join(am.Cfg().AssetsCachePath, fileName)
+	patchArchivePath := patchCachePath(am, patch)
 
-	if _, err := am.DownloadHTTPWithProgress(patch.FullURL, patchCachePath); err != nil {
+	if _, err := am.DownloadHTTPWithProgress(patch.FullURL, patchArchivePath); err != nil {
 		return err
 	}
 
@@ -101,7 +96,7 @@ func ApplyPatch(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, pa
 	defer os.RemoveAll(stage1Dir)
 
 	ctx.Info("Распаковка основного архива...")
-	if err := sevenZip.Extract(patchCachePath, stage1Dir, true); err != nil {
+	if err := sevenZip.Extract(patchArchivePath, stage1Dir, true); err != nil {
 		return fmt.Errorf("ошибка извлечения архива: %w", err)
 	}
 

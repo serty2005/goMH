@@ -230,7 +230,7 @@ func getConfigPath(configFlag *string) (string, error) {
 // cleanupTempDir теперь ищет и удаляет папку temp как в CWD, так и в корне диска C:\MH (если задан)
 // Для упрощения мы жестко привязываемся к соглашению, что весь мусор лежит в ./temp относительно exe
 // или в C:\MH\temp, если конфиг указывает туда.
-func cleanupTempDir(rootPath string) {
+func cleanupTempDir(rootPath string, preserveRootTemp bool) {
 	// 1. Очистка temp рядом с exe (для конфигов и логов установщиков)
 	cwdTemp := filepath.Join(".", "temp")
 	if _, err := os.Stat(cwdTemp); err == nil {
@@ -243,7 +243,7 @@ func cleanupTempDir(rootPath string) {
 	}
 
 	// 2. Очистка temp в корне установки (C:\MH\temp), если он отличается
-	if rootPath != "" {
+	if rootPath != "" && !preserveRootTemp {
 		rootTemp := filepath.Join(rootPath, "temp")
 		absCwd, _ := filepath.Abs(".")
 		absRoot, _ := filepath.Abs(rootPath)
@@ -258,6 +258,23 @@ func cleanupTempDir(rootPath string) {
 			}
 		}
 	}
+}
+
+func scheduledTaskExists(taskName string) bool {
+	_, err := winutils.RunCommand("schtasks", "/Query", "/TN", taskName)
+	return err == nil
+}
+
+func shouldPreserveRootTemp() bool {
+	return scheduledTaskExists(distroResumeTaskName()) || scheduledTaskExists(regimeResumeTaskName())
+}
+
+func distroResumeTaskName() string {
+	return "goMH_Distro_Resume"
+}
+
+func regimeResumeTaskName() string {
+	return "goMH_Regime_Resume"
 }
 
 // cleanupOldExecutable проверяет наличие файла .old и удаляет его.
@@ -381,7 +398,7 @@ func execute() error {
 		}
 	})
 	cleanup.Add(func() {
-		cleanupTempDir(cfg.RootPath)
+		cleanupTempDir(cfg.RootPath, shouldPreserveRootTemp())
 	})
 	defer cleanup.Run()
 

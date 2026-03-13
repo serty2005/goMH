@@ -14,9 +14,17 @@ import (
 )
 
 const resumeTaskName = "goMH_Distro_Resume"
+const maxResumeReboots = 2
 
 type distroResumeConfig struct {
-	Config DistroInstallConfig `json:"config"`
+	Config        DistroInstallConfig `json:"config"`
+	ResumeAttempt int                 `json:"resume_attempt"`
+	Assets        distroResumeAssets  `json:"assets,omitempty"`
+}
+
+type distroResumeAssets struct {
+	InstallerPath string `json:"installer_path,omitempty"`
+	PatchPath     string `json:"patch_path,omitempty"`
 }
 
 type rebootResumeScheduledError struct{}
@@ -54,10 +62,15 @@ func (m *Module) Resume(am core.AssetManager, wu core.WinUtils, configPath strin
 		return fmt.Errorf("ошибка парсинга конфига возобновления: %w", err)
 	}
 
+	resumeCfg.Config.resumeAttempt = resumeCfg.ResumeAttempt
+	resumeCfg.Config.preparedInstallerPath = resumeCfg.Assets.InstallerPath
+	resumeCfg.Config.preparedPatchPath = resumeCfg.Assets.PatchPath
+
 	if err := m.Execute(ctx, am, wu, &resumeCfg.Config); err != nil {
 		if isRebootResumeScheduled(err) {
 			return nil
 		}
+		_ = wu.DeleteScheduledTaskByName(resumeTaskName)
 		return err
 	}
 
@@ -68,8 +81,14 @@ func (m *Module) Resume(am core.AssetManager, wu core.WinUtils, configPath strin
 	return nil
 }
 
-func (m *Module) scheduleResumeAfterReboot(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *DistroInstallConfig) error {
+func (m *Module) scheduleResumeAfterReboot(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *DistroInstallConfig, assets *componentInstallAssets) error {
 	ctx.Info("Подготовка к автоматическому возобновлению установки после перезагрузки...")
+
+	if assets != nil {
+		if err := m.ensureComponentAssetsPrepared(ctx, am, cfg, assets); err != nil {
+			return err
+		}
+	}
 
 	tempDir := filepath.Join(am.Cfg().RootPath, "temp")
 	if err := os.MkdirAll(tempDir, 0o755); err != nil {
@@ -77,7 +96,14 @@ func (m *Module) scheduleResumeAfterReboot(ctx core.TaskContext, am core.AssetMa
 	}
 
 	resumeConfigPath := filepath.Join(tempDir, "distro_resume.json")
-	resumeCfg := distroResumeConfig{Config: *cfg}
+	resumeCfg := distroResumeConfig{
+		Config:        *cfg,
+		ResumeAttempt: cfg.resumeAttempt + 1,
+		Assets: distroResumeAssets{
+			InstallerPath: cfg.preparedInstallerPath,
+			PatchPath:     cfg.preparedPatchPath,
+		},
+	}
 	data, err := json.Marshal(resumeCfg)
 	if err != nil {
 		return fmt.Errorf("не удалось сериализовать конфиг возобновления: %w", err)
@@ -104,6 +130,92 @@ func (m *Module) scheduleResumeAfterReboot(ctx core.TaskContext, am core.AssetMa
 	}
 
 	return &rebootResumeScheduledError{}
+}
+
+type componentInstallAssets struct {
+	downloadURL   string
+	installerPath string
+	versionDir    string
+	patchPath     string
+}
+
+func shouldCheckPendingRebootBeforeInstall(cfg *DistroInstallConfig) bool {
+	return requiresPendingRebootResume(cfg) && cfg.resumeAttempt == 0
+}
+
+func patchCachePath(am core.AssetManager, patch core.PatchInfo) string {
+	ext := filepath.Ext(patch.Description)
+	if ext == "" {
+		ext = ".7z"
+	}
+	fileName := patch.ShortName + ext
+	return filepath.Join(am.Cfg().AssetsCachePath, fileName)
+}
+
+func (m *Module) resolveComponentInstallAssets(am core.AssetManager, cfg *DistroInstallConfig) (*componentInstallAssets, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("конфиг установки не задан")
+	}
+
+	downloadURL := cfg.Component.URLTemplate
+	if cfg.Version != "" {
+		downloadURL = strings.Replace(downloadURL, "{{VERSION}}", cfg.Version, 1)
+	}
+
+	folderName := fmt.Sprintf("%s_%s", cfg.Brand, cfg.Version)
+	if cfg.Version == "" {
+		folderName = cfg.Component.ID
+	}
+
+	versionDir := filepath.Join(am.Cfg().RootPath, folderName)
+	installerPath := cfg.preparedInstallerPath
+	if installerPath == "" {
+		installerPath = filepath.Join(versionDir, filepath.Base(downloadURL))
+	}
+
+	assets := &componentInstallAssets{
+		downloadURL:   downloadURL,
+		installerPath: installerPath,
+		versionDir:    versionDir,
+	}
+	if cfg.Patch != nil {
+		patchPath := cfg.preparedPatchPath
+		if patchPath == "" {
+			patchPath = patchCachePath(am, *cfg.Patch)
+		}
+		assets.patchPath = patchPath
+	}
+
+	return assets, nil
+}
+
+func (m *Module) ensureComponentAssetsPrepared(ctx core.TaskContext, am core.AssetManager, cfg *DistroInstallConfig, assets *componentInstallAssets) error {
+	if assets == nil {
+		return nil
+	}
+
+	ctx.Info("Предзагрузка дистрибутива перед перезагрузкой...")
+	if strings.HasPrefix(assets.downloadURL, "http") {
+		if _, err := am.DownloadHTTPWithProgress(assets.downloadURL, assets.installerPath); err != nil {
+			return fmt.Errorf("не удалось предзагрузить дистрибутив: %w", err)
+		}
+	} else {
+		ftpCfg := am.Cfg().FTP[0]
+		if _, err := am.DownloadFTPWithProgress(ftpCfg, assets.downloadURL, assets.installerPath); err != nil {
+			return fmt.Errorf("не удалось предзагрузить дистрибутив: %w", err)
+		}
+	}
+	cfg.preparedInstallerPath = assets.installerPath
+
+	if cfg.Patch != nil && assets.patchPath != "" {
+		ctx.Info(fmt.Sprintf("Предзагрузка патча %s перед перезагрузкой...", cfg.Patch.ShortName))
+		if _, err := am.DownloadHTTPWithProgress(cfg.Patch.FullURL, assets.patchPath); err != nil {
+			return fmt.Errorf("не удалось предзагрузить патч %s: %w", cfg.Patch.ShortName, err)
+		}
+		cfg.preparedPatchPath = assets.patchPath
+	}
+
+	return nil
 }
 
 func requiresPendingRebootResume(cfg *DistroInstallConfig) bool {

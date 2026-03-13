@@ -52,3 +52,30 @@ func TestRequiresPendingRebootResume(t *testing.T) {
 		t.Fatal("did not expect non-front component to require pending reboot resume flow")
 	}
 }
+
+func TestShouldCheckPendingRebootBeforeInstall(t *testing.T) {
+	t.Parallel()
+
+	cfg := &DistroInstallConfig{
+		Action: ActionInstallComponent,
+		Brand:  "iiko",
+		Component: config.DistroComponent{
+			ID: "iiko_front",
+		},
+	}
+
+	if !shouldCheckPendingRebootBeforeInstall(cfg) {
+		t.Fatal("expected fresh iikoFront install to check pending reboot before running installer")
+	}
+
+	cfg.resumeAttempt = 1
+	if shouldCheckPendingRebootBeforeInstall(cfg) {
+		t.Fatal("did not expect resumed iikoFront install to be blocked by the initial reboot pre-check")
+	}
+
+	cfg.resumeAttempt = 0
+	cfg.Component.ID = "iiko_rms_back"
+	if shouldCheckPendingRebootBeforeInstall(cfg) {
+		t.Fatal("did not expect non-front component to use pending reboot pre-check")
+	}
+}

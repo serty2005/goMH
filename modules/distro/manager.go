@@ -28,20 +28,23 @@ const (
 
 // DistroInstallConfig хранит все решения пользователя
 type DistroInstallConfig struct {
-	Action               DistroAction
-	Brand                string // "iiko" or "syrve"
-	Component            config.DistroComponent
-	Version              string
-	Patch                *core.PatchInfo // Может быть nil
-	PluginSelection      *iikoplugins.InstallSelection
-	RunAutoUpdatePlugins bool
-	UninstallOldVersion  bool
-	OldVersionString     string // Версия для удаления (если UninstallOldVersion=true)
-	PortableSourceType   string // "http" или "ftp" (для portable)
-	PortableArchiveName  string // Имя архива (для portable)
-	PortableDownloadURL  string // URL (для portable http)
-	PortableFTPConfig    config.FTPConfig
-	PortableFTPPath      string
+	Action                DistroAction
+	Brand                 string // "iiko" or "syrve"
+	Component             config.DistroComponent
+	Version               string
+	Patch                 *core.PatchInfo // Может быть nil
+	PluginSelection       *iikoplugins.InstallSelection
+	RunAutoUpdatePlugins  bool
+	UninstallOldVersion   bool
+	OldVersionString      string // Версия для удаления (если UninstallOldVersion=true)
+	PortableSourceType    string // "http" или "ftp" (для portable)
+	PortableArchiveName   string // Имя архива (для portable)
+	PortableDownloadURL   string // URL (для portable http)
+	PortableFTPConfig     config.FTPConfig
+	PortableFTPPath       string
+	resumeAttempt         int
+	preparedInstallerPath string
+	preparedPatchPath     string
 }
 
 func (cfg *DistroInstallConfig) TaskConfirmation() core.TaskConfirmation {
@@ -300,11 +303,16 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 	}
 	ctx.SetStatus(statusMsg)
 
-	if requiresPendingRebootResume(cfg) {
+	assets, err := m.resolveComponentInstallAssets(am, cfg)
+	if err != nil {
+		return err
+	}
+
+	if shouldCheckPendingRebootBeforeInstall(cfg) {
 		if reasons := detectPendingRebootReasons(); len(reasons) > 0 {
 			ctx.Warn("Установка iikoFront заблокирована ожидающей перезагрузкой Windows.")
 			ctx.Info("Причины: " + strings.Join(reasons, "; "))
-			return m.scheduleResumeAfterReboot(ctx, am, wu, cfg)
+			return m.scheduleResumeAfterReboot(ctx, am, wu, cfg, assets)
 		}
 	}
 
@@ -317,43 +325,33 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 	}
 
 	// 2. Скачивание инсталлятора
-	downloadURL := cfg.Component.URLTemplate
-	if cfg.Version != "" {
-		downloadURL = strings.Replace(downloadURL, "{{VERSION}}", cfg.Version, 1)
-	}
-
-	// Если версия пустая, формируем имя папки из ID компонента (например, iiko_card)
-	folderName := fmt.Sprintf("%s_%s", cfg.Brand, cfg.Version)
-	if cfg.Version == "" {
-		folderName = cfg.Component.ID
-	}
-
-	versionDir := filepath.Join(am.Cfg().RootPath, folderName)
-	installerPath := filepath.Join(versionDir, filepath.Base(downloadURL))
-
 	ctx.Info("Скачивание дистрибутива...")
-	slog.Debug("Скачивание", "url", downloadURL, "dest", installerPath)
+	slog.Debug("Скачивание", "url", assets.downloadURL, "dest", assets.installerPath)
 
-	if strings.HasPrefix(downloadURL, "http") {
-		if _, err := am.DownloadHTTPWithProgress(downloadURL, installerPath); err != nil {
+	if strings.HasPrefix(assets.downloadURL, "http") {
+		if _, err := am.DownloadHTTPWithProgress(assets.downloadURL, assets.installerPath); err != nil {
 			return err
 		}
 	} else {
 		// FTP
 		ftpCfg := am.Cfg().FTP[0]
-		if _, err := am.DownloadFTPWithProgress(ftpCfg, downloadURL, installerPath); err != nil {
+		if _, err := am.DownloadFTPWithProgress(ftpCfg, assets.downloadURL, assets.installerPath); err != nil {
 			return err
 		}
 	}
 
 	// 3. Установка
 	ctx.Info("Запуск установщика...")
-	if err := m.runInstaller(ctx, am, installerPath, cfg.Component.InstallArgs); err != nil {
+	if err := m.runInstaller(ctx, am, assets.installerPath, cfg.Component.InstallArgs); err != nil {
 		var pendingErr *installerPendingRebootError
 		if requiresPendingRebootResume(cfg) && errors.As(err, &pendingErr) {
+			if cfg.resumeAttempt >= maxResumeReboots {
+				ctx.Info(fmt.Sprintf("Лог установщика: %s", pendingErr.LogPath))
+				return fmt.Errorf("установщик iikoFront после %d перезагрузок всё ещё требует завершить reboot pending", cfg.resumeAttempt)
+			}
 			ctx.Warn("Установщик iikoFront сообщил о незавершенной перезагрузке системы.")
 			ctx.Info(fmt.Sprintf("Лог установщика: %s", pendingErr.LogPath))
-			return m.scheduleResumeAfterReboot(ctx, am, wu, cfg)
+			return m.scheduleResumeAfterReboot(ctx, am, wu, cfg, assets)
 		}
 		return err
 	}
@@ -366,7 +364,7 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 			ctx.Warn("Не удалось определить папку установки для патчинга.")
 		} else {
 			ctx.Info(fmt.Sprintf("Применение патча %s...", cfg.Patch.ShortName))
-			backupDir := versionDir // Бэкап кладем рядом с дистрибутивом
+			backupDir := assets.versionDir // Бэкап кладем рядом с дистрибутивом
 			if err := ApplyPatch(ctx, am, wu, *cfg.Patch, installDir, backupDir); err != nil {
 				ctx.Error(fmt.Sprintf("Ошибка применения патча: %v", err))
 				return err
