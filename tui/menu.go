@@ -124,7 +124,7 @@ func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error)
 	for _, patch := range patches {
 		patchInfo := PatchDisplayInfo{
 			Patch:       patch,
-			DisplayText: buildPatchDisplayText(patch),
+			DisplayText: patch.ShortName + " " + patch.Description,
 		}
 		patchInfos = append(patchInfos, patchInfo)
 	}
@@ -134,16 +134,30 @@ func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error)
 		items = append(items, ChoiceItem{
 			Title:       info.Patch.ShortName,
 			Description: info.Patch.Description,
-			Meta:        info.DisplayText,
 			FilterValue: strings.ToLower(info.DisplayText + " " + info.Patch.Description + " " + info.Patch.ShortName),
 		})
 	}
 
 	index, err := SelectItem(items, SelectionConfig{
-		Title:       cleanTitle(label),
-		Subtitle:    "Введите часть названия или build",
-		Placeholder: "Фильтр",
-		Search:      true,
+		Title:        cleanTitle(label),
+		Subtitle:     "Введите часть названия или build",
+		Placeholder:  "Фильтр",
+		Search:       true,
+		OverlayLabel: "патч-нот",
+		Overlay: func(index int) (SelectionOverlayContent, bool, error) {
+			if index < 0 || index >= len(patchInfos) {
+				return SelectionOverlayContent{}, false, nil
+			}
+			patch := patchInfos[index].Patch
+			if patch.ShortName == "SKIP" || strings.TrimSpace(patch.ChangeNote) == "" {
+				return SelectionOverlayContent{}, false, nil
+			}
+			return SelectionOverlayContent{
+				Title:    "Patch-note: " + patch.ShortName,
+				Subtitle: patch.Description,
+				Lines:    strings.Split(patch.ChangeNote, "\n"),
+			}, true, nil
+		},
 	})
 	if err != nil {
 		if err == ErrExitToMainMenu {

@@ -16,6 +16,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // FindPatches ищет патчи на сервере
@@ -30,52 +33,26 @@ func FindPatches(baseURL, version string) ([]core.PatchInfo, error) {
 	}
 
 	targetURL := getPatchesPath(baseURL, fullVersion)
-	slog.Debug("Поиск патчей", "url", targetURL)
+	fallbackURL := getPatchesFallbackPath(baseURL, fullVersion)
 
-	resp, err := http.Get(targetURL)
+	foundPatches, hasPatchesDirOnly, err := fetchPatchesFromURL(targetURL)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
-	}
 
-	body, _ := io.ReadAll(resp.Body)
-	linkRegex := regexp.MustCompile(`<a href=\"([^\"]+)\"`)
-	buildRegex := regexp.MustCompile(`build(?:[\s_]|%20)(\d+)\)`)
-
-	var foundPatches []core.PatchInfo
-	for _, match := range linkRegex.FindAllStringSubmatch(string(body), -1) {
-		encodedFileName := match[1]
-		lowerName := strings.ToLower(encodedFileName)
-		if !(strings.HasSuffix(lowerName, ".7z") || strings.HasSuffix(lowerName, ".zip")) {
-			continue
+	if len(foundPatches) == 0 || hasPatchesDirOnly {
+		slog.Debug("Основной каталог патчей пуст, используем fallback", "primary_url", targetURL, "fallback_url", fallbackURL)
+		foundPatches, _, err = fetchPatchesFromURL(fallbackURL)
+		if err != nil {
+			return nil, err
 		}
-		buildMatches := buildRegex.FindStringSubmatch(encodedFileName)
-		if len(buildMatches) < 2 {
-			continue
-		}
-		buildNumber, _ := strconv.Atoi(buildMatches[1])
-		firstWord := strings.Split(encodedFileName, "-")[0]
-		shortName := fmt.Sprintf("%s-%d", firstWord, buildNumber)
-		decodedFileName, _ := url.QueryUnescape(encodedFileName)
-		fullURL, _ := url.JoinPath(targetURL, encodedFileName)
-
-		foundPatches = append(foundPatches, core.PatchInfo{
-			ShortName:   shortName,
-			Description: decodedFileName,
-			FullURL:     fullURL,
-			BuildNumber: buildNumber,
-		})
 	}
-
-	sort.Slice(foundPatches, func(i, j int) bool { return foundPatches[i].BuildNumber > foundPatches[j].BuildNumber })
 
 	// Возвращаем топ-4
 	if len(foundPatches) > 4 {
-		return foundPatches[:4], nil
+		foundPatches = foundPatches[:4]
 	}
+	enrichPatchChangeNotes(foundPatches)
 	return foundPatches, nil
 }
 
@@ -327,8 +304,208 @@ func getFullVersionString(short string) (string, error) {
 }
 
 func getPatchesPath(baseURL, version string) string {
-	if version == "9.2.8035.0" || version == "9.4.6046.0" {
-		return fmt.Sprintf("%s/%s", baseURL, version)
+	return fmt.Sprintf("%s/%s", strings.TrimRight(baseURL, "/"), version)
+}
+
+func getPatchesFallbackPath(baseURL, version string) string {
+	return fmt.Sprintf("%s/Patches", getPatchesPath(baseURL, version))
+}
+
+func fetchPatchesFromURL(targetURL string) ([]core.PatchInfo, bool, error) {
+	slog.Debug("Поиск патчей", "url", targetURL)
+
+	resp, err := http.Get(targetURL)
+	if err != nil {
+		return nil, false, err
 	}
-	return fmt.Sprintf("%s/%s/Patches", baseURL, version)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("HTTP %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, err
+	}
+
+	foundPatches, hasPatchesDirOnly := parsePatchesHTML(targetURL, string(body))
+	return foundPatches, hasPatchesDirOnly, nil
+}
+
+func enrichPatchChangeNotes(patches []core.PatchInfo) {
+	for i := range patches {
+		changeNote, err := fetchPatchChangeNote(patches[i].FullURL)
+		if err != nil {
+			slog.Debug("Не удалось загрузить patch-note", "url", patches[i].FullURL, "error", err)
+			continue
+		}
+		patches[i].ChangeNote = changeNote
+	}
+}
+
+func fetchPatchChangeNote(archiveURL string) (string, error) {
+	ext := filepath.Ext(archiveURL)
+	if ext == "" {
+		return "", fmt.Errorf("не удалось определить расширение архива")
+	}
+	changeNoteURL := strings.TrimSuffix(archiveURL, ext) + ".txt"
+
+	resp, err := http.Get(changeNoteURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	changeNote := formatPatchChangeNote(body)
+	if strings.TrimSpace(changeNote) == "" {
+		return "", fmt.Errorf("patch-note пуст")
+	}
+	return changeNote, nil
+}
+
+func formatPatchChangeNote(raw []byte) string {
+	text := decodePatchChangeNote(raw)
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.TrimSpace(strings.TrimPrefix(text, "\uFEFF"))
+	if text == "" {
+		return ""
+	}
+
+	lines := strings.Split(text, "\n")
+	fileLines, fixLines := splitPatchChangeNoteSections(lines)
+
+	var formatted []string
+	if len(fileLines) > 0 {
+		formatted = append(formatted, "Файлы:")
+		formatted = append(formatted, fileLines...)
+	}
+	if len(fixLines) > 0 {
+		if len(formatted) > 0 {
+			formatted = append(formatted, "")
+		}
+		formatted = append(formatted, "Исправления:")
+		formatted = append(formatted, fixLines...)
+	}
+
+	return strings.Join(formatted, "\n")
+}
+
+func decodePatchChangeNote(raw []byte) string {
+	if utf8.Valid(raw) {
+		return string(raw)
+	}
+	decoded, err := charmap.Windows1251.NewDecoder().Bytes(raw)
+	if err == nil && utf8.Valid(decoded) {
+		return string(decoded)
+	}
+	return string(raw)
+}
+
+func splitPatchChangeNoteSections(lines []string) ([]string, []string) {
+	var fileLines []string
+	var fixLines []string
+	inFixes := false
+	seenFiles := false
+
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			if seenFiles {
+				inFixes = true
+			}
+			continue
+		}
+
+		if !inFixes {
+			fileLines = append(fileLines, line)
+			seenFiles = true
+			continue
+		}
+
+		if cleaned := normalizePatchFixLine(line); cleaned != "" {
+			fixLines = append(fixLines, cleaned)
+		}
+	}
+
+	return fileLines, fixLines
+}
+
+func normalizePatchFixLine(line string) string {
+	line = strings.TrimSpace(line)
+	line = regexp.MustCompile(`^[0-9a-fA-F]{40}\s+`).ReplaceAllString(line, "")
+	line = strings.TrimSpace(strings.Trim(line, `"`))
+	if line == "" {
+		return ""
+	}
+
+	re := regexp.MustCompile(`(?i)^(?:revert\s+)?(RMS-\d+)\s*(?:fixed:\s*)?(.*)$`)
+	if matches := re.FindStringSubmatch(line); len(matches) == 3 {
+		taskID := strings.ToUpper(strings.TrimSpace(matches[1]))
+		desc := strings.TrimSpace(strings.Trim(matches[2], `"`))
+		if desc == "" {
+			return taskID
+		}
+		return taskID + " " + desc
+	}
+
+	re = regexp.MustCompile(`(?i)(RMS-\d+)\s+(.*)$`)
+	if matches := re.FindStringSubmatch(line); len(matches) == 3 {
+		taskID := strings.ToUpper(strings.TrimSpace(matches[1]))
+		desc := strings.TrimSpace(strings.Trim(matches[2], `"`))
+		if desc == "" {
+			return taskID
+		}
+		return taskID + " " + desc
+	}
+
+	return line
+}
+
+func parsePatchesHTML(targetURL, body string) ([]core.PatchInfo, bool) {
+	linkRegex := regexp.MustCompile(`<a href=\"([^\"]+)\"`)
+	buildRegex := regexp.MustCompile(`build(?:[\s_]|%20)(\d+)\)`)
+
+	var foundPatches []core.PatchInfo
+	hasPatchesDirLink := false
+
+	for _, match := range linkRegex.FindAllStringSubmatch(body, -1) {
+		encodedFileName := match[1]
+		lowerName := strings.ToLower(encodedFileName)
+
+		if strings.TrimSuffix(strings.Trim(lowerName, "/"), "/") == "patches" {
+			hasPatchesDirLink = true
+		}
+
+		if !(strings.HasSuffix(lowerName, ".7z") || strings.HasSuffix(lowerName, ".zip")) {
+			continue
+		}
+		buildMatches := buildRegex.FindStringSubmatch(encodedFileName)
+		if len(buildMatches) < 2 {
+			continue
+		}
+		buildNumber, _ := strconv.Atoi(buildMatches[1])
+		firstWord := strings.Split(encodedFileName, "-")[0]
+		shortName := fmt.Sprintf("%s-%d", firstWord, buildNumber)
+		decodedFileName, _ := url.QueryUnescape(encodedFileName)
+		fullURL, _ := url.JoinPath(targetURL, encodedFileName)
+
+		foundPatches = append(foundPatches, core.PatchInfo{
+			ShortName:   shortName,
+			Description: decodedFileName,
+			FullURL:     fullURL,
+			BuildNumber: buildNumber,
+		})
+	}
+
+	sort.Slice(foundPatches, func(i, j int) bool { return foundPatches[i].BuildNumber > foundPatches[j].BuildNumber })
+	return foundPatches, hasPatchesDirLink && len(foundPatches) == 0
 }

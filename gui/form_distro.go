@@ -493,7 +493,10 @@ func (m *PatchListModel) Value(index int) interface{} {
 	if p.ShortName == "" {
 		return p.Description
 	}
-	return p.ShortName + " - " + p.Description
+	if p.Description == "" || p.Description == p.ShortName {
+		return p.ShortName
+	}
+	return p.ShortName + " | " + p.Description
 }
 
 func init() {

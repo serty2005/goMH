@@ -9,6 +9,7 @@ import (
 	"goMH/core"
 	"goMH/gui"
 	"goMH/logging"
+	"goMH/modules/distro"
 	"goMH/modules/regime"
 	moduleregistry "goMH/modules/registry"
 	"goMH/modules/selfupdate"
@@ -342,7 +343,7 @@ func execute() error {
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
 	guiFlag := flag.Bool("gui", false, "Запустить в графическом режиме")
 	// Новые флаги для режима возобновления
-	moduleFlag := flag.String("module", "", "Прямой запуск модуля (Regime)")
+	moduleFlag := flag.String("module", "", "Прямой запуск модуля (Regime, iiko)")
 	resumeFlag := flag.String("resume", "", "Путь к файлу конфигурации возобновления")
 	flag.Parse()
 
@@ -440,6 +441,25 @@ func execute() error {
 			tui.Success("\n--- Операция завершена успешно. ---")
 			time.Sleep(5 * time.Second)
 		}
+		return nil
+	}
+
+	if *moduleFlag == "iiko" && *resumeFlag != "" {
+		slog.Info("Запуск в режиме возобновления iiko/Syrve", "config", *resumeFlag)
+		mod := &distro.Module{}
+		logging.LogTaskStarted(mod.ID(), "resume", "Возобновление установки iiko/Syrve")
+
+		if err := mod.Resume(assetManager, RealWinUtils, *resumeFlag); err != nil {
+			logging.LogTaskFinished(mod.ID(), "resume", "Возобновление установки iiko/Syrve", err)
+			slog.Error("Ошибка возобновления iiko/Syrve", "error", err)
+			tui.Error(fmt.Sprintf("Ошибка возобновления установки: %v", err))
+			tui.WaitForAnyKey()
+			return fmt.Errorf("ошибка возобновления iiko/Syrve: %w", err)
+		}
+
+		logging.LogTaskFinished(mod.ID(), "resume", "Возобновление установки iiko/Syrve", nil)
+		tui.Success("\n--- Операция завершена успешно. ---")
+		time.Sleep(5 * time.Second)
 		return nil
 	}
 

@@ -29,6 +29,9 @@ type SelectionConfig struct {
 	Search       bool
 	Multi        bool
 	SelectedText string
+	OverlayKey   string
+	OverlayLabel string
+	Overlay      SelectionOverlayProvider
 }
 
 type selectionDoneMsg struct {
@@ -66,6 +69,7 @@ type selectionModel struct {
 	finished  bool
 	result    []int
 	resultErr error
+	overlay   staticTextOverlayState
 }
 
 func newSelectionModel(items []ChoiceItem, config SelectionConfig) *selectionModel {
@@ -112,12 +116,18 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, liveLogOverlayTickCmd()
 
 	case tea.MouseMsg:
+		if handled, _, _ := m.overlay.HandleMouse(msg, m.width, m.height, m.theme.PanelFocus); handled {
+			return m, nil
+		}
 		if liveLogOverlayVisible() {
 			return m, nil
 		}
 		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
+		if m.overlay.HandleKey(msg, m.height, "esc", m.overlayKey()) {
+			return m, nil
+		}
 		if handleLiveLogOverlayKey(msg, m.height) {
 			return m, nil
 		}
@@ -175,6 +185,10 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.confirmCurrentSelection()
 		}
 
+		if m.tryOpenOverlay(msg.String()) {
+			return m, nil
+		}
+
 		if cmd := m.handleShortcutKey(msg.String()); cmd != nil {
 			return m, cmd
 		}
@@ -191,6 +205,20 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *selectionModel) View() string {
+	if m.overlay.visible {
+		return m.overlay.Render(m.width, m.height, LiveLogOverlayRenderStyles{
+			Title:    m.theme.Title,
+			Subtitle: m.theme.Subtitle,
+			Panel:    m.theme.PanelFocus,
+			Key:      m.theme.Key,
+			Help:     m.theme.Help,
+			Error:    m.theme.Error,
+			Status:   m.theme.Status,
+			Text:     m.theme.Item,
+			Muted:    m.theme.ItemMuted,
+		}, strings.ToUpper(m.overlayKey())+"/Esc")
+	}
+
 	if liveLogOverlayVisible() {
 		return renderLiveLogOverlay(m.width, m.height, LiveLogOverlayRenderStyles{
 			Title:    m.theme.Title,
@@ -286,6 +314,9 @@ func (m *selectionModel) footerHelp() []string {
 	firstLine = append(firstLine, m.theme.Key.Render("↑↓")+" выбор")
 	if m.config.Multi {
 		secondLine = append(secondLine, m.theme.Key.Render("Space")+" отметить")
+	}
+	if m.config.Overlay != nil {
+		firstLine = append(firstLine, m.theme.Key.Render(strings.ToUpper(m.overlayKey()))+" "+m.overlayLabel())
 	}
 	secondLine = append(secondLine,
 		m.theme.Key.Render("Enter")+" подтвердить",
@@ -416,6 +447,38 @@ func (m *selectionModel) selectionLineText(originalIndex int, offset int, width 
 		text += " " + item.Meta
 	}
 	return text
+}
+
+func (m *selectionModel) overlayKey() string {
+	key := strings.TrimSpace(strings.ToLower(m.config.OverlayKey))
+	if key == "" {
+		return "f3"
+	}
+	return key
+}
+
+func (m *selectionModel) overlayLabel() string {
+	label := strings.TrimSpace(m.config.OverlayLabel)
+	if label == "" {
+		return "просмотр"
+	}
+	return label
+}
+
+func (m *selectionModel) tryOpenOverlay(key string) bool {
+	if m.config.Overlay == nil || key != m.overlayKey() {
+		return false
+	}
+	index := m.currentIndex()
+	if index < 0 {
+		return false
+	}
+	content, ok, err := m.config.Overlay(index)
+	if err != nil || !ok {
+		return false
+	}
+	m.overlay.Open(content)
+	return true
 }
 
 func (m *selectionModel) visibleItems() []selectionVisibleItem {

@@ -166,4 +166,5 @@ type PatchInfo struct {
 	Description string
 	FullURL     string
 	BuildNumber int
+	ChangeNote  string
 }

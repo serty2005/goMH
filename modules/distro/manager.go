@@ -1,6 +1,7 @@
 package distro
 
 import (
+	"errors"
 	"fmt"
 	"goMH/config"
 	"goMH/core"
@@ -150,7 +151,13 @@ func (m *Module) ExecuteTask(ctx core.TaskContext, services core.ModuleServices,
 	if err != nil {
 		return err
 	}
-	return m.Execute(ctx, services.AssetManager, services.WinUtils, cfg)
+	if err := m.Execute(ctx, services.AssetManager, services.WinUtils, cfg); err != nil {
+		if isRebootResumeScheduled(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (cfg *DistroInstallConfig) actionLabel() string {
@@ -195,6 +202,9 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// 2. Выполнение
 	slog.Info("Запуск выполнения задачи Distro", "action", cfg.Action, "brand", cfg.Brand)
 	if err := m.Execute(ctx, am, wu, cfg); err != nil {
+		if isRebootResumeScheduled(err) {
+			return nil
+		}
 		slog.Error("Ошибка выполнения задачи Distro", "error", err)
 		return err
 	}
@@ -268,11 +278,17 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 }
 
 func (m *Module) taskConfig(config any) (*DistroInstallConfig, error) {
-	cfg, ok := config.(*DistroInstallConfig)
-	if !ok || cfg == nil {
+	switch cfg := config.(type) {
+	case DistroInstallConfig:
+		return &cfg, nil
+	case *DistroInstallConfig:
+		if cfg == nil {
+			return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
+		}
+		return cfg, nil
+	default:
 		return nil, fmt.Errorf("неверный конфиг задачи для модуля %s", m.ID())
 	}
-	return cfg, nil
 }
 
 // --- EXECUTE IMPLEMENTATIONS ---
@@ -283,6 +299,14 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 		statusMsg += fmt.Sprintf(" %s", cfg.Version)
 	}
 	ctx.SetStatus(statusMsg)
+
+	if requiresPendingRebootResume(cfg) {
+		if reasons := detectPendingRebootReasons(); len(reasons) > 0 {
+			ctx.Warn("Установка iikoFront заблокирована ожидающей перезагрузкой Windows.")
+			ctx.Info("Причины: " + strings.Join(reasons, "; "))
+			return m.scheduleResumeAfterReboot(ctx, am, wu, cfg)
+		}
+	}
 
 	// 1. Удаление старой версии при необходимости
 	if cfg.UninstallOldVersion && cfg.OldVersionString != "" {
@@ -325,6 +349,12 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 	// 3. Установка
 	ctx.Info("Запуск установщика...")
 	if err := m.runInstaller(ctx, am, installerPath, cfg.Component.InstallArgs); err != nil {
+		var pendingErr *installerPendingRebootError
+		if requiresPendingRebootResume(cfg) && errors.As(err, &pendingErr) {
+			ctx.Warn("Установщик iikoFront сообщил о незавершенной перезагрузке системы.")
+			ctx.Info(fmt.Sprintf("Лог установщика: %s", pendingErr.LogPath))
+			return m.scheduleResumeAfterReboot(ctx, am, wu, cfg)
+		}
 		return err
 	}
 
@@ -555,6 +585,13 @@ func (m *Module) runInstaller(ctx core.TaskContext, am core.AssetManager, instal
 	if exitCode != 0 {
 		finalLogPath := filepath.Join(am.Cfg().RootPath, logFileName)
 		_ = os.Rename(tempLogPath, finalLogPath)
+		if installerLogIndicatesPendingReboot(finalLogPath, string(output)) {
+			return &installerPendingRebootError{
+				ExitCode: exitCode,
+				LogPath:  finalLogPath,
+				Output:   string(output),
+			}
+		}
 		return fmt.Errorf("код возврата %d. Лог: %s. Вывод: %s", exitCode, finalLogPath, string(output))
 	}
 
