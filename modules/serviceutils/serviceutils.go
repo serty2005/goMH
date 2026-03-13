@@ -44,6 +44,14 @@ const (
 	ActionFrontTools
 )
 
+const cleanLogRetentionDays = 30
+
+var cleanLogExtensions = map[string]struct{}{
+	".zip": {},
+	".gz":  {},
+	".log": {},
+}
+
 // ServiceUtilsConfig хранит параметры для выполнения
 type ServiceUtilsConfig struct {
 	Action ActionType
@@ -696,6 +704,12 @@ func (m *Module) cleanTempFiles(ctx core.TaskContext, am core.AssetManager) erro
 		}
 	}
 	msg := fmt.Sprintf("Освобождено: %.2f MB", float64(totalFreed)/1024/1024)
+	logFreed, logRemoved := m.cleanupExpiredLogFiles(ctx, am.Cfg().MaintenanceConfig.LogCollectorPaths, time.Now().AddDate(0, 0, -cleanLogRetentionDays))
+	totalFreed += logFreed
+	if logRemoved > 0 {
+		ctx.Info(fmt.Sprintf("Удалено всего: %d", logRemoved))
+	}
+	msg = fmt.Sprintf("Удалено: %.2f MB", float64(totalFreed)/1024/1024)
 	ctx.Success(msg)
 	slog.Info("Очистка завершена", "freed_bytes", totalFreed)
 	return nil
@@ -955,32 +969,94 @@ func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, w
 
 func (m *Module) findLogDirectories(cfg *config.Config) []string {
 	dirMap := make(map[string]bool)
-	potentialPaths := cfg.MaintenanceConfig.LogCollectorPaths
+	potentialPaths := append([]string{}, cfg.MaintenanceConfig.LogCollectorPaths...)
 	if cfg.FrpcConfig.InstallPath != "" {
 		potentialPaths = append(potentialPaths, os.ExpandEnv(cfg.FrpcConfig.InstallPath))
 	}
 	potentialPaths = append(potentialPaths, filepath.Join(os.ExpandEnv(cfg.RootPath), "logs"))
 
-	for _, path := range potentialPaths {
-		expanded := os.ExpandEnv(path)
-		if strings.Contains(expanded, "*") {
-			matches, _ := filepath.Glob(expanded)
-			for _, match := range matches {
-				if fi, err := os.Stat(match); err == nil && fi.IsDir() {
-					dirMap[match] = true
-				}
-			}
-		} else {
-			if fi, err := os.Stat(expanded); err == nil && fi.IsDir() {
-				dirMap[expanded] = true
-			}
-		}
+	for _, dir := range expandExistingDirectories(potentialPaths) {
+		dirMap[dir] = true
 	}
 	var res []string
 	for k := range dirMap {
 		res = append(res, k)
 	}
 	return res
+}
+
+func expandExistingDirectories(rawPaths []string) []string {
+	dirMap := make(map[string]struct{})
+	for _, path := range rawPaths {
+		expanded := os.ExpandEnv(path)
+		if strings.Contains(expanded, "*") {
+			matches, _ := filepath.Glob(expanded)
+			for _, match := range matches {
+				if fi, err := os.Stat(match); err == nil && fi.IsDir() {
+					dirMap[match] = struct{}{}
+				}
+			}
+			continue
+		}
+		if fi, err := os.Stat(expanded); err == nil && fi.IsDir() {
+			dirMap[expanded] = struct{}{}
+		}
+	}
+
+	res := make([]string, 0, len(dirMap))
+	for dir := range dirMap {
+		res = append(res, dir)
+	}
+	sort.Strings(res)
+	return res
+}
+
+func (m *Module) cleanupExpiredLogFiles(ctx core.TaskContext, rawPaths []string, cutoff time.Time) (int64, int) {
+	var totalFreed int64
+	var removedCount int
+
+	for _, dir := range expandExistingDirectories(rawPaths) {
+		ctx.Info(fmt.Sprintf("Проверка старых логов: %s", dir))
+		slog.Debug("Очистка старых логов", "path", dir, "cutoff", cutoff)
+
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				slog.Warn("Не удалось обойти путь при очистке логов", "path", path, "error", err)
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+
+			ext := strings.ToLower(filepath.Ext(d.Name()))
+			if _, ok := cleanLogExtensions[ext]; !ok {
+				return nil
+			}
+
+			info, err := d.Info()
+			if err != nil {
+				slog.Warn("Не удалось получить информацию о файле лога", "path", path, "error", err)
+				return nil
+			}
+			if info.ModTime().After(cutoff) {
+				return nil
+			}
+
+			if err := os.Remove(path); err != nil {
+				slog.Warn("Не удалось удалить старый лог", "path", path, "error", err)
+				return nil
+			}
+
+			totalFreed += info.Size()
+			removedCount++
+			return nil
+		})
+		if err != nil {
+			slog.Warn("Ошибка обхода каталога логов", "path", dir, "error", err)
+		}
+	}
+
+	return totalFreed, removedCount
 }
 
 func (m *Module) detectIikoFrontDb() (string, string, error) {
