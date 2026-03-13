@@ -92,7 +92,7 @@ func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager
 	if installedVer != "" {
 		promptLabel += fmt.Sprintf(" (Текущая: %s)", installedVer)
 	}
-	version, err := tui.SelectWithSearch(versions, promptLabel)
+	version, err := tui.SelectVersionWithSearch(versions, promptLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func (h *syrveHandler) configurePortable(ctx core.TaskContext, am core.AssetMana
 	}
 	sortVersionsDesc(versions)
 
-	ver, err := tui.SelectWithSearch(versions, "Выберите версию portable")
+	ver, err := tui.SelectVersionWithSearch(versions, "Выберите версию portable")
 	if err != nil {
 		return nil, err
 	}

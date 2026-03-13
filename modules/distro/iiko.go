@@ -144,7 +144,7 @@ func (h *iikoHandler) configureComponent(ctx core.TaskContext, am core.AssetMana
 	if installedVer != "" {
 		promptLabel += fmt.Sprintf(" (Текущая: %s)", installedVer)
 	}
-	version, err := tui.SelectWithSearch(versions, promptLabel)
+	version, err := tui.SelectVersionWithSearch(versions, promptLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (h *iikoHandler) configurePortable(ctx core.TaskContext, am core.AssetManag
 	}
 	sortVersionsDesc(versions)
 
-	ver, err := tui.SelectWithSearch(versions, "Выберите версию portable")
+	ver, err := tui.SelectVersionWithSearch(versions, "Выберите версию portable")
 	if err != nil {
 		return nil, err
 	}

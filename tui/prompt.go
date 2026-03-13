@@ -21,17 +21,18 @@ type ChoiceItem struct {
 }
 
 type SelectionConfig struct {
-	Title        string
-	Subtitle     string
-	Placeholder  string
-	EmptyText    string
-	Help         string
-	Search       bool
-	Multi        bool
-	SelectedText string
-	OverlayKey   string
-	OverlayLabel string
-	Overlay      SelectionOverlayProvider
+	Title            string
+	Subtitle         string
+	Placeholder      string
+	EmptyText        string
+	Help             string
+	Search           bool
+	DisableShortcuts bool
+	Multi            bool
+	SelectedText     string
+	OverlayKey       string
+	OverlayLabel     string
+	Overlay          SelectionOverlayProvider
 }
 
 type selectionDoneMsg struct {
@@ -189,8 +190,10 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if cmd := m.handleShortcutKey(msg.String()); cmd != nil {
-			return m, cmd
+		if !m.config.DisableShortcuts {
+			if cmd := m.handleShortcutKey(msg.String()); cmd != nil {
+				return m, cmd
+			}
 		}
 	}
 
@@ -307,11 +310,39 @@ func (m *selectionModel) renderItems(width int) []string {
 func (m *selectionModel) footerHelp() []string {
 	firstLine := make([]string, 0, 4)
 	secondLine := make([]string, 0, 4)
+	if m.config.DisableShortcuts {
+		if m.config.Search {
+			firstLine = append(firstLine, m.theme.Key.Render("Ввод")+" фильтр")
+		}
+		firstLine = append(firstLine, m.theme.Key.Render("Up/Down")+" выбор")
+		if m.config.Multi {
+			secondLine = append(secondLine, m.theme.Key.Render("Space")+" отметить")
+		}
+		if m.config.Overlay != nil {
+			firstLine = append(firstLine, m.theme.Key.Render(strings.ToUpper(m.overlayKey()))+" "+m.overlayLabel())
+		}
+		secondLine = append(secondLine,
+			m.theme.Key.Render("Enter")+" подтвердить",
+			m.theme.Key.Render("Мышь")+" навести/клик",
+			m.theme.Key.Render("Esc")+" назад",
+		)
+		if m.config.Help != "" {
+			secondLine = append(secondLine, m.theme.Help.Render(m.config.Help))
+		}
+		lines := []string{
+			m.theme.Help.Render(strings.Join(firstLine, "   ")),
+			m.theme.Help.Render(strings.Join(secondLine, "   ")),
+		}
+		if hint := liveLogOverlayHint(); hint != "" {
+			lines = append(lines, m.theme.Help.Render(hint))
+		}
+		return lines
+	}
 	firstLine = append(firstLine, m.theme.Key.Render("1-9,0")+" быстрый выбор")
 	if m.config.Search {
 		firstLine = append(firstLine, m.theme.Key.Render("Ввод")+" фильтр")
 	}
-	firstLine = append(firstLine, m.theme.Key.Render("↑↓")+" выбор")
+	firstLine = append(firstLine, m.theme.Key.Render("Up/Down")+" выбор")
 	if m.config.Multi {
 		secondLine = append(secondLine, m.theme.Key.Render("Space")+" отметить")
 	}
@@ -430,6 +461,9 @@ func (m *selectionModel) handleShortcutKey(key string) tea.Cmd {
 func (m *selectionModel) selectionLineText(originalIndex int, offset int, width int) string {
 	item := m.items[originalIndex]
 	prefix := menuShortcutLabel(offset)
+	if m.config.DisableShortcuts {
+		prefix = ""
+	}
 	if m.config.Multi {
 		if m.selected[originalIndex] {
 			prefix += " [x]"

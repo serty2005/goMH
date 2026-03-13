@@ -10,8 +10,18 @@ import (
 	"strings"
 )
 
-// ErrExitToMainMenu специальная ошибка для обозначения выхода в главное меню по вводу "00"
-var ErrExitToMainMenu = errors.New("exit_to_main_menu")
+var (
+	ErrExitToMainMenu        = errors.New("exit_to_main_menu")
+	errEmptyItems            = errors.New("список элементов пуст")
+	errSelectionCancelled    = errors.New("выбор отменен")
+	selectSearchSubtitle     = "Введите часть названия для фильтрации"
+	selectPatchSubtitle      = "Введите часть названия или build"
+	defaultFilterPlaceholder = "Фильтр"
+	showMenuTitle            = "Выберите модуль"
+	showMenuSubtitle         = "Esc для выхода"
+	errUserSelectedExit      = "пользователь выбрал выход"
+	selectPatchOverlayLabel  = "патч-нот"
+)
 
 type Installer core.Installer
 
@@ -25,7 +35,6 @@ func ClearScreen() {
 	}
 }
 
-// ShowMenu - Главное меню (возвращает интерфейс модуля)
 func ShowMenu(modules []Installer) (Installer, error) {
 	items := make([]ChoiceItem, 0, len(modules))
 	for _, mod := range modules {
@@ -33,22 +42,20 @@ func ShowMenu(modules []Installer) (Installer, error) {
 	}
 
 	index, err := SelectItem(items, SelectionConfig{
-		Title:       "Выберите модуль",
-		Subtitle:    "Esc для выхода",
-		Placeholder: "Фильтр",
+		Title:       showMenuTitle,
+		Subtitle:    showMenuSubtitle,
+		Placeholder: defaultFilterPlaceholder,
 		Search:      true,
 	})
 	if err != nil {
 		return nil, err
 	}
 	if index < 0 || index >= len(modules) {
-		return nil, fmt.Errorf("пользователь выбрал выход")
+		return nil, errors.New(errUserSelectedExit)
 	}
 	return modules[index], nil
 }
 
-// PrintMenu - Универсальное текстовое меню для выбора из списка строк.
-// Возвращает индекс выбранного элемента (0..N-1) или -1, если выбрано "Назад" (0).
 func PrintMenu(title string, items []string) (int, error) {
 	index, err := SelectStrings(cleanTitle(title), "", items, false)
 	if err != nil {
@@ -60,11 +67,9 @@ func PrintMenu(title string, items []string) (int, error) {
 	return index, nil
 }
 
-// SelectWithSearch создает стрелочный интерфейс с умным поиском (игнорирует точки для версий)
-// ОСТАВЛЯЕМ ДЛЯ ВЫБОРА ВЕРСИЙ
 func SelectWithSearch(items []string, label string) (string, error) {
 	if len(items) == 0 {
-		return "", errors.New("список элементов пуст")
+		return "", errEmptyItems
 	}
 
 	choices := make([]ChoiceItem, 0, len(items))
@@ -78,27 +83,58 @@ func SelectWithSearch(items []string, label string) (string, error) {
 
 	index, err := SelectItem(choices, SelectionConfig{
 		Title:       cleanTitle(label),
-		Subtitle:    "Введите часть названия для фильтрации",
-		Placeholder: "Фильтр",
+		Subtitle:    selectSearchSubtitle,
+		Placeholder: defaultFilterPlaceholder,
 		Search:      true,
 	})
 	if err != nil {
 		if err == ErrExitToMainMenu {
 			return "", ErrExitToMainMenu
 		}
-		return "", errors.New("выбор отменен")
+		return "", errSelectionCancelled
 	}
 	if index < 0 || index >= len(items) {
-		return "", errors.New("выбор отменен")
+		return "", errSelectionCancelled
 	}
 	return items[index], nil
 }
 
-// SelectSimple создает простой стрелочный интерфейс.
-// Оставляем для простых выборов (Да/Нет), но не для главных меню.
+func SelectVersionWithSearch(items []string, label string) (string, error) {
+	if len(items) == 0 {
+		return "", errEmptyItems
+	}
+
+	choices := make([]ChoiceItem, 0, len(items))
+	for _, item := range items {
+		filterValue := strings.ToLower(item + " " + strings.ReplaceAll(item, ".", ""))
+		choices = append(choices, ChoiceItem{
+			Title:       item,
+			FilterValue: filterValue,
+		})
+	}
+
+	index, err := SelectItem(choices, SelectionConfig{
+		Title:            cleanTitle(label),
+		Subtitle:         selectSearchSubtitle,
+		Placeholder:      defaultFilterPlaceholder,
+		Search:           true,
+		DisableShortcuts: true,
+	})
+	if err != nil {
+		if err == ErrExitToMainMenu {
+			return "", ErrExitToMainMenu
+		}
+		return "", errSelectionCancelled
+	}
+	if index < 0 || index >= len(items) {
+		return "", errSelectionCancelled
+	}
+	return items[index], nil
+}
+
 func SelectSimple(items []string, label string) (string, error) {
 	if len(items) == 0 {
-		return "", errors.New("список элементов пуст")
+		return "", errEmptyItems
 	}
 
 	index, err := SelectStrings(cleanTitle(label), "", items, false)
@@ -106,15 +142,14 @@ func SelectSimple(items []string, label string) (string, error) {
 		if err == ErrExitToMainMenu {
 			return "", ErrExitToMainMenu
 		}
-		return "", errors.New("выбор отменен")
+		return "", errSelectionCancelled
 	}
 	if index < 0 || index >= len(items) {
-		return "", errors.New("выбор отменен")
+		return "", errSelectionCancelled
 	}
 	return items[index], nil
 }
 
-// SelectPatch создает стрелочный интерфейс для выбора патча с поиском
 func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error) {
 	if len(patches) == 0 {
 		return core.PatchInfo{}, errors.New("список патчей пуст")
@@ -140,10 +175,10 @@ func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error)
 
 	index, err := SelectItem(items, SelectionConfig{
 		Title:        cleanTitle(label),
-		Subtitle:     "Введите часть названия или build",
-		Placeholder:  "Фильтр",
+		Subtitle:     selectPatchSubtitle,
+		Placeholder:  defaultFilterPlaceholder,
 		Search:       true,
-		OverlayLabel: "патч-нот",
+		OverlayLabel: selectPatchOverlayLabel,
 		Overlay: func(index int) (SelectionOverlayContent, bool, error) {
 			if index < 0 || index >= len(patchInfos) {
 				return SelectionOverlayContent{}, false, nil
@@ -163,10 +198,10 @@ func SelectPatch(patches []core.PatchInfo, label string) (core.PatchInfo, error)
 		if err == ErrExitToMainMenu {
 			return core.PatchInfo{}, ErrExitToMainMenu
 		}
-		return core.PatchInfo{}, errors.New("выбор отменен")
+		return core.PatchInfo{}, errSelectionCancelled
 	}
 	if index < 0 || index >= len(patchInfos) {
-		return core.PatchInfo{}, errors.New("выбор отменен")
+		return core.PatchInfo{}, errSelectionCancelled
 	}
 	return patchInfos[index].Patch, nil
 }
