@@ -26,19 +26,37 @@ const (
 	DefaultIikoPluginsDir = `C:\Program Files\iiko\iikoRMS\Front.Net\Plugins`
 	ManifestURL           = "https://f.serty.top/distr/installer/plugins-manifest.json"
 	RapidPluginsBaseURL   = "https://rapid.iiko.ru/plugins/"
+	OfficialIikoFTPHost   = "ftp.iiko.ru"
+	officialIikoFTPUser   = "partners"
+	officialIikoFTPPass   = "partners#iiko"
+	officialIikoFTPPath   = "/release_iiko"
 	maxScanDepth          = 10
 )
 
 var (
-	apiVersionRe = regexp.MustCompile(`(V\d+(?:Preview\d+)?)`)
+	apiVersionRe        = regexp.MustCompile(`(V\d+(?:Preview\d+)?)`)
+	ftpArchiveVersionRe = regexp.MustCompile(`^(\d+(?:\.\d+){1,})(?:-\d{4}\.\d{2}\.\d{2})?$`)
+	ftpArchiveNameRe    = regexp.MustCompile(`^(.+?)[.-](\d+(?:\.\d+){1,})(?:-\d{4}\.\d{2}\.\d{2})?$`)
+)
+
+type PluginSource string
+
+const (
+	PluginSourceRapid PluginSource = "rapid"
+	PluginSourceFTP   PluginSource = "ftp"
 )
 
 // Plugin представляет информацию о плагине
 type Plugin struct {
-	Name          string `json:"name"`
-	ApiVersion    string `json:"api_version"`
-	PluginVersion string `json:"plugin_version"`
-	DownloadUrl   string `json:"download_url"`
+	Name          string       `json:"name"`
+	ApiVersion    string       `json:"api_version"`
+	PluginVersion string       `json:"plugin_version"`
+	DownloadUrl   string       `json:"download_url"`
+	Source        PluginSource `json:"source,omitempty"`
+	RemotePath    string       `json:"remote_path,omitempty"`
+	FrontVersion  string       `json:"front_version,omitempty"`
+	InstallDir    string       `json:"install_dir,omitempty"`
+	IsDirectory   bool         `json:"is_directory,omitempty"`
 }
 
 // UniquePluginDisplayInfo представляет информацию об уникальном плагине для отображения
@@ -72,9 +90,15 @@ type InstallSelection struct {
 }
 
 type RapidScanProgress struct {
+	Source         string
 	ProcessedPages int
 	TotalPages     int
 	URL            string
+}
+
+type ftpPluginManifest struct {
+	FileName   string `xml:"FileName"`
+	ApiVersion string `xml:"ApiVersion"`
 }
 
 func (m *Module) ID() string       { return "iiko-plugins" }
@@ -102,7 +126,7 @@ func (m *Module) ConfigureInstall(am core.AssetManager, wu core.WinUtils) (*Inst
 	cfg := am.Cfg()
 
 	// 1. Получение версии iikoFront
-	version, err := GetIikoFrontVersion(wu)
+	version, fullVersion, err := GetIikoFrontVersions(wu)
 	if err != nil {
 		slog.Error("Ошибка определения версии iikoFront", "error", err)
 		return nil, fmt.Errorf("не удалось определить версию iikoFront: %w", err)
@@ -120,9 +144,9 @@ func (m *Module) ConfigureInstall(am core.AssetManager, wu core.WinUtils) (*Inst
 		"Парсинг источника rapid...",
 		func(progress tui.ProgressUpdater) ([]Plugin, error) {
 			progress.Update(0, "Парсинг источника rapid...", "")
-			return LoadLivePluginsWithProgress(context.Background(), func(state RapidScanProgress) {
+			return LoadCachedLivePluginsWithProgress(context.Background(), am.Cfg().RootPath, fullVersion, func(state RapidScanProgress) {
 				progress.Update(
-					rapidScanPercent(state.ProcessedPages, state.TotalPages),
+					liveScanPercent(state),
 					fmt.Sprintf("Парсинг плагинов: страница %d/%d", state.ProcessedPages, state.TotalPages),
 					state.URL,
 				)
@@ -139,12 +163,7 @@ func (m *Module) ConfigureInstall(am core.AssetManager, wu core.WinUtils) (*Inst
 	compatibleApiVersions := getCompatibleApiVersions(manifest, version)
 	slog.Debug("Определены совместимые версии API", "versions", compatibleApiVersions)
 
-	var availablePlugins []Plugin
-	for _, plugin := range manifest.Plugins {
-		if contains(compatibleApiVersions, plugin.ApiVersion) {
-			availablePlugins = append(availablePlugins, plugin)
-		}
-	}
+	availablePlugins := filterCompatiblePlugins(manifest.Plugins, compatibleApiVersions, fullVersion)
 
 	// Фильтрация исключенных
 	filteredPlugins := FilterPlugins(availablePlugins, cfg.DistroConfig.ExcludedPlugins)
@@ -218,7 +237,7 @@ func (m *Module) AutoUpdatePlugins(ctx core.TaskContext, am core.AssetManager, w
 	slog.Info("Запуск автоматического обновления плагинов")
 	cfg := am.Cfg()
 
-	version, err := GetIikoFrontVersion(wu)
+	version, fullVersion, err := GetIikoFrontVersions(wu)
 	if err != nil {
 		return fmt.Errorf("ошибка версии iikoFront: %w", err)
 	}
@@ -234,12 +253,12 @@ func (m *Module) AutoUpdatePlugins(ctx core.TaskContext, am core.AssetManager, w
 		ctx.SetStatus("Парсинг rapid-источника плагинов")
 		ctx.SetProgress(0)
 	}
-	livePlugins, err := LoadLivePluginsWithProgress(taskContextOrBackground(ctx), func(state RapidScanProgress) {
+	livePlugins, err := LoadCachedLivePluginsWithProgress(taskContextOrBackground(ctx), am.Cfg().RootPath, fullVersion, func(state RapidScanProgress) {
 		if ctx == nil {
 			return
 		}
 		ctx.SetStatus(fmt.Sprintf("Парсинг плагинов: страница %d/%d", state.ProcessedPages, state.TotalPages))
-		ctx.SetProgress(rapidScanPercent(state.ProcessedPages, state.TotalPages))
+		ctx.SetProgress(liveScanPercent(state))
 	})
 	if err != nil {
 		return err
@@ -255,7 +274,7 @@ func (m *Module) AutoUpdatePlugins(ctx core.TaskContext, am core.AssetManager, w
 		return err
 	}
 
-	targets := FilterAutoUpdatePlugins(manifest, installed, cfg.DistroConfig.ExcludedPlugins, cfg.DistroConfig.AutoUpdatePlugins, compatibleApiVersions)
+	targets := FilterAutoUpdatePluginsForFront(manifest, installed, cfg.DistroConfig.ExcludedPlugins, cfg.DistroConfig.AutoUpdatePlugins, compatibleApiVersions, fullVersion)
 	slog.Info("Цели для автообновления", "count", len(targets), "targets", targets)
 
 	var updatedCount int
@@ -317,20 +336,20 @@ func deployPlugin(am core.AssetManager, wu core.WinUtils, opts deployOptions) er
 	slog.Debug("Начало deployPlugin", "plugin", opts.Plugin.Name, "isUpdate", opts.IsUpdate)
 
 	// 1. Подготовка путей
-	tempDir := filepath.Join(opts.RootPath, "temp")
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
+	workDir := pluginAssetWorkDir(am, opts.Plugin)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return fmt.Errorf("ошибка создания temp: %w", err)
 	}
 
 	// 2. Скачивание
-	zipPath, err := DownloadFile(am, opts.Plugin.DownloadUrl, tempDir)
+	zipPath, err := DownloadFile(am, opts.Plugin.DownloadUrl, workDir)
 	if err != nil {
 		return fmt.Errorf("скачивание не удалось: %w", err)
 	}
 	slog.Debug("Файл скачан", "path", zipPath)
 
 	// 3. Распаковка во временную папку
-	extractDir := filepath.Join(tempDir, fmt.Sprintf("extract_%s", opts.Plugin.Name))
+	extractDir := filepath.Join(workDir, "extracted")
 	// Очистим extractDir на случай мусора
 	_ = os.RemoveAll(extractDir)
 	if err := os.MkdirAll(extractDir, 0755); err != nil {
@@ -371,6 +390,10 @@ func deployPlugin(am core.AssetManager, wu core.WinUtils, opts deployOptions) er
 	}
 
 	// Нормализация имени: берем rawName и отрезаем версию плагина, оставляя API версию
+	pluginContentDir, rawName, err = resolvePluginInstallDir(extractDir, zipPath, opts.Plugin)
+	if err != nil {
+		return err
+	}
 	cleanName := normalizePluginDirName(rawName)
 	slog.Debug("Имя папки плагина рассчитано", "original", rawName, "normalized", cleanName)
 
@@ -414,7 +437,6 @@ func deployPlugin(am core.AssetManager, wu core.WinUtils, opts deployOptions) er
 	}
 
 	// 7. Очистка
-	_ = os.RemoveAll(tempDir)
 	return nil
 }
 
@@ -477,6 +499,9 @@ func DownloadFile(am core.AssetManager, urlStr, dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if localPath, handled, err := downloadPluginAsset(am, u, urlStr, dir); handled || err != nil {
+		return localPath, err
+	}
 	filename := filepath.Base(u.Path)
 	localPath := filepath.Join(dir, filename)
 	slog.Debug("Скачивание файла", "url", urlStr, "local", localPath)
@@ -516,11 +541,11 @@ func LoadManifest() (*Manifest, error) {
 	return &manifest, nil
 }
 
-func LoadLivePlugins() ([]Plugin, error) {
-	return LoadLivePluginsWithProgress(context.Background(), nil)
+func loadRapidPlugins() ([]Plugin, error) {
+	return loadRapidPluginsWithProgress(context.Background(), nil)
 }
 
-func LoadLivePluginsWithProgress(ctx context.Context, report func(RapidScanProgress)) ([]Plugin, error) {
+func loadRapidPluginsWithProgress(ctx context.Context, report func(RapidScanProgress)) ([]Plugin, error) {
 	zipURLs, err := scanPluginZipFilesWithProgress(ctx, RapidPluginsBaseURL, maxScanDepth, report)
 	if err != nil {
 		return nil, err
@@ -847,6 +872,7 @@ func parsePluginFromZipURL(zipURL string) (Plugin, bool) {
 		ApiVersion:    apiVersion,
 		PluginVersion: pluginVersion,
 		DownloadUrl:   zipURL,
+		Source:        PluginSourceRapid,
 	}, true
 }
 
@@ -1021,7 +1047,7 @@ func formatVersionsInfo(versions []Plugin, installed bool) string {
 		status = "[УСТАНОВЛЕН] "
 	}
 	if len(versions) == 1 {
-		return fmt.Sprintf("%s(v%s API:%s)", status, versions[0].PluginVersion, versions[0].ApiVersion)
+		return fmt.Sprintf("%s(%s | %s)", status, pluginVersionLabel(versions[0]), pluginVersionDescription(versions[0]))
 	}
 	return fmt.Sprintf("%s(%d версий)", status, len(versions))
 }
@@ -1043,15 +1069,15 @@ func selectPluginVersion(versions []Plugin) (*Plugin, error) {
 	latestVersion := sorted[0].PluginVersion
 	items := make([]tui.ChoiceItem, 0, len(sorted))
 	for _, plugin := range sorted {
-		description := fmt.Sprintf("API %s", plugin.ApiVersion)
-		if plugin.PluginVersion == latestVersion {
+		description := pluginVersionDescription(plugin)
+		if plugin.PluginVersion != "" && plugin.PluginVersion == latestVersion {
 			description += " | новейшая"
 		}
 		items = append(items, tui.ChoiceItem{
-			Title:       "v" + plugin.PluginVersion,
+			Title:       pluginVersionLabel(plugin),
 			Description: description,
 			Meta:        plugin.Name,
-			FilterValue: strings.ToLower(plugin.Name + " " + plugin.PluginVersion + " " + plugin.ApiVersion),
+			FilterValue: strings.ToLower(plugin.Name + " " + plugin.PluginVersion + " " + plugin.ApiVersion + " " + plugin.FrontVersion),
 		})
 	}
 
