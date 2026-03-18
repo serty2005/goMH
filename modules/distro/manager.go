@@ -309,7 +309,7 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 	}
 
 	if shouldCheckPendingRebootBeforeInstall(cfg) {
-		if reasons := detectPendingRebootReasons(); len(reasons) > 0 {
+		if reasons := detectPendingWindowsUpdateReasons(); len(reasons) > 0 {
 			ctx.Warn("Установка iikoFront заблокирована ожидающей перезагрузкой Windows.")
 			ctx.Info("Причины: " + strings.Join(reasons, "; "))
 			return m.scheduleResumeAfterReboot(ctx, am, wu, cfg, assets)
@@ -345,6 +345,13 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 	if err := m.runInstaller(ctx, am, assets.installerPath, cfg.Component.InstallArgs); err != nil {
 		var pendingErr *installerPendingRebootError
 		if requiresPendingRebootResume(cfg) && errors.As(err, &pendingErr) {
+			reasons := detectPendingWindowsUpdateReasons()
+			if len(reasons) == 0 {
+				ctx.Info(fmt.Sprintf("Лог установщика: %s", pendingErr.LogPath))
+				ctx.Warn("Установщик iikoFront сообщил о RebootPending, но ожидающие обновления Windows не обнаружены.")
+				return fmt.Errorf("установщик iikoFront сообщил о RebootPending, но ожидающие обновления Windows не обнаружены; лог: %s", pendingErr.LogPath)
+			}
+			ctx.Info("Причины ожидающей перезагрузки из-за обновлений Windows: " + strings.Join(reasons, "; "))
 			if cfg.resumeAttempt >= maxResumeReboots {
 				ctx.Info(fmt.Sprintf("Лог установщика: %s", pendingErr.LogPath))
 				return fmt.Errorf("установщик iikoFront после %d перезагрузок всё ещё требует завершить reboot pending", cfg.resumeAttempt)

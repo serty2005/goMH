@@ -79,3 +79,22 @@ func TestShouldCheckPendingRebootBeforeInstall(t *testing.T) {
 		t.Fatal("did not expect non-front component to use pending reboot pre-check")
 	}
 }
+
+func TestFilterPendingWindowsUpdateReasons(t *testing.T) {
+	t.Parallel()
+
+	reasons := []string{
+		pendingRebootReasonWindowsUpdateRebootRequired,
+		pendingRebootReasonComponentBasedServicing,
+		pendingRebootReasonSessionManagerPendingFileRenameOps,
+		pendingRebootReasonSessionManagerPendingFileRenameOps2,
+	}
+
+	filtered := filterPendingWindowsUpdateReasons(reasons)
+	if len(filtered) != 1 {
+		t.Fatalf("ожидалась ровно одна причина от обновлений Windows, получено %d: %v", len(filtered), filtered)
+	}
+	if filtered[0] != pendingRebootReasonWindowsUpdateRebootRequired {
+		t.Fatalf("ожидалась причина от обновлений Windows, получено %q", filtered[0])
+	}
+}

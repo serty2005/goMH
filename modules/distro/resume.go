@@ -16,6 +16,13 @@ import (
 const resumeTaskName = "goMH_Distro_Resume"
 const maxResumeReboots = 2
 
+const (
+	pendingRebootReasonComponentBasedServicing             = "Обслуживание компонентов Windows: RebootPending"
+	pendingRebootReasonWindowsUpdateRebootRequired         = "Центр обновления Windows: RebootRequired"
+	pendingRebootReasonSessionManagerPendingFileRenameOps  = "Диспетчер сеансов: PendingFileRenameOperations"
+	pendingRebootReasonSessionManagerPendingFileRenameOps2 = "Диспетчер сеансов: PendingFileRenameOperations2"
+)
+
 type distroResumeConfig struct {
 	Config        DistroInstallConfig `json:"config"`
 	ResumeAttempt int                 `json:"resume_attempt"`
@@ -225,23 +232,37 @@ func requiresPendingRebootResume(cfg *DistroInstallConfig) bool {
 		cfg.Component.ID == "iiko_front"
 }
 
+func detectPendingWindowsUpdateReasons() []string {
+	return filterPendingWindowsUpdateReasons(detectPendingRebootReasons())
+}
+
 func detectPendingRebootReasons() []string {
 	var reasons []string
 
 	if registryKeyExists(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending`) {
-		reasons = append(reasons, "Component Based Servicing: RebootPending")
+		reasons = append(reasons, pendingRebootReasonComponentBasedServicing)
 	}
 	if registryKeyExists(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired`) {
-		reasons = append(reasons, "Windows Update: RebootRequired")
+		reasons = append(reasons, pendingRebootReasonWindowsUpdateRebootRequired)
 	}
 	if registryValueExists(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Session Manager`, "PendingFileRenameOperations") {
-		reasons = append(reasons, "Session Manager: PendingFileRenameOperations")
+		reasons = append(reasons, pendingRebootReasonSessionManagerPendingFileRenameOps)
 	}
 	if registryValueExists(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Session Manager`, "PendingFileRenameOperations2") {
-		reasons = append(reasons, "Session Manager: PendingFileRenameOperations2")
+		reasons = append(reasons, pendingRebootReasonSessionManagerPendingFileRenameOps2)
 	}
 
 	return reasons
+}
+
+func filterPendingWindowsUpdateReasons(reasons []string) []string {
+	filtered := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if reason == pendingRebootReasonWindowsUpdateRebootRequired {
+			filtered = append(filtered, reason)
+		}
+	}
+	return filtered
 }
 
 func registryKeyExists(root registry.Key, path string) bool {
