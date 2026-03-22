@@ -185,7 +185,7 @@ func (h *iikoHandler) configureComponent(ctx core.TaskContext, am core.AssetMana
 	return cfg, nil
 }
 
-func (h *iikoHandler) configurePortable(ctx core.TaskContext, am core.AssetManager, comp config.DistroComponent) (*DistroInstallConfig, error) {
+func (h *iikoHandler) configurePortable(_ core.TaskContext, am core.AssetManager, comp config.DistroComponent) (*DistroInstallConfig, error) {
 	cfg := &DistroInstallConfig{
 		Brand:     "iiko",
 		Component: comp,
@@ -254,7 +254,7 @@ func (h *iikoHandler) configurePortable(ctx core.TaskContext, am core.AssetManag
 	return cfg, nil
 }
 
-func (h *iikoHandler) configureManualPatch(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
+func (h *iikoHandler) configureManualPatch(_ core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
 	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
 	exePath := filepath.Join(iikoFrontDir, "iikoFront.Net.exe")
 

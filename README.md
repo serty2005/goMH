@@ -18,6 +18,26 @@
 *   **Удаленный доступ**: Установка TeamViewer (Host), LiteManager, агента сбора данных ФР (POSRelayd).
 
 ---
+## Automation CLI
+
+В проекте появился стабильный non-interactive режим для внешнего запуска из saga/adapters:
+
+```powershell
+goMH.exe automation run --request .\request.json
+Get-Content .\request.json | goMH.exe automation run --stdin
+goMH.exe automation list-operations
+```
+
+Ключевые свойства режима:
+
+*   `stdout` содержит только финальный JSON response.
+*   `stderr` содержит только диагностические/status-сообщения.
+*   automation слой использует существующие `app/modruntime` и `taskqueue`.
+*   поддерживаются `dry_run`, `timeout_seconds`, `working_dir`, `root_override` и machine-readable task log.
+
+Подробная спецификация контракта, примеры request/response и exit codes описаны в документе [docs/automation-cli.md](docs/automation-cli.md).
+
+---
 
 ## Runtime И Очередь
 
