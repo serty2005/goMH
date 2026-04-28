@@ -510,14 +510,9 @@ func DownloadFile(am core.AssetManager, urlStr, dir string) (string, error) {
 }
 
 func GetIikoFrontVersion(wu core.WinUtils) (string, error) {
-	exePath := `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`
-	version, err := wu.GetFileVersion(exePath)
+	version, _, err := GetIikoFrontVersions(wu)
 	if err != nil {
 		return "", err
-	}
-	parts := strings.Split(version, ".")
-	if len(parts) >= 3 {
-		return strings.Join(parts[:3], "."), nil
 	}
 	return version, nil
 }

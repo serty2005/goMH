@@ -8,7 +8,6 @@ import (
 	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/tui"
 	"log/slog"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -255,8 +254,10 @@ func (h *iikoHandler) configurePortable(_ core.TaskContext, am core.AssetManager
 }
 
 func (h *iikoHandler) configureManualPatch(_ core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
-	const iikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
-	exePath := filepath.Join(iikoFrontDir, "iikoFront.Net.exe")
+	exePath, err := iikoplugins.FindIikoFrontExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("iikoFront не найден: %w", err)
+	}
 
 	ver, err := wu.GetFileVersion(exePath)
 	if err != nil {

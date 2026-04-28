@@ -467,7 +467,13 @@ func (m *Module) executeInstallPortable(ctx core.TaskContext, am core.AssetManag
 	targetExePath := filepath.Join(destDir, exeName)
 	if _, err := os.Stat(targetExePath); os.IsNotExist(err) {
 		// Рекурсивный поиск
-		if found, err := wu.FindFileRecursive(destDir, exeName); err == nil {
+		if strings.Contains(strings.ToLower(cfg.Component.ID), "front") {
+			if found, err := iikoplugins.FindIikoFrontExecutableInDir(destDir); err == nil {
+				targetExePath = found
+			} else {
+				ctx.Warn(fmt.Sprintf("Файл *iikoFront*.exe не найден, ярлык может не работать: %v", err))
+			}
+		} else if found, err := wu.FindFileRecursive(destDir, exeName); err == nil {
 			targetExePath = found
 		} else {
 			ctx.Warn(fmt.Sprintf("Файл %s не найден, ярлык может не работать.", exeName))

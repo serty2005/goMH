@@ -26,6 +26,10 @@ const ftpDirectoryScheme = "ftpdir"
 
 const livePluginsCacheSource = "cache"
 
+const defaultIikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
+
+const ftpPluginFileIdleTimeout = 2 * time.Minute
+
 type livePluginsCache struct {
 	FrontVersion string    `json:"front_version"`
 	SavedAt      time.Time `json:"saved_at"`
@@ -91,8 +95,63 @@ func GetIikoFrontVersions(wu core.WinUtils) (string, string, error) {
 }
 
 func GetIikoFrontFullVersion(wu core.WinUtils) (string, error) {
-	exePath := `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`
+	exePath, err := FindIikoFrontExecutable()
+	if err != nil {
+		return "", err
+	}
+	slog.Debug("Найден исполняемый файл iikoFront", "path", exePath)
 	return wu.GetFileVersion(exePath)
+}
+
+func FindIikoFrontExecutable() (string, error) {
+	return FindIikoFrontExecutableInDir(defaultIikoFrontDir)
+}
+
+func FindIikoFrontExecutableInDir(root string) (string, error) {
+	var candidates []string
+	err := filepath.WalkDir(root, func(current string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if isIikoFrontExecutableName(entry.Name()) {
+			candidates = append(candidates, current)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("не удалось найти исполняемый файл iikoFront в %s: %w", root, err)
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("исполняемый файл *iikoFront*.exe не найден в %s", root)
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		di := executablePathDepth(root, candidates[i])
+		dj := executablePathDepth(root, candidates[j])
+		if di != dj {
+			return di < dj
+		}
+		return strings.ToLower(candidates[i]) < strings.ToLower(candidates[j])
+	})
+	return candidates[0], nil
+}
+
+func isIikoFrontExecutableName(name string) bool {
+	if !strings.EqualFold(filepath.Ext(name), ".exe") {
+		return false
+	}
+	return strings.Contains(strings.ToLower(name), "iikofront")
+}
+
+func executablePathDepth(root, candidate string) int {
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return len(strings.Split(filepath.Clean(candidate), string(filepath.Separator)))
+	}
+	return len(strings.Split(filepath.Clean(rel), string(filepath.Separator)))
 }
 
 func liveScanPercent(state RapidScanProgress) int {
@@ -443,13 +502,16 @@ func downloadPluginAsset(am core.AssetManager, parsedURL *url.URL, rawURL, dir s
 	case ftpDirectoryScheme:
 		filename := path.Base(parsedURL.Path) + ".zip"
 		localPath := filepath.Join(dir, filename)
+		slog.Info("Скачивание FTP-папки плагина", "remote_dir", parsedURL.Path, "local", localPath)
 		if err := downloadOfficialFTPDirectoryAsZip(parsedURL.Path, localPath); err != nil {
 			return "", true, err
 		}
+		slog.Info("FTP-папка плагина упакована в локальный архив", "local", localPath)
 		return localPath, true, nil
 	case "ftp":
 		filename := path.Base(parsedURL.Path)
 		localPath := filepath.Join(dir, filename)
+		slog.Info("Скачивание FTP-архива плагина", "remote_file", parsedURL.Path, "local", localPath)
 		_, err := am.DownloadFTPWithProgress(officialIikoFTPConfig(), parsedURL.Path, localPath)
 		return localPath, true, err
 	default:
@@ -487,6 +549,9 @@ func downloadFTPDirectory(conn *ftp.ServerConn, remoteDir, localDir string) erro
 		return err
 	}
 	for _, entry := range entries {
+		if entry.Name == "." || entry.Name == ".." {
+			continue
+		}
 		remotePath := path.Join(remoteDir, entry.Name)
 		localPath := filepath.Join(localDir, entry.Name)
 		switch entry.Type {
@@ -495,6 +560,7 @@ func downloadFTPDirectory(conn *ftp.ServerConn, remoteDir, localDir string) erro
 				return err
 			}
 		case ftp.EntryTypeFile:
+			slog.Debug("Скачивание файла из FTP-папки плагина", "remote_file", remotePath, "local", localPath)
 			if err := downloadFTPFile(conn, remotePath, localPath); err != nil {
 				return err
 			}
@@ -519,8 +585,24 @@ func downloadFTPFile(conn *ftp.ServerConn, remotePath, localPath string) error {
 	}
 	defer file.Close()
 
-	_, err = io.Copy(file, reader)
+	_, err = io.Copy(file, &ftpDeadlineReader{
+		reader:  reader,
+		timeout: ftpPluginFileIdleTimeout,
+	})
 	return err
+}
+
+type ftpDeadlineReader struct {
+	reader interface {
+		io.Reader
+		SetDeadline(time.Time) error
+	}
+	timeout time.Duration
+}
+
+func (r *ftpDeadlineReader) Read(p []byte) (int, error) {
+	_ = r.reader.SetDeadline(time.Now().Add(r.timeout))
+	return r.reader.Read(p)
 }
 
 func zipDirectory(srcDir, destZipPath string) error {

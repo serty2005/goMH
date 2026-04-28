@@ -259,6 +259,58 @@ func TestReadLivePluginsCacheMissingFile(t *testing.T) {
 	}
 }
 
+func TestIsIikoFrontExecutableName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "iikoFront.Net.exe", want: true},
+		{name: "iikoFront.exe", want: true},
+		{name: "New.iikoFront.Launcher.EXE", want: true},
+		{name: "BackOffice.exe", want: false},
+		{name: "iikoFront.exe.config", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isIikoFrontExecutableName(tt.name); got != tt.want {
+				t.Fatalf("isIikoFrontExecutableName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindIikoFrontExecutableInDirFindsShallowExe(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	nestedExe := filepath.Join(nested, "iikoFront.Worker.exe")
+	if err := os.WriteFile(nestedExe, []byte("exe"), 0o644); err != nil {
+		t.Fatalf("write nested exe: %v", err)
+	}
+	shallowExe := filepath.Join(root, "New.iikoFront.Launcher.exe")
+	if err := os.WriteFile(shallowExe, []byte("exe"), 0o644); err != nil {
+		t.Fatalf("write shallow exe: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "iikoFront.exe.config"), []byte("config"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := FindIikoFrontExecutableInDir(root)
+	if err != nil {
+		t.Fatalf("FindIikoFrontExecutableInDir() error = %v", err)
+	}
+	if got != shallowExe {
+		t.Fatalf("FindIikoFrontExecutableInDir() = %q, want %q", got, shallowExe)
+	}
+}
+
 func TestResolvePluginInstallDirUsesTopLevelPluginFolder(t *testing.T) {
 	t.Parallel()
 

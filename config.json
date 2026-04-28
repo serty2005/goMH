@@ -184,7 +184,8 @@
 		],
 		"auto_update_plugins": [
 			"DualConnector",
-			"SberbankPlugin"
+			"SberbankPlugin",
+			"Jetton"
 		]
 	},
 	"TeamViewerConfig": {
