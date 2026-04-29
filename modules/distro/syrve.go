@@ -1,23 +1,30 @@
 package distro
 
 import (
-	"encoding/json"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"goMH/config"
 	"goMH/core"
 	"goMH/tui"
-	"io" // Импорт
-	"net/http"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/jlaffaye/ftp"
 )
 
 type syrveHandler struct{}
 
-type syrveVersionInfo struct {
-	FullVersion string `json:"full_version"`
-}
+const (
+	syrveFtpHost      = "ftp.syrve.online:21"
+	syrveFtpServer    = "ftp.syrve.online"
+	syrveFtpUser      = "syrvepartners"
+	syrveFtpPass      = "partners#syrve"
+	syrveReleasesPath = "/release_syrve"
+)
+
+var syrveVersionRegex = regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`)
 
 func (h *syrveHandler) ConfigureBrand(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*DistroInstallConfig, error) {
 	components := am.Cfg().DistroConfig.Syrve.Components
@@ -175,31 +182,65 @@ func (h *syrveHandler) configurePortable(ctx core.TaskContext, am core.AssetMana
 }
 
 func (h *syrveHandler) fetchVersions() ([]string, error) {
-	const manifestURL = "http://f.serty.top/distr/installer/syrve-manifest.json"
-	resp, err := http.Get(manifestURL)
+	c, err := dialSyrveFTPS()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to connect to Syrve FTPS: %w", err)
 	}
-	defer resp.Body.Close()
+	defer c.Quit()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	names, err := c.NameList(syrveReleasesPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list Syrve releases directory: %w", err)
 	}
 
-	var versionsData []syrveVersionInfo
-	if err := json.Unmarshal(body, &versionsData); err != nil {
-		return nil, err
+	versions := extractSyrveVersions(names)
+	if len(versions) == 0 {
+		return nil, errors.New("Syrve releases directory does not contain version folders")
 	}
-
-	var versions []string
-	for _, v := range versionsData {
-		versions = append(versions, v.FullVersion)
-	}
-	sortVersionsDesc(versions)
 	return versions, nil
+}
+
+func dialSyrveFTPS() (*ftp.ServerConn, error) {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: syrveFtpServer,
+	}
+
+	c, err := ftp.Dial(
+		syrveFtpHost,
+		ftp.DialWithTimeout(10*time.Second),
+		ftp.DialWithExplicitTLS(tlsConfig),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.Login(syrveFtpUser, syrveFtpPass); err != nil {
+		c.Quit()
+		return nil, err
+	}
+
+	return c, nil
+}
+
+func extractSyrveVersions(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	versions := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.Trim(strings.TrimSpace(name), "/")
+		if idx := strings.LastIndex(name, "/"); idx >= 0 {
+			name = name[idx+1:]
+		}
+		if !syrveVersionRegex.MatchString(name) {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		versions = append(versions, name)
+	}
+
+	sortVersionsDesc(versions)
+	return versions
 }
