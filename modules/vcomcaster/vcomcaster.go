@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	taskName        = "VComCaster Autostart"
-	iikoProcessName = "iikoFront"
+	autostartValueName = "VComCaster Autostart"
+	iikoProcessName    = "iikoFront"
 )
 
 // ActionType определяет тип задачи для VComCaster
@@ -232,8 +232,8 @@ func (m *Module) configureDiagnostics(wu core.WinUtils, baseDir string) (*VComCa
 	if _, err := os.Stat(configPath); err != nil {
 		problems = append(problems, "x Файл config.ini не найден.")
 	}
-	if _, err := wu.RunCommand("schtasks", "/Query", "/TN", taskName); err != nil {
-		problems = append(problems, fmt.Sprintf("x Задача '%s' не найдена.", taskName))
+	if !wu.RegistryAutostartValueExists(core.AutostartScopeUser, core.AutostartRegistryKeyRun, autostartValueName) {
+		problems = append(problems, fmt.Sprintf("x Запись автозапуска '%s' не найдена.", autostartValueName))
 	}
 
 	subtitle := "Проблем не обнаружено."
@@ -336,10 +336,16 @@ func (m *Module) install(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	// 4. Финальная настройка
 	ctx.Info("Настройка автозапуска...")
 	vcomcasterExePath := filepath.Join(vcomcasterDestPath, "vcomcaster.exe")
-	if err := wu.CreateScheduledTask(taskName, vcomcasterExePath, "", vcomcasterDestPath); err != nil {
-		ctx.Warn(fmt.Sprintf("Не удалось создать задачу планировщика: %v", err))
+	if err := wu.AddRegistryAutostartEntry(core.AutostartCreateRequest{
+		Name:             autostartValueName,
+		RegistryKey:      core.AutostartRegistryKeyRun,
+		Scope:            core.AutostartScopeUser,
+		Path:             vcomcasterExePath,
+		WorkingDirectory: vcomcasterDestPath,
+	}); err != nil {
+		ctx.Warn(fmt.Sprintf("Не удалось создать запись автозапуска: %v", err))
 	} else {
-		ctx.Success("Задача автозапуска создана.")
+		ctx.Success("Запись автозапуска создана.")
 	}
 
 	// Обновление iiko (если есть второй порт)
@@ -371,10 +377,8 @@ func (m *Module) uninstall(ctx core.TaskContext, am core.AssetManager, wu core.W
 	ctx.Info("Остановка процессов...")
 	_, _ = wu.RunCommand("taskkill", "/F", "/IM", "vcomcaster.exe")
 
-	ctx.Info("Удаление задачи планировщика...")
-	if _, err := wu.RunCommand("schtasks", "/Delete", "/TN", taskName, "/F"); err != nil {
-		// Игнорируем ошибку, если задачи нет
-	}
+	ctx.Info("Удаление записи автозапуска...")
+	_ = wu.DeleteRegistryAutostartValue(core.AutostartScopeUser, core.AutostartRegistryKeyRun, autostartValueName)
 
 	uninstallerPath := filepath.Join(installPath, "com0com", "uninstall.exe")
 	if _, err := os.Stat(uninstallerPath); err == nil {

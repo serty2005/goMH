@@ -31,6 +31,71 @@ type ScannerInfo struct {
 
 // WinUtils определяет контракт для утилит, специфичных для Windows.
 // Модули будут зависеть от этого интерфейса, а не от конкретного пакета winutils.
+type AutostartSource string
+
+const (
+	AutostartSourceRegistryRun     AutostartSource = "registry_run"
+	AutostartSourceRegistryRunOnce AutostartSource = "registry_runonce"
+	AutostartSourceStartupFolder   AutostartSource = "startup_folder"
+	AutostartSourceScheduledTask   AutostartSource = "scheduled_task"
+)
+
+type AutostartScope string
+
+const (
+	AutostartScopeUser    AutostartScope = "user"
+	AutostartScopeMachine AutostartScope = "machine"
+)
+
+type AutostartRegistryKey string
+
+const (
+	AutostartRegistryKeyRun     AutostartRegistryKey = "Run"
+	AutostartRegistryKeyRunOnce AutostartRegistryKey = "RunOnce"
+)
+
+type AutostartEntry struct {
+	ID               string
+	Name             string
+	Source           AutostartSource
+	Scope            AutostartScope
+	Enabled          bool
+	Command          string
+	TargetPath       string
+	Arguments        string
+	WorkingDirectory string
+	RegistryKey      AutostartRegistryKey
+	RegistryValue    string
+	FilePath         string
+	TaskName         string
+	CanToggle        bool
+}
+
+type AutostartChange struct {
+	Entry   AutostartEntry
+	Enabled bool
+}
+
+type AutostartScanProgress struct {
+	Area  string
+	Found int
+}
+
+type AutostartCreateRequest struct {
+	Name             string
+	RegistryKey      AutostartRegistryKey
+	Scope            AutostartScope
+	Path             string
+	Arguments        string
+	WorkingDirectory string
+}
+
+type ShortcutInfo struct {
+	TargetPath       string
+	Arguments        string
+	WorkingDirectory string
+}
+
 type WinUtils interface {
 	RunCommand(name string, args ...string) (string, error)
 	RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error)
@@ -61,6 +126,13 @@ type WinUtils interface {
 	MoveFile(src, dst string) error
 	MoveDir(src, dst string) error
 	ReadRegistryKey(rootKey registry.Key, path, valueName string) (string, error)
+	ListAutostartEntries() ([]AutostartEntry, error)
+	ListAutostartEntriesWithProgress(progress func(AutostartScanProgress)) ([]AutostartEntry, error)
+	ApplyAutostartChanges(changes []AutostartChange) error
+	AddRegistryAutostartEntry(req AutostartCreateRequest) error
+	DeleteRegistryAutostartValue(scope AutostartScope, key AutostartRegistryKey, valueName string) error
+	RegistryAutostartValueExists(scope AutostartScope, key AutostartRegistryKey, valueName string) bool
+	ResolveShortcut(path string) (ShortcutInfo, error)
 	UninstallSystemApp(partialName string) error
 	ExtractArchive(archivePath, destDir string, fullPaths bool) error
 	GetDesktopDir() (string, error)

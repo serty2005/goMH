@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-const resumeTaskName = "goMH_Distro_Resume"
+const resumeRunOnceValueName = "goMH_Distro_Resume"
 const maxResumeReboots = 2
 
 const (
@@ -77,13 +77,13 @@ func (m *Module) Resume(am core.AssetManager, wu core.WinUtils, configPath strin
 		if isRebootResumeScheduled(err) {
 			return nil
 		}
-		_ = wu.DeleteScheduledTaskByName(resumeTaskName)
+		_ = wu.DeleteRegistryAutostartValue(core.AutostartScopeUser, core.AutostartRegistryKeyRunOnce, resumeRunOnceValueName)
 		return err
 	}
 
 	ctx.Info("Очистка временных файлов возобновления...")
 	_ = os.Remove(configPath)
-	_ = wu.DeleteScheduledTaskByName(resumeTaskName)
+	_ = wu.DeleteRegistryAutostartValue(core.AutostartScopeUser, core.AutostartRegistryKeyRunOnce, resumeRunOnceValueName)
 
 	return nil
 }
@@ -125,11 +125,18 @@ func (m *Module) scheduleResumeAfterReboot(ctx core.TaskContext, am core.AssetMa
 	}
 
 	args := fmt.Sprintf("-module %s -resume \"%s\"", m.ID(), resumeConfigPath)
-	if err := wu.CreateScheduledTask(resumeTaskName, exePath, args, filepath.Dir(exePath)); err != nil {
-		return fmt.Errorf("не удалось создать задачу автозапуска: %w", err)
+	if err := wu.AddRegistryAutostartEntry(core.AutostartCreateRequest{
+		Name:             resumeRunOnceValueName,
+		RegistryKey:      core.AutostartRegistryKeyRunOnce,
+		Scope:            core.AutostartScopeUser,
+		Path:             exePath,
+		Arguments:        args,
+		WorkingDirectory: filepath.Dir(exePath),
+	}); err != nil {
+		return fmt.Errorf("не удалось создать запись RunOnce для автозапуска: %w", err)
 	}
 
-	ctx.Success("Задача автозапуска создана. Система будет перезагружена для завершения обновлений Windows.")
+	ctx.Success("Запись RunOnce для автозапуска создана. Система будет перезагружена для завершения обновлений Windows.")
 	time.Sleep(2 * time.Second)
 
 	if err := wu.Reboot(); err != nil {

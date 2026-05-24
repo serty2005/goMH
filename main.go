@@ -126,7 +126,10 @@ func scheduledTaskExists(taskName string) bool {
 }
 
 func shouldPreserveRootTemp() bool {
-	return scheduledTaskExists(distroResumeTaskName()) || scheduledTaskExists(regimeResumeTaskName())
+	return scheduledTaskExists(distroResumeTaskName()) ||
+		scheduledTaskExists(regimeResumeTaskName()) ||
+		winutils.RegistryAutostartValueExists(core.AutostartScopeUser, core.AutostartRegistryKeyRunOnce, distroResumeTaskName()) ||
+		winutils.RegistryAutostartValueExists(core.AutostartScopeUser, core.AutostartRegistryKeyRunOnce, regimeResumeTaskName())
 }
 
 func distroResumeTaskName() string {

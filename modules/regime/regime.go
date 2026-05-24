@@ -43,7 +43,7 @@ func (cfg *RegimeInstallConfig) TaskConfirmation() core.TaskConfirmation {
 	}
 }
 
-const resumeTaskName = "goMH_Regime_Resume"
+const resumeRunOnceValueName = "goMH_Regime_Resume"
 
 // checkDotNet48 проверяет установленную версию .NET Framework 4.8
 func checkDotNet48() (bool, error) {
@@ -232,7 +232,7 @@ func (m *Module) Resume(am core.AssetManager, wu core.WinUtils, configPath strin
 	// 3. Очистка
 	ctx.Info("Очистка временных файлов возобновления...")
 	_ = os.Remove(configPath)
-	_ = wu.DeleteScheduledTaskByName(resumeTaskName)
+	_ = wu.DeleteRegistryAutostartValue(core.AutostartScopeUser, core.AutostartRegistryKeyRunOnce, resumeRunOnceValueName)
 
 	return nil
 }
@@ -273,11 +273,18 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		exePath, _ := os.Executable()
 		args := fmt.Sprintf("-module Regime -resume \"%s\"", resumeConfigPath)
 
-		if err := wu.CreateScheduledTask(resumeTaskName, exePath, args, filepath.Dir(exePath)); err != nil {
-			return fmt.Errorf("не удалось создать задачу автозапуска: %w", err)
+		if err := wu.AddRegistryAutostartEntry(core.AutostartCreateRequest{
+			Name:             resumeRunOnceValueName,
+			RegistryKey:      core.AutostartRegistryKeyRunOnce,
+			Scope:            core.AutostartScopeUser,
+			Path:             exePath,
+			Arguments:        args,
+			WorkingDirectory: filepath.Dir(exePath),
+		}); err != nil {
+			return fmt.Errorf("не удалось создать запись RunOnce для автозапуска: %w", err)
 		}
 
-		ctx.Success("Задача автозапуска создана. Перезагрузка через 5 секунд...")
+		ctx.Success("Запись RunOnce для автозапуска создана. Перезагрузка через 5 секунд...")
 		time.Sleep(2 * time.Second)
 
 		if err := wu.Reboot(); err != nil {

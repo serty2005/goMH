@@ -163,6 +163,34 @@ func (rw *RealWinUtils) ReadRegistryKey(rootKey registry.Key, path, valueName st
 	return winutils.ReadRegistryKey(rootKey, path, valueName)
 }
 
+func (rw *RealWinUtils) ListAutostartEntries() ([]core.AutostartEntry, error) {
+	return winutils.ListAutostartEntries()
+}
+
+func (rw *RealWinUtils) ListAutostartEntriesWithProgress(progress func(core.AutostartScanProgress)) ([]core.AutostartEntry, error) {
+	return winutils.ListAutostartEntriesWithProgress(progress)
+}
+
+func (rw *RealWinUtils) ApplyAutostartChanges(changes []core.AutostartChange) error {
+	return winutils.ApplyAutostartChanges(changes)
+}
+
+func (rw *RealWinUtils) AddRegistryAutostartEntry(req core.AutostartCreateRequest) error {
+	return winutils.AddRegistryAutostartEntry(req)
+}
+
+func (rw *RealWinUtils) DeleteRegistryAutostartValue(scope core.AutostartScope, key core.AutostartRegistryKey, valueName string) error {
+	return winutils.DeleteRegistryAutostartValue(scope, key, valueName)
+}
+
+func (rw *RealWinUtils) RegistryAutostartValueExists(scope core.AutostartScope, key core.AutostartRegistryKey, valueName string) bool {
+	return winutils.RegistryAutostartValueExists(scope, key, valueName)
+}
+
+func (rw *RealWinUtils) ResolveShortcut(path string) (core.ShortcutInfo, error) {
+	return winutils.ResolveShortcut(path)
+}
+
 func (rw *RealWinUtils) UninstallSystemApp(partialName string) error {
 	return rw.withRuntime().UninstallSystemApp(partialName)
 }
