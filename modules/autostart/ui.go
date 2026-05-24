@@ -75,6 +75,9 @@ type model struct {
 	addKind        core.AutostartRegistryKey
 	pathInput      textinput.Model
 	argsInput      textinput.Model
+	searchInput    textinput.Model
+	searching      bool
+	searchQuery    string
 	clipboardRead  func() (string, error)
 	sourceFilter   core.AutostartSource
 	statusFilter   statusFilter
@@ -122,6 +125,9 @@ func newModel(entries []core.AutostartEntry) model {
 	argsInput := textinput.New()
 	argsInput.Placeholder = "--argument value"
 	argsInput.CharLimit = 1024
+	searchInput := textinput.New()
+	searchInput.Placeholder = "поиск по имени или команде"
+	searchInput.CharLimit = 256
 
 	original := make(map[string]bool, len(entries))
 	for _, entry := range entries {
@@ -133,6 +139,7 @@ func newModel(entries []core.AutostartEntry) model {
 		addKind:       core.AutostartRegistryKeyRun,
 		pathInput:     pathInput,
 		argsInput:     argsInput,
+		searchInput:   searchInput,
 		clipboardRead: clipboard.ReadAll,
 		statusFilter:  statusFilterAll,
 		titleStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F3E9D2")),
@@ -213,6 +220,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.adding != addModeNone {
 			return m.updateAdd(msg)
 		}
+		if m.searching {
+			return m.updateSearch(msg)
+		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			m.cancelled = true
@@ -262,9 +272,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "0":
 			m.sourceFilter = ""
 			m.statusFilter = statusFilterAll
+			m.searchQuery = ""
+			m.searchInput.SetValue("")
 			m.cursor = 0
 			m.scroll = 0
 			return m, nil
+		case "/":
+			m.startSearch()
+			return m, textinput.Blink
 		case "s":
 			if !m.dirty() {
 				return m, nil
@@ -291,6 +306,9 @@ func (m model) View() string {
 	}
 	if m.adding != addModeNone {
 		return m.renderAdd(width, height)
+	}
+	if m.searching {
+		return m.renderSearch(width, height)
 	}
 	if m.detail.visible {
 		return m.renderDetail(width, height)
@@ -383,6 +401,25 @@ func (m model) updateAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.searching = false
+		m.searchInput.Blur()
+		return m, nil
+	case "enter":
+		m.searchQuery = strings.TrimSpace(m.searchInput.Value())
+		m.searching = false
+		m.searchInput.Blur()
+		m.cursor = 0
+		m.scroll = 0
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(msg)
+	return m, cmd
+}
+
 func (m *model) startAdd() {
 	m.adding = addModeKind
 	m.addKind = core.AutostartRegistryKeyRun
@@ -391,8 +428,15 @@ func (m *model) startAdd() {
 	m.errText = ""
 }
 
+func (m *model) startSearch() {
+	m.searching = true
+	m.searchInput.SetValue(m.searchQuery)
+	m.searchInput.Focus()
+	m.errText = ""
+}
+
 func (m *model) finishAdd() {
-	path := strings.TrimSpace(m.pathInput.Value())
+	path := cleanAddedPath(m.pathInput.Value())
 	if path == "" {
 		m.errText = "Укажите путь до exe или lnk."
 		return
@@ -523,9 +567,27 @@ func (m model) filteredEntryIndexes() []int {
 				continue
 			}
 		}
+		if !m.matchesSearch(entry) {
+			continue
+		}
 		indexes = append(indexes, index)
 	}
 	return indexes
+}
+
+func (m model) matchesSearch(entry core.AutostartEntry) bool {
+	query := strings.ToLower(strings.TrimSpace(m.searchQuery))
+	if query == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		entry.Name,
+		entry.Command,
+		entry.TargetPath,
+		entry.FilePath,
+		entry.Arguments,
+	}, "\n"))
+	return strings.Contains(haystack, query)
 }
 
 func (m model) currentEntryIndex() int {
@@ -585,10 +647,15 @@ func (m *model) openCurrentDetail() {
 }
 
 func (m model) renderFilters() string {
+	search := m.searchQuery
+	if search == "" {
+		search = "нет"
+	}
 	return m.mutedStyle.Render(fmt.Sprintf(
-		"Фильтр источник: %s   статус: %s",
+		"Фильтр источник: %s   статус: %s   поиск: %s",
 		sourceFilterLabel(m.sourceFilter),
 		statusFilterLabel(m.statusFilter),
+		search,
 	))
 }
 
@@ -618,6 +685,17 @@ func (m model) renderDetail(width, height int) string {
 		m.mutedStyle.Render("Space/Enter/Esc закрыть"),
 	}
 	panel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5F6F52")).Padding(1, 2).Width(min(110, max(40, width-8))).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
+}
+
+func (m model) renderSearch(width, height int) string {
+	lines := []string{
+		m.titleStyle.Render("Поиск автозапуска"),
+		m.mutedStyle.Render("Enter применить, Esc отменить"),
+		"",
+		m.searchInput.View(),
+	}
+	panel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#5F6F52")).Padding(1, 2).Width(min(90, max(40, width-8))).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
 }
 
@@ -771,6 +849,7 @@ func (m model) pasteIntoFocusedInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.adding == addModePath {
+		text = cleanAddedPath(text)
 		appendToInput(&m.pathInput, text)
 	}
 	if m.adding == addModeArgs {
@@ -788,6 +867,10 @@ func appendToInput(input *textinput.Model, text string) {
 	}
 	input.SetValue(value[:pos] + text + value[pos:])
 	input.SetCursor(pos + len(text))
+}
+
+func cleanAddedPath(value string) string {
+	return strings.Trim(strings.TrimSpace(value), `"`)
 }
 
 func sourceForRegistryKey(key core.AutostartRegistryKey) core.AutostartSource {

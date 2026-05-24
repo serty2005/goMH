@@ -145,12 +145,51 @@ func TestModelFiltersAndShowsCellDetails(t *testing.T) {
 	}
 }
 
+func TestModelSearchFiltersByNameCommandAndReset(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{
+			ID:      "registry|user|Run|App",
+			Name:    "Front App",
+			Command: `C:\Front\front.exe`,
+		},
+		{
+			ID:      "registry|user|Run|Agent",
+			Name:    "Agent",
+			Command: `C:\Tools\agent.exe --silent`,
+		},
+	})
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mdl = updated.(model)
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("agent")})
+	mdl = updated.(model)
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+
+	entries := mdl.filteredEntries()
+	if len(entries) != 1 {
+		t.Fatalf("len(filtered entries) = %d, want 1", len(entries))
+	}
+	if entries[0].Name != "Agent" {
+		t.Fatalf("filtered entry = %q, want Agent", entries[0].Name)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	mdl = updated.(model)
+	if mdl.searchQuery != "" {
+		t.Fatalf("search query = %q, want empty", mdl.searchQuery)
+	}
+	if got := len(mdl.filteredEntries()); got != 2 {
+		t.Fatalf("len(filtered entries after reset) = %d, want 2", got)
+	}
+}
+
 func TestModelPastesFromClipboardInAddMode(t *testing.T) {
 	mdl := newModel(nil)
 	mdl.adding = addModePath
 	mdl.pathInput.Focus()
 	mdl.clipboardRead = func() (string, error) {
-		return `C:\Tools\agent.exe`, nil
+		return `"C:\Tools\agent.exe"`, nil
 	}
 
 	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
@@ -164,5 +203,24 @@ func TestModelPastesFromClipboardInAddMode(t *testing.T) {
 	mdl = updated.(model)
 	if got := mdl.pathInput.Value(); got != `C:\Tools\agent.exe` {
 		t.Fatalf("right-click paste path input = %q", got)
+	}
+}
+
+func TestModelFinishAddStripsSurroundingPathQuotes(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.adding = addModePath
+	mdl.pathInput.SetValue(` "C:\Program Files\Agent\agent.exe" `)
+	mdl.argsInput.SetValue("--silent")
+
+	mdl.finishAdd()
+
+	if len(mdl.creates) != 1 {
+		t.Fatalf("len(creates) = %d, want 1", len(mdl.creates))
+	}
+	if got := mdl.creates[0].Path; got != `C:\Program Files\Agent\agent.exe` {
+		t.Fatalf("create path = %q", got)
+	}
+	if got := mdl.entries[0].Command; got != `C:\Program Files\Agent\agent.exe --silent` {
+		t.Fatalf("entry command = %q", got)
 	}
 }
