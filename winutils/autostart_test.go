@@ -1,6 +1,8 @@
 package winutils
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"goMH/core"
@@ -13,6 +15,59 @@ func TestBuildAutostartCommandQuotesExecutableAndArguments(t *testing.T) {
 	if command != want {
 		t.Fatalf("command = %q, want %q", command, want)
 	}
+}
+
+func TestBuildAutostartCommandLeavesExecutableWithoutSpacesUnquoted(t *testing.T) {
+	command := buildAutostartCommand(`C:\Tools\App\app.exe`, "--silent")
+
+	want := `C:\Tools\App\app.exe --silent`
+	if command != want {
+		t.Fatalf("command = %q, want %q", command, want)
+	}
+}
+
+func TestGetStartupFoldersExpandsProgramDataCommonStartup(t *testing.T) {
+	programData := filepath.Join(t.TempDir(), "ProgramData")
+	t.Setenv("ProgramData", programData)
+
+	_, common, err := GetStartupFolders()
+	if err != nil {
+		t.Fatalf("GetStartupFolders returned error: %v", err)
+	}
+	if common == "" || common[0] == '%' {
+		t.Fatalf("common startup folder was not expanded: %q", common)
+	}
+	want := filepath.Join(programData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+	if common != want {
+		t.Fatalf("common startup folder = %q, want %q", common, want)
+	}
+	if _, err := os.Stat(filepath.Dir(common)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("common startup parent should be a normal filesystem path: %v", err)
+	}
+}
+
+func TestListStartupFolderEntriesIncludesProgramDataStartupShortcut(t *testing.T) {
+	programData := filepath.Join(t.TempDir(), "ProgramData")
+	t.Setenv("ProgramData", programData)
+	commonStartup := filepath.Join(programData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+	if err := os.MkdirAll(commonStartup, 0o755); err != nil {
+		t.Fatalf("create common startup: %v", err)
+	}
+	shortcutPath := filepath.Join(commonStartup, "Agent.lnk")
+	if err := os.WriteFile(shortcutPath, []byte("test shortcut placeholder"), 0o644); err != nil {
+		t.Fatalf("create shortcut placeholder: %v", err)
+	}
+
+	entries, err := listStartupFolderEntries()
+	if err != nil {
+		t.Fatalf("listStartupFolderEntries returned error: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.FilePath == shortcutPath && entry.Scope == core.AutostartScopeMachine {
+			return
+		}
+	}
+	t.Fatalf("ProgramData startup shortcut %q was not listed: %#v", shortcutPath, entries)
 }
 
 func TestParseScheduledAutostartTasksKeepsLogonAndBootTriggers(t *testing.T) {

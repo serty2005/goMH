@@ -494,8 +494,12 @@ func GetStartupFolders() (user, common string, err error) {
 	}
 	user = filepath.Join(userConfigDir, "..", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 
-	// Общая папка автозагрузки
-	common = os.ExpandEnv(`%ProgramData%\Microsoft\Windows\Start Menu\Programs\StartUp`)
+	// Общая папка автозагрузки.
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	common = filepath.Join(programData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 	return user, common, nil
 }
 

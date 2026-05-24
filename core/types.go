@@ -76,6 +76,14 @@ type AutostartChange struct {
 	Enabled bool
 }
 
+type AutostartEdit struct {
+	Original         AutostartEntry
+	Name             string
+	Path             string
+	Arguments        string
+	WorkingDirectory string
+}
+
 type AutostartScanProgress struct {
 	Area  string
 	Found int

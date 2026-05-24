@@ -32,6 +32,11 @@ func TestModelTogglesEntryAndSavesChanges(t *testing.T) {
 
 	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	mdl = updated.(model)
+	if !mdl.confirming {
+		t.Fatalf("model should show confirmation before save")
+	}
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
 	if !mdl.saved {
 		t.Fatalf("model should be saved")
 	}
@@ -40,6 +45,77 @@ func TestModelTogglesEntryAndSavesChanges(t *testing.T) {
 	}
 	if mdl.result.Changes[0].Enabled {
 		t.Fatalf("saved change should disable entry")
+	}
+}
+
+func TestModelMouseWheelScrollsAndHoverSelectsRowForSpaceToggle(t *testing.T) {
+	entries := make([]core.AutostartEntry, 0, 10)
+	for i := range 10 {
+		entries = append(entries, core.AutostartEntry{
+			ID:        string(rune('a' + i)),
+			Name:      string(rune('A' + i)),
+			Source:    core.AutostartSourceRegistryRun,
+			Scope:     core.AutostartScopeUser,
+			Enabled:   true,
+			CanToggle: true,
+		})
+	}
+	mdl := newModel(entries)
+	mdl.height = 12
+
+	updated, _ := mdl.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	mdl = updated.(model)
+	if mdl.scroll != 1 {
+		t.Fatalf("scroll = %d, want 1", mdl.scroll)
+	}
+
+	updated, _ = mdl.Update(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonNone, Y: mdl.listTop() + 2})
+	mdl = updated.(model)
+	if mdl.cursor != 3 {
+		t.Fatalf("cursor = %d, want 3", mdl.cursor)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeySpace})
+	mdl = updated.(model)
+	if mdl.entries[3].Enabled {
+		t.Fatalf("hovered entry should be disabled after space")
+	}
+}
+
+func TestModelMouseClickStatusTogglesAndRowClickOpensEditor(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{
+			ID:            "registry|user|Run|App",
+			Name:          "App",
+			Source:        core.AutostartSourceRegistryRun,
+			Scope:         core.AutostartScopeUser,
+			Enabled:       true,
+			TargetPath:    `C:\Tools\app.exe`,
+			Arguments:     "--silent",
+			RegistryKey:   core.AutostartRegistryKeyRun,
+			RegistryValue: "App",
+			CanToggle:     true,
+		},
+	})
+	mdl.width = 100
+	mdl.height = 20
+
+	updated, _ := mdl.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 52, Y: mdl.listTop()})
+	mdl = updated.(model)
+	if mdl.entries[0].Enabled {
+		t.Fatalf("status click should disable entry")
+	}
+	if mdl.editing {
+		t.Fatalf("status click should not open editor")
+	}
+
+	updated, _ = mdl.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 2, Y: mdl.listTop()})
+	mdl = updated.(model)
+	if !mdl.editing {
+		t.Fatalf("row click should open editor")
+	}
+	if got := mdl.editNameInput.Value(); got != "App" {
+		t.Fatalf("edit name input = %q", got)
 	}
 }
 
@@ -90,7 +166,7 @@ func TestModelShowsScanProgress(t *testing.T) {
 	}
 }
 
-func TestModelFiltersAndShowsCellDetails(t *testing.T) {
+func TestModelFiltersSpaceTogglesAndEnterOpensEditor(t *testing.T) {
 	mdl := newModel([]core.AutostartEntry{
 		{
 			ID:        "registry|user|Run|App",
@@ -123,25 +199,16 @@ func TestModelFiltersAndShowsCellDetails(t *testing.T) {
 	}
 
 	mdl.statusFilter = statusFilterAll
-	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeySpace})
 	mdl = updated.(model)
-	if mdl.selectedColumn != columnCommand {
-		t.Fatalf("selected column = %v, want command", mdl.selectedColumn)
-	}
-	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeySpace})
-	mdl = updated.(model)
-	if !mdl.detail.visible || !strings.Contains(mdl.detail.body, "--hidden") {
-		t.Fatalf("command detail not opened: %#v", mdl.detail)
+	if mdl.entries[0].Enabled {
+		t.Fatalf("space should toggle current entry")
 	}
 
-	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	mdl = updated.(model)
-	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyLeft})
-	mdl = updated.(model)
-	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeySpace})
-	mdl = updated.(model)
-	if !mdl.detail.visible || !strings.Contains(mdl.detail.body, "App") {
-		t.Fatalf("name detail not opened: %#v", mdl.detail)
+	if !mdl.editing || mdl.editNameInput.Value() != "App" {
+		t.Fatalf("enter should open editor for current row")
 	}
 }
 
@@ -222,5 +289,217 @@ func TestModelFinishAddStripsSurroundingPathQuotes(t *testing.T) {
 	}
 	if got := mdl.entries[0].Command; got != `C:\Program Files\Agent\agent.exe --silent` {
 		t.Fatalf("entry command = %q", got)
+	}
+}
+
+func TestModelSaveConfirmationAppliesOnlyCheckedChanges(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{ID: "one", Name: "One", Enabled: true, CanToggle: true},
+		{ID: "two", Name: "Two", Enabled: true, CanToggle: true},
+	})
+	mdl.entries[0].Enabled = false
+	mdl.entries[1].Enabled = false
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	mdl = updated.(model)
+	if !mdl.confirming {
+		t.Fatalf("model should be confirming")
+	}
+	if len(mdl.confirmItems) != 2 {
+		t.Fatalf("len(confirmItems) = %d, want 2", len(mdl.confirmItems))
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeySpace})
+	mdl = updated.(model)
+	if mdl.confirmItems[0].Selected {
+		t.Fatalf("first confirmation item should be unchecked")
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	if !mdl.saved {
+		t.Fatalf("model should save selected items")
+	}
+	if len(mdl.result.Changes) != 1 {
+		t.Fatalf("len(saved changes) = %d, want 1", len(mdl.result.Changes))
+	}
+	if mdl.result.Changes[0].Entry.ID != "two" {
+		t.Fatalf("saved change id = %q, want two", mdl.result.Changes[0].Entry.ID)
+	}
+}
+
+func TestModelSaveConfirmationWithNoCheckedItemsDoesNotApply(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{ID: "one", Name: "One", Enabled: true, CanToggle: true},
+	})
+	mdl.entries[0].Enabled = false
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	mdl = updated.(model)
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeySpace})
+	mdl = updated.(model)
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+
+	if mdl.saved {
+		t.Fatalf("model should not save when all confirmation items are unchecked")
+	}
+	if !mdl.confirming {
+		t.Fatalf("model should stay on confirmation screen")
+	}
+}
+
+func TestModelEditRegistryEntryStagesSupportedFields(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{
+			ID:            "registry|user|Run|App",
+			Name:          "App",
+			Source:        core.AutostartSourceRegistryRun,
+			Scope:         core.AutostartScopeUser,
+			Enabled:       true,
+			TargetPath:    `C:\Tools\app.exe`,
+			Arguments:     "--silent",
+			RegistryKey:   core.AutostartRegistryKeyRun,
+			RegistryValue: "App",
+			CanToggle:     true,
+		},
+	})
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	if !mdl.editing {
+		t.Fatalf("enter should open editor")
+	}
+	if !strings.Contains(mdl.View(), "Run") {
+		t.Fatalf("editor header should include launch mode")
+	}
+
+	mdl.editNameInput.SetValue("Agent")
+	mdl.editPathInput.SetValue(`C:\Program Files\Agent\agent.exe`)
+	mdl.editArgsInput.SetValue("--minimized")
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	mdl = updated.(model)
+
+	if mdl.editing {
+		t.Fatalf("editor should close after staging supported edit")
+	}
+	if len(mdl.edits) != 1 {
+		t.Fatalf("len(edits) = %d, want 1", len(mdl.edits))
+	}
+	edit := mdl.edits[0]
+	if edit.Name != "Agent" || edit.Path != `C:\Program Files\Agent\agent.exe` || edit.Arguments != "--minimized" {
+		t.Fatalf("edit = %#v", edit)
+	}
+}
+
+func TestModelRightClickCopiesEditorFieldAndMarksCopied(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{
+			ID:         "registry|user|Run|App",
+			Name:       "App",
+			Source:     core.AutostartSourceRegistryRun,
+			Scope:      core.AutostartScopeUser,
+			TargetPath: `C:\Tools\app.exe`,
+		},
+	})
+	mdl.width = 120
+	mdl.height = 30
+	var copied string
+	mdl.clipboardWrite = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	updated, _ = mdl.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonRight, X: 20, Y: mdl.editFieldY(editFieldPath)})
+	mdl = updated.(model)
+
+	if copied != `C:\Tools\app.exe` {
+		t.Fatalf("copied = %q", copied)
+	}
+	if mdl.copiedEditField != editFieldPath {
+		t.Fatalf("copied field = %v, want path", mdl.copiedEditField)
+	}
+	if !mdl.copiedBlinkOn {
+		t.Fatalf("copied field should start blink feedback")
+	}
+}
+
+func TestModelCtrlCCopiesFocusedEditorFieldInsteadOfClosing(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{
+			ID:         "registry|user|Run|App",
+			Name:       "App",
+			Source:     core.AutostartSourceRegistryRun,
+			Scope:      core.AutostartScopeUser,
+			TargetPath: `C:\Tools\app.exe`,
+		},
+	})
+	var copied string
+	mdl.clipboardWrite = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	mdl.focusEditField(editFieldPath)
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	mdl = updated.(model)
+
+	if !mdl.editing {
+		t.Fatalf("ctrl+c should keep editor open")
+	}
+	if copied != `C:\Tools\app.exe` {
+		t.Fatalf("copied = %q", copied)
+	}
+}
+
+func TestModelEditedFieldsUseChangedBorderColor(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{
+			ID:         "registry|user|Run|App",
+			Name:       "App",
+			Source:     core.AutostartSourceRegistryRun,
+			Scope:      core.AutostartScopeUser,
+			TargetPath: `C:\Tools\app.exe`,
+			Arguments:  "--silent",
+		},
+	})
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	unchanged := mdl.editFieldBorderColor(editFieldPath)
+	mdl.editPathInput.SetValue(`C:\Tools\agent.exe`)
+	changed := mdl.editFieldBorderColor(editFieldPath)
+
+	if changed == unchanged {
+		t.Fatalf("changed field should use a different border color")
+	}
+	if changed != colorEdited {
+		t.Fatalf("changed field color = %q, want edited color", changed)
+	}
+}
+
+func TestModelCopiedFieldBlinkMessageTogglesAndClearsFeedback(t *testing.T) {
+	mdl := newModel([]core.AutostartEntry{
+		{ID: "registry|user|Run|App", Name: "App", Source: core.AutostartSourceRegistryRun, TargetPath: `C:\Tools\app.exe`},
+	})
+	mdl.clipboardWrite = func(text string) error { return nil }
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	updated, _ = mdl.copyEditField(editFieldPath)
+	mdl = updated.(model)
+	updated, _ = mdl.Update(copiedEditFieldBlinkMsg{field: editFieldPath, remaining: 1})
+	mdl = updated.(model)
+	if mdl.copiedEditField != editFieldPath || mdl.copiedBlinkOn {
+		t.Fatalf("first blink should keep copied field and turn highlight off")
+	}
+	updated, _ = mdl.Update(copiedEditFieldBlinkMsg{field: editFieldPath, remaining: 0})
+	mdl = updated.(model)
+	if mdl.copiedEditField != editFieldNone {
+		t.Fatalf("final blink should clear copied field feedback")
 	}
 }

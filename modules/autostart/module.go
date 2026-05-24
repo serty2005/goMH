@@ -11,6 +11,12 @@ type Module struct{}
 type Config struct {
 	Changes []core.AutostartChange
 	Creates []core.AutostartCreateRequest
+	Edits   []core.AutostartEdit
+}
+
+type autostartEditWinUtils interface {
+	AddRegistryAutostartEntry(req core.AutostartCreateRequest) error
+	DeleteRegistryAutostartValue(scope core.AutostartScope, key core.AutostartRegistryKey, valueName string) error
 }
 
 func (m *Module) ID() string { return "autostart" }
@@ -59,12 +65,46 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 			return core.ModuleActionResult{}, err
 		}
 	}
+	for _, edit := range cfg.Edits {
+		if err := applyAutostartEdit(services.WinUtils, edit); err != nil {
+			return core.ModuleActionResult{}, err
+		}
+	}
 	if err := services.WinUtils.ApplyAutostartChanges(cfg.Changes); err != nil {
 		return core.ModuleActionResult{}, err
 	}
-	total := len(cfg.Creates) + len(cfg.Changes)
+	total := len(cfg.Creates) + len(cfg.Edits) + len(cfg.Changes)
 	ctx.Success(fmt.Sprintf("Изменения автозапуска применены: %d", total))
 	return core.ModuleActionResult{Note: fmt.Sprintf("Изменения автозапуска применены: %d", total)}, nil
+}
+
+func applyAutostartEdit(wu autostartEditWinUtils, edit core.AutostartEdit) error {
+	original := edit.Original
+	if original.Source != core.AutostartSourceRegistryRun && original.Source != core.AutostartSourceRegistryRunOnce {
+		return nil
+	}
+	name := edit.Name
+	if name == "" {
+		name = original.Name
+	}
+	if err := wu.AddRegistryAutostartEntry(core.AutostartCreateRequest{
+		Name:             name,
+		RegistryKey:      original.RegistryKey,
+		Scope:            original.Scope,
+		Path:             edit.Path,
+		Arguments:        edit.Arguments,
+		WorkingDirectory: edit.WorkingDirectory,
+	}); err != nil {
+		return err
+	}
+	oldName := original.RegistryValue
+	if oldName == "" {
+		oldName = original.Name
+	}
+	if oldName != "" && oldName != name {
+		return wu.DeleteRegistryAutostartValue(original.Scope, original.RegistryKey, oldName)
+	}
+	return nil
 }
 
 func (m *Module) config(config any) (*Config, error) {

@@ -403,12 +403,13 @@ func buildAutostartApplyCommands(changes []core.AutostartChange) []autostartComm
 }
 
 func buildAutostartCommand(executablePath, arguments string) string {
-	command := strings.TrimSpace(executablePath)
-	if command == "" {
+	path := strings.Trim(strings.TrimSpace(executablePath), `"`)
+	if path == "" {
 		return strings.TrimSpace(arguments)
 	}
-	if !strings.HasPrefix(command, `"`) {
-		command = `"` + strings.Trim(command, `"`) + `"`
+	command := path
+	if strings.ContainsAny(command, " \t") {
+		command = `"` + command + `"`
 	}
 	if arguments = strings.TrimSpace(arguments); arguments != "" {
 		command += " " + arguments
