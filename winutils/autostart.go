@@ -362,6 +362,9 @@ func parseScheduledAutostartTasks(input string) ([]core.AutostartEntry, error) {
 			continue
 		}
 		taskName := normalizeTaskName(task.TaskPath, task.TaskName)
+		if isMicrosoftWindowsScheduledTask(taskName) {
+			continue
+		}
 		command, target, args, workingDir := scheduledTaskCommand(task)
 		entries = append(entries, core.AutostartEntry{
 			ID:               "task|" + taskName,
@@ -453,6 +456,12 @@ func scheduledTaskHasAutostartTrigger(task scheduledTaskJSON) bool {
 		}
 	}
 	return false
+}
+
+func isMicrosoftWindowsScheduledTask(taskName string) bool {
+	name := strings.ToLower(strings.TrimSpace(taskName))
+	name = strings.ReplaceAll(name, `/`, `\`)
+	return strings.HasPrefix(name, `\microsoft\windows\`)
 }
 
 func scheduledTaskCommand(task scheduledTaskJSON) (command, target, args, workingDir string) {

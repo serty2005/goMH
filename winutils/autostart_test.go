@@ -137,6 +137,52 @@ func TestParseScheduledAutostartTasksKeepsLogonAndBootTriggers(t *testing.T) {
 	}
 }
 
+func TestParseScheduledAutostartTasksSkipsMicrosoftWindowsTasks(t *testing.T) {
+	input := `[
+  {
+    "TaskName": "VendorAgent",
+    "TaskPath": "\\Vendor\\",
+    "State": "Ready",
+    "Actions": [
+      {
+        "Execute": "C:\\Tools\\vendor.exe",
+        "Arguments": "",
+        "WorkingDirectory": "C:\\Tools"
+      }
+    ],
+    "Triggers": [
+      {"TriggerType": "LogonTrigger"}
+    ]
+  },
+  {
+    "TaskName": "SystemSoundsService",
+    "TaskPath": "\\Microsoft\\Windows\\Multimedia\\",
+    "State": "Ready",
+    "Actions": [
+      {
+        "Execute": "C:\\Windows\\System32\\rundll32.exe",
+        "Arguments": "",
+        "WorkingDirectory": "C:\\Windows\\System32"
+      }
+    ],
+    "Triggers": [
+      {"TriggerType": "LogonTrigger"}
+    ]
+  }
+]`
+
+	entries, err := parseScheduledAutostartTasks(input)
+	if err != nil {
+		t.Fatalf("parseScheduledAutostartTasks returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1: %#v", len(entries), entries)
+	}
+	if entries[0].Name != `\Vendor\VendorAgent` {
+		t.Fatalf("entry name = %q, want vendor task only", entries[0].Name)
+	}
+}
+
 func TestBuildApplyAutostartCommands(t *testing.T) {
 	change := core.AutostartChange{
 		Entry: core.AutostartEntry{
