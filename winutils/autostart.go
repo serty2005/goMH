@@ -76,9 +76,6 @@ func ApplyAutostartChanges(changes []core.AutostartChange) error {
 		}
 	}
 	for _, change := range changes {
-		if change.Enabled == change.Entry.Enabled {
-			continue
-		}
 		if change.Enabled {
 			continue
 		}
@@ -386,7 +383,7 @@ func parseScheduledAutostartTasks(input string) ([]core.AutostartEntry, error) {
 func buildAutostartApplyCommands(changes []core.AutostartChange) []autostartCommand {
 	var commands []autostartCommand
 	for _, change := range changes {
-		if change.Enabled == change.Entry.Enabled || change.Entry.Source != core.AutostartSourceScheduledTask {
+		if change.Entry.Source != core.AutostartSourceScheduledTask {
 			continue
 		}
 		action := "/Disable"

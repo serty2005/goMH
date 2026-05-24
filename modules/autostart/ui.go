@@ -265,10 +265,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateEditMouse(msg)
 		}
 		if m.adding != addModeNone {
-			if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight {
-				return m.pasteIntoFocusedInput()
-			}
-			return m, nil
+			return m.updateAddMouse(msg)
 		}
 		if msg.Button == tea.MouseButtonWheelDown {
 			m.scrollBy(1)
@@ -435,6 +432,12 @@ func (m model) updateAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "esc":
 			m.adding = addModeNone
 			return m, nil
+		case "left", "up":
+			m.addKind = core.AutostartRegistryKeyRun
+			return m, nil
+		case "right", "down":
+			m.addKind = core.AutostartRegistryKeyRunOnce
+			return m, nil
 		case "tab", " ":
 			if m.addKind == core.AutostartRegistryKeyRun {
 				m.addKind = core.AutostartRegistryKeyRunOnce
@@ -490,6 +493,25 @@ func (m model) updateAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.argsInput, cmd = m.argsInput.Update(msg)
 		return m, cmd
+	}
+	return m, nil
+}
+
+func (m model) updateAddMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.adding == addModeKind {
+		if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+			return m, nil
+		}
+		switch {
+		case m.addKindHit(msg.X, msg.Y, core.AutostartRegistryKeyRun):
+			m.addKind = core.AutostartRegistryKeyRun
+		case m.addKindHit(msg.X, msg.Y, core.AutostartRegistryKeyRunOnce):
+			m.addKind = core.AutostartRegistryKeyRunOnce
+		}
+		return m, nil
+	}
+	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonRight {
+		return m.pasteIntoFocusedInput()
 	}
 	return m, nil
 }
@@ -866,7 +888,12 @@ func (m model) changes() []core.AutostartChange {
 		if !ok || original == entry.Enabled {
 			continue
 		}
-		changes = append(changes, core.AutostartChange{Entry: entry, Enabled: entry.Enabled})
+		originalEntry := m.originalEntry[entry.ID]
+		if originalEntry.ID == "" {
+			originalEntry = entry
+			originalEntry.Enabled = original
+		}
+		changes = append(changes, core.AutostartChange{Entry: originalEntry, Enabled: entry.Enabled})
 	}
 	return changes
 }
@@ -1375,6 +1402,49 @@ func (m model) listTop() int {
 
 func (m model) confirmListTop() int {
 	return 3
+}
+
+func (m model) addKindOptionsY() int {
+	return m.addPanelTop() + 6
+}
+
+func (m model) addKindHit(x, y int, key core.AutostartRegistryKey) bool {
+	if y != m.addKindOptionsY() {
+		return false
+	}
+	start, end := m.addKindXRange(key)
+	return x >= start && x < end
+}
+
+func (m model) addKindXRange(key core.AutostartRegistryKey) (int, int) {
+	left := m.addPanelLeft() + 3
+	switch key {
+	case core.AutostartRegistryKeyRunOnce:
+		return left + 5, left + 12
+	default:
+		return left, left + 3
+	}
+}
+
+func (m model) addPanelLeft() int {
+	width := m.width
+	if width <= 0 {
+		width = 120
+	}
+	panelWidth := min(90, max(40, width-8))
+	return max(0, (width-panelWidth)/2)
+}
+
+func (m model) addPanelTop() int {
+	height := m.height
+	if height <= 0 {
+		height = 28
+	}
+	panelHeight := 10
+	if height <= panelHeight {
+		return 0
+	}
+	return (height - panelHeight) / 2
 }
 
 func (m model) startScan() tea.Cmd {

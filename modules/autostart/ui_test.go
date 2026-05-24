@@ -46,6 +46,60 @@ func TestModelTogglesEntryAndSavesChanges(t *testing.T) {
 	if mdl.result.Changes[0].Enabled {
 		t.Fatalf("saved change should disable entry")
 	}
+	if !mdl.result.Changes[0].Entry.Enabled {
+		t.Fatalf("saved change entry should preserve the original enabled state")
+	}
+}
+
+func TestModelDisableChangesUseOriginalEntriesForAllSources(t *testing.T) {
+	entries := []core.AutostartEntry{
+		{
+			ID:            "registry|user|Run|App",
+			Name:          "App",
+			Source:        core.AutostartSourceRegistryRun,
+			Scope:         core.AutostartScopeUser,
+			Enabled:       true,
+			RegistryKey:   core.AutostartRegistryKeyRun,
+			RegistryValue: "App",
+			CanToggle:     true,
+		},
+		{
+			ID:        `startup|C:\Startup\Agent.lnk`,
+			Name:      "Agent.lnk",
+			Source:    core.AutostartSourceStartupFolder,
+			Scope:     core.AutostartScopeUser,
+			Enabled:   true,
+			FilePath:  `C:\Startup\Agent.lnk`,
+			CanToggle: true,
+		},
+		{
+			ID:        "task|Updater",
+			Name:      `\Vendor\Updater`,
+			Source:    core.AutostartSourceScheduledTask,
+			Scope:     core.AutostartScopeMachine,
+			Enabled:   true,
+			TaskName:  `\Vendor\Updater`,
+			CanToggle: true,
+		},
+	}
+	mdl := newModel(entries)
+	for index := range entries {
+		mdl.cursor = index
+		mdl.toggleCurrent()
+	}
+
+	changes := mdl.changes()
+	if len(changes) != len(entries) {
+		t.Fatalf("len(changes) = %d, want %d", len(changes), len(entries))
+	}
+	for index, change := range changes {
+		if change.Enabled {
+			t.Fatalf("change[%d] target should disable entry", index)
+		}
+		if !change.Entry.Enabled {
+			t.Fatalf("change[%d] entry should keep original enabled state for %s", index, change.Entry.Source)
+		}
+	}
 }
 
 func TestModelMouseWheelScrollsAndHoverSelectsRowForSpaceToggle(t *testing.T) {
@@ -140,6 +194,66 @@ func TestModelAddRunOnceEntry(t *testing.T) {
 	}
 	if create.Arguments != "--once" {
 		t.Fatalf("arguments = %q", create.Arguments)
+	}
+}
+
+func TestModelAddModeSelectionSupportsArrowKeys(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.adding = addModeKind
+	mdl.addKind = core.AutostartRegistryKeyRun
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyRight})
+	mdl = updated.(model)
+	if mdl.addKind != core.AutostartRegistryKeyRunOnce {
+		t.Fatalf("right arrow should select RunOnce, got %q", mdl.addKind)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	mdl = updated.(model)
+	if mdl.addKind != core.AutostartRegistryKeyRun {
+		t.Fatalf("left arrow should select Run, got %q", mdl.addKind)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyDown})
+	mdl = updated.(model)
+	if mdl.addKind != core.AutostartRegistryKeyRunOnce {
+		t.Fatalf("down arrow should select RunOnce, got %q", mdl.addKind)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyUp})
+	mdl = updated.(model)
+	if mdl.addKind != core.AutostartRegistryKeyRun {
+		t.Fatalf("up arrow should select Run, got %q", mdl.addKind)
+	}
+}
+
+func TestModelAddModeSelectionSupportsMouse(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.adding = addModeKind
+	mdl.addKind = core.AutostartRegistryKeyRun
+
+	runOnceX, _ := mdl.addKindXRange(core.AutostartRegistryKeyRunOnce)
+	updated, _ := mdl.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      runOnceX,
+		Y:      mdl.addKindOptionsY(),
+	})
+	mdl = updated.(model)
+	if mdl.addKind != core.AutostartRegistryKeyRunOnce {
+		t.Fatalf("click on RunOnce should select RunOnce, got %q", mdl.addKind)
+	}
+
+	runX, _ := mdl.addKindXRange(core.AutostartRegistryKeyRun)
+	updated, _ = mdl.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+		X:      runX,
+		Y:      mdl.addKindOptionsY(),
+	})
+	mdl = updated.(model)
+	if mdl.addKind != core.AutostartRegistryKeyRun {
+		t.Fatalf("click on Run should select Run, got %q", mdl.addKind)
 	}
 }
 

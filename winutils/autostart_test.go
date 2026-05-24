@@ -209,6 +209,54 @@ func TestBuildApplyAutostartCommands(t *testing.T) {
 	}
 }
 
+func TestBuildApplyAutostartCommandsDoesNotSkipSelectedDisable(t *testing.T) {
+	change := core.AutostartChange{
+		Entry: core.AutostartEntry{
+			ID:        "task|Updater",
+			Name:      `\Vendor\Updater`,
+			Source:    core.AutostartSourceScheduledTask,
+			Enabled:   false,
+			CanToggle: true,
+		},
+		Enabled: false,
+	}
+
+	commands := buildAutostartApplyCommands([]core.AutostartChange{change})
+	if len(commands) != 1 {
+		t.Fatalf("len(commands) = %d, want 1", len(commands))
+	}
+	if commands[0].Args[3] != "/Disable" {
+		t.Fatalf("action = %q, want /Disable", commands[0].Args[3])
+	}
+}
+
+func TestApplyAutostartChangesRemovesStartupFileEvenWhenEntryAlreadyMarkedDisabled(t *testing.T) {
+	startupFile := filepath.Join(t.TempDir(), "Agent.lnk")
+	if err := os.WriteFile(startupFile, []byte("placeholder"), 0o644); err != nil {
+		t.Fatalf("create startup file: %v", err)
+	}
+
+	err := ApplyAutostartChanges([]core.AutostartChange{
+		{
+			Entry: core.AutostartEntry{
+				ID:        "startup|" + startupFile,
+				Name:      "Agent.lnk",
+				Source:    core.AutostartSourceStartupFolder,
+				Enabled:   false,
+				FilePath:  startupFile,
+				CanToggle: true,
+			},
+			Enabled: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyAutostartChanges returned error: %v", err)
+	}
+	if _, err := os.Stat(startupFile); !os.IsNotExist(err) {
+		t.Fatalf("startup file should be removed, stat err = %v", err)
+	}
+}
+
 func TestReportAutostartProgress(t *testing.T) {
 	var got []core.AutostartScanProgress
 
