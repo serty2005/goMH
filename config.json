@@ -199,7 +199,7 @@
 			"C:\\Users\\*\\AppData\\Local\\Temp",
 			"C:\\ProgramData\\Microsoft\\Windows\\WER\\*",
 			"C:\\Users\\*\\AppData\\Local\\CrashDumps",
-			"C:\\ProgramData\\Microsoft\\Diagnosis\\ETLLogs\\*"
+			"C:\\ProgramData\\Microsoft\\Diagnosis\\ETLLogs"
 		],
 		"LogCollectorPaths": [
 			"C:\\Users\\*\\AppData\\Roaming\\iiko\\CashServer\\Logs",
@@ -294,7 +294,7 @@
 			"download_method": "HTTP"
 		},
 		"UTM_Installer": {
-			"url": "https://f.serty.top/silent-setup-4.2.0-b2678.exe",
+			"url": "https://f.serty.top/silent-setup-4.2.0-b2689.exe",
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "HTTP"
