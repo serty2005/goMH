@@ -15,7 +15,7 @@
 		}
 	],
 	"self_update_config": {
-		"enabled": false,
+		"enabled": true,
 		"reference_url": "https://f.serty.top/distr/installer/goMH.exe",
 		"hash_url": "https://f.serty.top/distr/installer/goMH.md5",
 		"reference_url_x86": "https://f.serty.top/distr/installer/goMH_x86.exe",
