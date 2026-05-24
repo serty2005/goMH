@@ -9,6 +9,7 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
+	"goMH/modules/autostart"
 )
 
 func TestBuildTaskRunsOrderCheckAndFrontToolsImmediately(t *testing.T) {
@@ -70,6 +71,36 @@ func TestBuildTaskKeepsQueuedModeForCollectLogs(t *testing.T) {
 	}
 	if plan.SkipConfirmation {
 		t.Fatal("did not expect skip confirmation for queued task")
+	}
+}
+
+func TestServiceUtilsMenuShowsAutostartLast(t *testing.T) {
+	items := serviceUtilsMenuItems()
+	if len(items) == 0 {
+		t.Fatal("expected service utils menu items")
+	}
+	last := items[len(items)-1]
+	if last.Title != (&autostart.Module{}).MenuText() {
+		t.Fatalf("last service utils item = %q, want %q", last.Title, (&autostart.Module{}).MenuText())
+	}
+}
+
+func TestBuildTaskRunsAutostartImmediately(t *testing.T) {
+	module := &Module{}
+	cfg := &ServiceUtilsConfig{
+		Action:          ActionAutostart,
+		AutostartConfig: &autostart.Config{},
+	}
+
+	plan, err := module.BuildTask(cfg)
+	if err != nil {
+		t.Fatalf("BuildTask returned error: %v", err)
+	}
+	if plan.Mode != core.ModuleRunModeImmediate {
+		t.Fatalf("expected immediate mode, got %v", plan.Mode)
+	}
+	if !plan.SkipConfirmation {
+		t.Fatal("expected autostart launch without extra serviceutils confirmation")
 	}
 }
 

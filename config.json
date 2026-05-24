@@ -49,9 +49,6 @@
 		},
 		{
 			"id": "ServiceUtils"
-		},
-		{
-			"id": "autostart"
 		}
 	],
 	"frpc_config": {

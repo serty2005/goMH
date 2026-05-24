@@ -10,6 +10,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/logstream"
+	"goMH/modules/autostart"
 	"goMH/tui"
 	"io"
 	"io/fs"
@@ -42,6 +43,7 @@ const (
 	ActionViewLog
 	ActionOrderCheck
 	ActionFrontTools
+	ActionAutostart
 )
 
 const cleanLogRetentionDays = 30
@@ -63,6 +65,8 @@ type ServiceUtilsConfig struct {
 	// Параметры для OrderCheck / FrontTools
 	TargetDatabasePath string
 	DatabaseType       string // "db" or "sdf"
+	// Параметры для управления автозапуском
+	AutostartConfig *autostart.Config
 }
 
 func (cfg *ServiceUtilsConfig) TaskConfirmation() core.TaskConfirmation {
@@ -132,6 +136,9 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 	case ActionFrontTools:
 		title = "FrontTools: " + strings.ToUpper(cfg.DatabaseType)
 		signature = "serviceutils|fronttools|" + cfg.DatabaseType
+	case ActionAutostart:
+		title = "Управление автозапуском"
+		signature = "serviceutils|autostart"
 	}
 
 	plan := core.ModuleTaskPlan{
@@ -141,7 +148,7 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 			Signature: signature,
 		},
 	}
-	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools {
+	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools || cfg.Action == ActionAutostart {
 		plan.Mode = core.ModuleRunModeImmediate
 		switch cfg.Action {
 		case ActionViewLog:
@@ -151,6 +158,9 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 			plan.SkipConfirmation = true
 		case ActionFrontTools:
 			plan.Result.Note = "FrontTools запущен."
+			plan.SkipConfirmation = true
+		case ActionAutostart:
+			plan.Result.Note = "Изменения автозапуска подготовлены."
 			plan.SkipConfirmation = true
 		}
 	}
@@ -198,6 +208,8 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 			}
 		}
 		return result, err
+	case ActionAutostart:
+		return (&autostart.Module{}).ExecuteImmediate(ctx, services, cfg.AutostartConfig)
 	default:
 		return core.ModuleActionResult{}, errors.New("немедленное выполнение для этого действия не поддерживается")
 	}
@@ -328,13 +340,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 
 // Configure - Сбор данных (UI слой)
 func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*ServiceUtilsConfig, error) {
-	choice, err := tui.SelectItem([]tui.ChoiceItem{
-		{Title: "Очистка временных файлов"},
-		{Title: "Сборщик логов в архив"},
-		{Title: "Просмотр лога в реальном времени"},
-		{Title: "OrderCheck"},
-		{Title: "FrontTools"},
-	}, tui.SelectionConfig{
+	choice, err := tui.SelectItem(serviceUtilsMenuItems(), tui.SelectionConfig{
 		Title:    "Утилиты обслуживания",
 		Subtitle: "Esc для возврата в главное меню",
 	})
@@ -360,6 +366,9 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 	case 4:
 		return m.configureFrontTools()
 
+	case 5:
+		return m.configureAutostart(ctx, am, wu)
+
 	default:
 		return nil, nil
 	}
@@ -378,6 +387,9 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return m.runOrderCheckFlow(ctx, am, wu, cfg)
 	case ActionFrontTools:
 		return m.runFrontToolsFlow(ctx, am, wu, cfg)
+	case ActionAutostart:
+		_, err := (&autostart.Module{}).ExecuteImmediate(ctx, core.ModuleServices{AssetManager: am, WinUtils: wu}, cfg.AutostartConfig)
+		return err
 	}
 	return nil
 }
@@ -394,8 +406,21 @@ func (cfg *ServiceUtilsConfig) actionLabel() string {
 		return "OrderCheck"
 	case ActionFrontTools:
 		return "FrontTools"
+	case ActionAutostart:
+		return "Управление автозапуском"
 	default:
 		return "Неизвестно"
+	}
+}
+
+func serviceUtilsMenuItems() []tui.ChoiceItem {
+	return []tui.ChoiceItem{
+		{Title: "Очистка временных файлов"},
+		{Title: "Сборщик логов в архив"},
+		{Title: "Просмотр лога в реальном времени"},
+		{Title: "OrderCheck"},
+		{Title: "FrontTools"},
+		{Title: (&autostart.Module{}).MenuText()},
 	}
 }
 
@@ -653,6 +678,24 @@ func (m *Module) configureFrontTools() (*ServiceUtilsConfig, error) {
 		Action:             ActionFrontTools,
 		DatabaseType:       dbType,
 		TargetDatabasePath: dbPath,
+	}, nil
+}
+
+func (m *Module) configureAutostart(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*ServiceUtilsConfig, error) {
+	configValue, err := (&autostart.Module{}).ConfigureTask(ctx, core.ModuleServices{
+		AssetManager: am,
+		WinUtils:     wu,
+	})
+	if err != nil || configValue == nil {
+		return nil, err
+	}
+	cfg, ok := configValue.(*autostart.Config)
+	if !ok {
+		return nil, errors.New("неверная конфигурация управления автозапуском")
+	}
+	return &ServiceUtilsConfig{
+		Action:          ActionAutostart,
+		AutostartConfig: cfg,
 	}, nil
 }
 

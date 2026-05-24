@@ -3,7 +3,6 @@ package registry
 import (
 	"goMH/config"
 	"goMH/core"
-	"goMH/modules/autostart"
 	"goMH/modules/distro"
 	fiscaldrivers "goMH/modules/fiscal-drivers"
 	"goMH/modules/frpc"
@@ -40,7 +39,6 @@ func NewDefault() *Registry {
 		func() core.QueueModule { return &serviceutils.Module{} },
 		func() core.QueueModule { return &fiscaldrivers.Module{} },
 		func() core.QueueModule { return &utm.Module{} },
-		func() core.QueueModule { return &autostart.Module{} },
 	)
 }
 
