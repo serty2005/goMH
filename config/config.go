@@ -61,12 +61,13 @@ type DistroConfig struct {
 }
 
 type FrpcConfig struct {
-	InstallPath     string           `json:"install_path"`
-	ServiceName     string           `json:"service_name"`
-	PortRange       string           `json:"port_range"`
-	FrpcDownloadURL string           `json:"frpc_download_url"`
-	NssmDownloadURL string           `json:"nssm_download_url"`
-	ServerConfig    FrpcServerConfig `json:"server_config"`
+	InstallPath        string           `json:"install_path"`
+	ServiceName        string           `json:"service_name"`
+	PortRange          string           `json:"port_range"`
+	FrpcDownloadURL    string           `json:"frpc_download_url"`     // Default (x64)
+	FrpcDownloadURLX86 string           `json:"frpc_download_url_x86"` // Specific for 32-bit OS
+	NssmDownloadURL    string           `json:"nssm_download_url"`
+	ServerConfig       FrpcServerConfig `json:"server_config"`
 }
 
 type FrpcServerConfig struct {
@@ -83,9 +84,10 @@ type TeamViewerConfig struct {
 }
 
 type MaintenanceConfig struct {
-	TempPaths         []string `json:"TempPaths"`
-	LogCollectorPaths []string `json:"LogCollectorPaths"`
-	SevenZipAssetID   string   `json:"7zipAssetID"`
+	TempPaths          []string `json:"TempPaths"`
+	LogCollectorPaths  []string `json:"LogCollectorPaths"`
+	SevenZipAssetID    string   `json:"7zipAssetID"`    // Default (x64)
+	SevenZipAssetIDX86 string   `json:"7zipAssetIDX86"` // Specific for 32-bit OS
 }
 
 type FiscalDriver struct {

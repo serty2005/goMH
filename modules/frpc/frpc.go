@@ -389,9 +389,14 @@ func (m *Module) downloadAndExtractComponents(ctx core.TaskContext, am core.Asse
 	slog.Info("Начало загрузки компонентов FRPC и NSSM")
 
 	// FRPC
+	// frpc-бинарь тоже архитектурно-зависимый: на x86-ОС amd64-сборка не запустится.
+	frpcURL := m.Cfg.FrpcDownloadURL
+	if !wu.Is64BitOS() && m.Cfg.FrpcDownloadURLX86 != "" {
+		frpcURL = m.Cfg.FrpcDownloadURLX86
+	}
 	frpcZipPath := filepath.Join(am.Cfg().AssetsCachePath, "frpc.zip")
-	slog.Debug("Скачивание FRPC", "url", m.Cfg.FrpcDownloadURL)
-	if _, err := am.DownloadHTTPWithProgress(m.Cfg.FrpcDownloadURL, frpcZipPath); err != nil {
+	slog.Debug("Скачивание FRPC", "url", frpcURL)
+	if _, err := am.DownloadHTTPWithProgress(frpcURL, frpcZipPath); err != nil {
 		slog.Error("Не удалось скачать FRPC", "error", err)
 		return fmt.Errorf("не удалось скачать FRPC: %w", err)
 	}

@@ -308,10 +308,36 @@ func (r *Runtime) AddDefenderExclusion(path string) error {
 }
 
 // Is64BitOS проверяет, является ли операционная система 64-битной.
+//
+// Ранее здесь использовался runtime.GOARCH, но это разрядность САМОГО бинаря goMH,
+// а не ОС: 32-битный goMH.exe на 64-битной ОС давал неверный false, из-за чего
+// модули (frpc, 7zip, com0com) выбирали 32-битные ассеты на 64-битной системе.
+//
+// Корректный способ узнать разрядность ОС из любого процесса — Windows API
+// IsWow64Process: процесс считается работающим под WOW64, если он 32-битный,
+// но крутится на 64-битной ОС. Натурный 64-битный бинарь определяем отдельно
+// через runtime.GOARCH == "amd64".
 func Is64BitOS() bool {
-	// runtime.GOARCH вернет "amd64" для 64-битных систем
-	// и "386" для 32-битных.
-	return runtime.GOARCH == "amd64"
+	// 64-битный бинарь может работать только на 64-битной ОС.
+	if runtime.GOARCH == "amd64" {
+		return true
+	}
+
+	// Для 32-битного бинаря спрашиваем у системы, запущены ли мы под WOW64.
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	proc := kernel32.NewProc("IsWow64Process")
+	if proc.Find() != nil {
+		// API недоступен (очень старая ОС) — считаем систему 32-битной.
+		return false
+	}
+
+	var isWow64 bool
+	r1, _, _ := proc.Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&isWow64)))
+	if r1 == 0 {
+		// Вызов завершился ошибкой — безопасный fallback к 32-битной ОС.
+		return false
+	}
+	return isWow64
 }
 
 func ServiceExists(serviceName string) (bool, error) {

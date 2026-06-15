@@ -97,9 +97,16 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils, writer io.Writer) (s
 		return "", errors.New("в конфигурации не указан '7zipAssetID' для автоматической установки 7-Zip")
 	}
 
-	consolePrintf(writer, "Попытка скачивания 7-Zip через AssetManager с ID: %s...\n", cfg.MaintenanceConfig.SevenZipAssetID)
+	// Выбор установщика по разрядности ОС: на x86 ставим 32-битный 7-Zip,
+	// иначе x64-установщик упадёт. Если x86-ассет не задан — fallback на x64.
+	assetID := cfg.MaintenanceConfig.SevenZipAssetID
+	if wu != nil && !wu.Is64BitOS() && cfg.MaintenanceConfig.SevenZipAssetIDX86 != "" {
+		assetID = cfg.MaintenanceConfig.SevenZipAssetIDX86
+	}
 
-	cachePath, err := am.DownloadToCache(cfg.MaintenanceConfig.SevenZipAssetID)
+	consolePrintf(writer, "Попытка скачивания 7-Zip через AssetManager с ID: %s...\n", assetID)
+
+	cachePath, err := am.DownloadToCache(assetID)
 	if err != nil {
 		return "", fmt.Errorf("не удалось скачать ассет 7-Zip: %w", err)
 	}
@@ -113,10 +120,14 @@ func findAndInstall(am core.AssetManager, wu core.WinUtils, writer io.Writer) (s
 
 	time.Sleep(3 * time.Second)
 
-	installPath := `C:\Program Files\7-Zip\7z.exe`
-	if _, err := os.Stat(installPath); err == nil {
-		consolePrintln(writer, "7-Zip успешно установлен.")
-		return installPath, nil
+	// После установки 7z.exe может оказаться в любом из стандартных путей:
+	// 32-битный установщик на x64-ОС идёт в 'Program Files (x86)', на x86-ОС — в 'Program Files'.
+	// Проверяем оба, чтобы не зависеть от разрядности ОС и установщика.
+	for _, installPath := range potentialPaths {
+		if _, err := os.Stat(installPath); err == nil {
+			consolePrintln(writer, "7-Zip успешно установлен.")
+			return installPath, nil
+		}
 	}
 
 	return "", errors.New("не удалось найти 7z.exe после установки. Проверьте права администратора")

@@ -280,7 +280,13 @@ func (m *Module) install(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return fmt.Errorf("ошибка получения пакета: %w", err)
 	}
 
-	com0comInstallerExe, err := am.DownloadToCache("Com0Com_Installer")
+	// com0com имеет раздельные установщики под x86/x64. На x86-ОС x64-установщик не запустится.
+	com0comAssetID := "Com0Com_Installer"
+	if !wu.Is64BitOS() {
+		com0comAssetID = "Com0Com_Installer_x86"
+	}
+
+	com0comInstallerExe, err := am.DownloadToCache(com0comAssetID)
 	if err != nil {
 		return fmt.Errorf("ошибка скачивания com0com: %w", err)
 	}
