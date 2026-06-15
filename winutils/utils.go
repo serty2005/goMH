@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -28,6 +29,62 @@ import (
 func IsAdmin() bool {
 	_, err := os.Open("\\\\.\\PHYSICALDRIVE0")
 	return err == nil
+}
+
+func RelaunchElevated(args []string) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("не удалось определить путь к исполняемому файлу: %w", err)
+	}
+
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("не удалось определить рабочую директорию: %w", err)
+	}
+
+	verbPtr, err := windows.UTF16PtrFromString("runas")
+	if err != nil {
+		return fmt.Errorf("не удалось подготовить verb для ShellExecute: %w", err)
+	}
+	exePtr, err := windows.UTF16PtrFromString(exePath)
+	if err != nil {
+		return fmt.Errorf("не удалось подготовить путь запуска: %w", err)
+	}
+	paramsPtr, err := windows.UTF16PtrFromString(buildShellExecuteParameters(args))
+	if err != nil {
+		return fmt.Errorf("не удалось подготовить аргументы запуска: %w", err)
+	}
+	dirPtr, err := windows.UTF16PtrFromString(workingDir)
+	if err != nil {
+		return fmt.Errorf("не удалось подготовить рабочую директорию: %w", err)
+	}
+
+	shell32 := windows.NewLazySystemDLL("shell32.dll")
+	shellExecute := shell32.NewProc("ShellExecuteW")
+	ret, _, callErr := shellExecute.Call(
+		0,
+		uintptr(unsafe.Pointer(verbPtr)),
+		uintptr(unsafe.Pointer(exePtr)),
+		uintptr(unsafe.Pointer(paramsPtr)),
+		uintptr(unsafe.Pointer(dirPtr)),
+		1, // SW_SHOWNORMAL
+	)
+	if ret <= 32 {
+		if callErr != syscall.Errno(0) {
+			return fmt.Errorf("не удалось перезапустить приложение с правами администратора: %w", callErr)
+		}
+		return fmt.Errorf("не удалось перезапустить приложение с правами администратора, код ShellExecute: %d", ret)
+	}
+
+	return nil
+}
+
+func buildShellExecuteParameters(args []string) string {
+	escaped := make([]string, 0, len(args))
+	for _, arg := range args {
+		escaped = append(escaped, windows.EscapeArg(arg))
+	}
+	return strings.Join(escaped, " ")
 }
 
 // RunCommand остается без изменений

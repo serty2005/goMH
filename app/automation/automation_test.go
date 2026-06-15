@@ -228,3 +228,36 @@ func TestExecuteCLIReturnsJSONErrorForInvalidRequest(t *testing.T) {
 		t.Fatalf("unexpected error payload: %+v", response.Error)
 	}
 }
+
+func TestExecuteCLIReturnsRequiresAdminBeforeExecution(t *testing.T) {
+	t.Parallel()
+
+	request := `{"request_id":"req-admin","operation_id":"serviceutils.collect_logs"}`
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	exitCode := ExecuteCLI([]string{"run", "--stdin"}, strings.NewReader(request), stdout, stderr, CommandDependencies{
+		IsAdmin: func() bool {
+			return false
+		},
+		ExecuteRequest: func(ctx context.Context, req Request, opts RequestOptions, stderr io.Writer, deps CommandDependencies) Response {
+			t.Fatal("ExecuteRequest must not be called when admin privileges are missing")
+			return Response{}
+		},
+	})
+
+	if exitCode != ExitRequiresAdmin {
+		t.Fatalf("expected exit code %d, got %d", ExitRequiresAdmin, exitCode)
+	}
+
+	var response Response
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("stdout must contain valid JSON error response: %v", err)
+	}
+	if response.RequestID != "req-admin" {
+		t.Fatalf("unexpected response request_id: %q", response.RequestID)
+	}
+	if response.Error == nil || response.Error.Code != "requires_admin" {
+		t.Fatalf("unexpected error payload: %+v", response.Error)
+	}
+}

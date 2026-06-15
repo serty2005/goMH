@@ -21,6 +21,7 @@ import (
 
 type CommandDependencies struct {
 	NewWinUtils    func() core.WinUtils
+	IsAdmin        func() bool
 	ExecuteRequest func(ctx context.Context, req Request, opts RequestOptions, stderr io.Writer, deps CommandDependencies) Response
 }
 
@@ -68,6 +69,16 @@ func executeRunCLI(args []string, stdin io.Reader, stdout io.Writer, stderr io.W
 	req, err := ParseRequest(bytes.NewReader(data))
 	if err != nil {
 		return writeErrorResponse(stdout, stderr, newRunError(ExitInvalidRequest, "invalid_request", err.Error(), err))
+	}
+
+	if deps.IsAdmin != nil && !deps.IsAdmin() {
+		response := newCommandResponse(req)
+		response = finishCommandResponse(response, response.StartedAt, newRequiresAdminError())
+		if err := WriteResponse(stdout, response); err != nil {
+			fmt.Fprintf(stderr, "не удалось записать automation response: %v\n", err)
+			return ExitInternalError
+		}
+		return response.ExitCode
 	}
 
 	executor := deps.ExecuteRequest
@@ -122,18 +133,17 @@ func executeListOperations(stdout io.Writer) int {
 }
 
 func executeRequestDefault(ctx context.Context, req Request, opts RequestOptions, stderr io.Writer, deps CommandDependencies) Response {
-	startedAt := time.Now().UTC()
-	response := Response{
-		ContractVersion: ContractVersion,
-		Status:          "error",
-		RequestID:       req.RequestID,
-		CorrelationID:   req.CorrelationID,
-		OperationID:     req.OperationID,
-		Module:          req.Module,
-		Action:          req.Action,
-		StartedAt:       startedAt,
-		CompletedAt:     startedAt,
-		ExitCode:        ExitInternalError,
+	response := newCommandResponse(req)
+	startedAt := response.StartedAt
+
+	isAdmin := deps.IsAdmin
+	if isAdmin == nil {
+		isAdmin = func() bool {
+			return platform.NewRealWinUtils().IsAdmin()
+		}
+	}
+	if !isAdmin() {
+		return finishCommandResponse(response, startedAt, newRequiresAdminError())
 	}
 
 	restoreWorkingDir, err := applyWorkingDir(req.WorkingDir)
@@ -181,6 +191,31 @@ func executeRequestDefault(ctx context.Context, req Request, opts RequestOptions
 		WinUtils:     winUtils,
 	}, stderr)
 	return runner.Run(ctx, req)
+}
+
+func newCommandResponse(req Request) Response {
+	startedAt := time.Now().UTC()
+	return Response{
+		ContractVersion: ContractVersion,
+		Status:          "error",
+		RequestID:       req.RequestID,
+		CorrelationID:   req.CorrelationID,
+		OperationID:     req.OperationID,
+		Module:          req.Module,
+		Action:          req.Action,
+		StartedAt:       startedAt,
+		CompletedAt:     startedAt,
+		ExitCode:        ExitInternalError,
+	}
+}
+
+func newRequiresAdminError() error {
+	return newRunError(
+		ExitRequiresAdmin,
+		"requires_admin",
+		"automation operation requires administrator privileges; restart saga-runner or goMH automation in an elevated context",
+		nil,
+	)
 }
 
 func readRequestData(requestPath string, stdinMode bool, stdin io.Reader) ([]byte, error) {

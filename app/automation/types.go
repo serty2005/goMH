@@ -19,6 +19,7 @@ const (
 	ExitExecutionFailed       = 5
 	ExitTimeout               = 6
 	ExitInternalError         = 7
+	ExitRequiresAdmin         = 8
 )
 
 type Request struct {

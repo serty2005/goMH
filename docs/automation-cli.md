@@ -40,6 +40,8 @@ goMH.exe automation run --config .\config.json --request .\request.json
 goMH.exe automation list-operations
 ```
 
+`automation run` должен запускаться в elevated-контексте. Если процесс запущен без прав администратора, goMH не делает self-elevation, а возвращает JSON-ошибку `requires_admin`, чтобы внешний saga-runner мог обработать её и перезапустить себя или дочерний процесс через `runas`.
+
 ## STDIO Contract
 
 - `stdout`: только один финальный JSON response.
@@ -184,6 +186,7 @@ goMH.exe automation list-operations
 - `5`: ошибка выполнения операции.
 - `6`: timeout.
 - `7`: внутренняя ошибка automation runtime.
+- `8`: требуются права администратора (`error.code = "requires_admin"`).
 
 ## Versioning И Совместимость
 

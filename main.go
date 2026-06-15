@@ -219,6 +219,7 @@ func main() {
 				NewWinUtils: func() core.WinUtils {
 					return platform.NewRealWinUtils()
 				},
+				IsAdmin: winutils.IsAdmin,
 			},
 		))
 	}
@@ -245,11 +246,12 @@ func execute() error {
 
 	// Проверка прав администратора
 	if !winutils.IsAdmin() {
-		tui.Error("Ошибка: Для выполнения требуются права администратора.")
-		tui.Error("Пожалуйста, запустите эту программу от имени Администратора.")
-		fmt.Println("\nНажмите Enter для выхода...")
-		fmt.Scanln()
-		return fmt.Errorf("для выполнения требуются права администратора")
+		tui.Warn("Приложение запущено без прав администратора. Запрашиваю повышение прав через UAC...")
+		if err := winutils.RelaunchElevated(os.Args[1:]); err != nil {
+			return err
+		}
+		tui.Info("Запущен новый процесс с запросом прав администратора. Текущий процесс будет закрыт.")
+		return nil
 	}
 	tui.Success("Приложение запущено с правами администратора.")
 

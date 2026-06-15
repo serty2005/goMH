@@ -26,6 +26,20 @@ func TestBuildAutostartCommandLeavesExecutableWithoutSpacesUnquoted(t *testing.T
 	}
 }
 
+func TestBuildShellExecuteParametersEscapesResumePath(t *testing.T) {
+	params := buildShellExecuteParameters([]string{
+		"-module",
+		"iiko",
+		"-resume",
+		`C:\MH temp\distro_resume.json`,
+	})
+
+	want := `-module iiko -resume "C:\MH temp\distro_resume.json"`
+	if params != want {
+		t.Fatalf("params = %q, want %q", params, want)
+	}
+}
+
 func TestGetStartupFoldersExpandsProgramDataCommonStartup(t *testing.T) {
 	programData := filepath.Join(t.TempDir(), "ProgramData")
 	t.Setenv("ProgramData", programData)
