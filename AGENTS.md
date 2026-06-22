@@ -24,7 +24,6 @@ goMH - Windows-first мультитул для сотрудников техпо
 - `main.go` - точка входа. Обрабатывает режимы:
   - `automation ...` без интерактивного интерфейса;
   - обычный TUI dashboard;
-  - `-gui` для GUI;
   - `-module ... -resume ...` для возобновления iiko/Syrve и Regime после перезапуска.
 - `config/` - структуры `config.json`, загрузка локального/удаленного конфига, дефолты логирования.
 - `core/` - общие интерфейсы: `TaskContext`, `WinUtils`, `AssetManager`, `QueueModule`, `ModuleServices`.
@@ -32,9 +31,8 @@ goMH - Windows-first мультитул для сотрудников техпо
 - `modules/*` - доменные модули: дистрибутивы, FRPC, удаленный доступ, драйверы ФР, плагины iiko, обслуживание, UTM, VComCaster, Regime.
 - `assetmgr/` - загрузка и кеширование ресурсов из `asset_catalog`, HTTP/FTP, прогресс, отмена загрузок.
 - `taskqueue/` - очередь задач, статусы, прогресс, task-log, cancel/remove/clear.
-- `app/modruntime` - общий runtime для TUI/GUI/automation. Он превращает `QueueModule` в задачу очереди или immediate action и прокидывает task-aware `AssetManager`/`WinUtils`.
+- `app/modruntime` - общий runtime для TUI/automation. Он превращает `QueueModule` в задачу очереди или immediate action и прокидывает task-aware `AssetManager`/`WinUtils`.
 - `app/consolequeue` - TUI dashboard поверх `taskqueue` и `modruntime.Service`.
-- `gui/` - Walk GUI. Сейчас GUI частично включен: основной рабочий путь остается TUI.
 - `app/automation` - non-interactive JSON contract для внешних оркестраторов. Документация: `docs/automation-cli.md`.
 - `logging/` и `logstream/` - общий лог приложения и отдельный live-log просмотр.
 - `app/platform` и `winutils/` - реальные Windows-операции. В тестах и новых слоях предпочитай зависеть от `core.WinUtils`, а не от конкретной реализации.
@@ -141,9 +139,8 @@ go build -v -o goMH.exe .
 - `main.go` сейчас совмещает запуск, self-update, resume, cleanup, signals и выбор UI. Править точечно.
 - Self-update меняет исполняемый файл и оставляет `.old`; не трогай без отдельной проверки сценария перезапуска.
 - Resume для `distro` и `regime` завязан на задачи планировщика и cleanup temp.
-- `assetmgr` управляет повторными загрузками, прогрессом и cancelability; изменения могут затронуть TUI/GUI/automation одновременно.
+- `assetmgr` управляет повторными загрузками, прогрессом и cancelability; изменения могут затронуть TUI/automation одновременно.
 - `config.json` может содержать реальные URL и учетные данные.
-- GUI на `github.com/lxn/walk` Windows-specific; не ожидай полноценной проверки GUI вне Windows.
 
 ## Первичная карта качества
 

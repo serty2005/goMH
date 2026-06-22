@@ -9,7 +9,6 @@ import (
 	"goMH/assetmgr"
 	"goMH/config"
 	"goMH/core"
-	"goMH/gui"
 	"goMH/logging"
 	"goMH/modules/distro"
 	"goMH/modules/regime"
@@ -238,8 +237,7 @@ func execute() error {
 
 	// Предварительный парсинг флагов
 	configPathFlag := flag.String("config", "config.json", "Путь к файлу конфигурации (локальный или URL)")
-	guiFlag := flag.Bool("gui", false, "Запустить в графическом режиме")
-	// Новые флаги для режима возобновления
+	// Флаги для режима возобновления
 	moduleFlag := flag.String("module", "", "Прямой запуск модуля (Regime, iiko)")
 	resumeFlag := flag.String("resume", "", "Путь к файлу конфигурации возобновления")
 	flag.Parse()
@@ -358,16 +356,6 @@ func execute() error {
 		logging.LogTaskFinished(mod.ID(), "resume", "Возобновление установки iiko/Syrve", nil)
 		tui.Success("\n--- Операция завершена успешно. ---")
 		time.Sleep(5 * time.Second)
-		return nil
-	}
-
-	// --- ЗАПУСК GUI ---
-	if *guiFlag {
-		slog.Info("Запуск в режиме GUI")
-		registry := moduleregistry.NewDefault()
-		if err := gui.Run(cfg, registry, assetManager, RealWinUtils); err != nil {
-			return fmt.Errorf("не удалось запустить GUI: %w", err)
-		}
 		return nil
 	}
 
