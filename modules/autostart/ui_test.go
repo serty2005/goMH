@@ -258,7 +258,7 @@ func TestModelAddModeSelectionSupportsMouse(t *testing.T) {
 }
 
 func TestModelShowsScanProgress(t *testing.T) {
-	mdl := newScanningModel(nil)
+	mdl := newScanningModel(nil, nil)
 
 	updated, _ := mdl.Update(scanProgressMsg{
 		Area:  "Реестр HKCU Run",
@@ -615,5 +615,184 @@ func TestModelCopiedFieldBlinkMessageTogglesAndClearsFeedback(t *testing.T) {
 	mdl = updated.(model)
 	if mdl.copiedEditField != editFieldNone {
 		t.Fatalf("final blink should clear copied field feedback")
+	}
+}
+
+func TestFinishAddWithUserScopeCreatesUserRequest(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.addScope = core.AutostartScopeUser
+	mdl.addKind = core.AutostartRegistryKeyRun
+	mdl.pathInput.SetValue(`C:\Tools\app.exe`)
+
+	mdl.finishAdd()
+
+	if len(mdl.creates) != 1 {
+		t.Fatalf("len(creates) = %d, want 1", len(mdl.creates))
+	}
+	if mdl.creates[0].Scope != core.AutostartScopeUser {
+		t.Fatalf("scope = %q, want user", mdl.creates[0].Scope)
+	}
+}
+
+func TestFinishAddWithMachineScopeCreatesMachineRequest(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.addScope = core.AutostartScopeMachine
+	mdl.addKind = core.AutostartRegistryKeyRun
+	mdl.pathInput.SetValue(`C:\Tools\app.exe`)
+
+	mdl.finishAdd()
+
+	if len(mdl.creates) != 1 {
+		t.Fatalf("len(creates) = %d, want 1", len(mdl.creates))
+	}
+	if mdl.creates[0].Scope != core.AutostartScopeMachine {
+		t.Fatalf("scope = %q, want machine", mdl.creates[0].Scope)
+	}
+	if mdl.entries[0].Scope != core.AutostartScopeMachine {
+		t.Fatalf("staged entry scope = %q, want machine", mdl.entries[0].Scope)
+	}
+}
+
+func TestAddModeScopeNavigationAndTransitionToKind(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.startAdd()
+
+	if mdl.adding != addModePath {
+		t.Fatalf("startAdd should start at addModePath, got %v", mdl.adding)
+	}
+
+	// перематываем к шагу scope напрямую (nil-checker → scope)
+	mdl.adding = addModeScope
+	if mdl.addScope != core.AutostartScopeUser {
+		t.Fatalf("default scope = %q, want user", mdl.addScope)
+	}
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	mdl = updated.(model)
+	if mdl.addScope != core.AutostartScopeMachine {
+		t.Fatalf("'2' should select machine scope, got %q", mdl.addScope)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	mdl = updated.(model)
+	if mdl.addScope != core.AutostartScopeUser {
+		t.Fatalf("'1' should select user scope, got %q", mdl.addScope)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mdl = updated.(model)
+	if mdl.addScope != core.AutostartScopeMachine {
+		t.Fatalf("Tab should toggle to machine, got %q", mdl.addScope)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	if mdl.adding != addModeKind {
+		t.Fatalf("Enter should advance to addModeKind, got %v", mdl.adding)
+	}
+}
+
+func TestAddModePathFirstAndNilCheckerSkipsToScope(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.elevationChecker = nil // nil checker → сразу scope
+	mdl.startAdd()
+
+	if mdl.adding != addModePath {
+		t.Fatalf("startAdd should start at addModePath, got %v", mdl.adding)
+	}
+
+	mdl.pathInput.SetValue(`C:\Tools\app.exe`)
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+
+	if mdl.adding != addModeScope {
+		t.Fatalf("with nil checker Enter should go to addModeScope, got %v", mdl.adding)
+	}
+	if mdl.addNeedsTask {
+		t.Fatalf("nil checker should not set addNeedsTask")
+	}
+}
+
+func TestAddModeElevationDetectedCreatesTask(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.elevationChecker = func(_ string) (bool, error) { return true, nil }
+	mdl.startAdd()
+	mdl.pathInput.SetValue(`C:\App\elevated.exe`)
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	if mdl.adding != addModeCheckingElevation {
+		t.Fatalf("Enter with checker should enter checkingElevation, got %v", mdl.adding)
+	}
+
+	updated, _ = mdl.Update(elevationCheckMsg{needsTask: true})
+	mdl = updated.(model)
+	if !mdl.addNeedsTask {
+		t.Fatalf("elevationCheckMsg(needsTask=true) should set addNeedsTask")
+	}
+	if mdl.adding != addModeArgs {
+		t.Fatalf("after elevation detected should go to addModeArgs, got %v", mdl.adding)
+	}
+
+	updated, _ = mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+
+	if len(mdl.taskCreates) != 1 {
+		t.Fatalf("len(taskCreates) = %d, want 1", len(mdl.taskCreates))
+	}
+	if len(mdl.creates) != 0 {
+		t.Fatalf("len(creates) = %d, want 0 (should be task, not registry)", len(mdl.creates))
+	}
+	if mdl.taskCreates[0].Path != `C:\App\elevated.exe` {
+		t.Fatalf("taskCreate path = %q", mdl.taskCreates[0].Path)
+	}
+	if mdl.entries[0].Source != core.AutostartSourceScheduledTask {
+		t.Fatalf("staged entry source = %q, want scheduled_task", mdl.entries[0].Source)
+	}
+}
+
+func TestAddModeElevationNotDetectedGoesToScope(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.elevationChecker = func(_ string) (bool, error) { return false, nil }
+	mdl.startAdd()
+	mdl.pathInput.SetValue(`C:\App\normal.exe`)
+
+	updated, _ := mdl.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mdl = updated.(model)
+	updated, _ = mdl.Update(elevationCheckMsg{needsTask: false})
+	mdl = updated.(model)
+
+	if mdl.addNeedsTask {
+		t.Fatalf("should not set addNeedsTask when elevation not detected")
+	}
+	if mdl.adding != addModeScope {
+		t.Fatalf("not-elevated should go to addModeScope, got %v", mdl.adding)
+	}
+}
+
+func TestSaveConfirmedIncludesTaskCreates(t *testing.T) {
+	mdl := newModel(nil)
+	mdl.taskCreates = []core.AutostartCreateRequest{
+		{Name: "ElevatedApp", Path: `C:\App\app.exe`},
+	}
+	mdl.startConfirm()
+
+	if len(mdl.confirmItems) != 1 {
+		t.Fatalf("len(confirmItems) = %d, want 1", len(mdl.confirmItems))
+	}
+	if mdl.confirmItems[0].Kind != confirmItemTaskCreate {
+		t.Fatalf("confirmItem kind = %v, want confirmItemTaskCreate", mdl.confirmItems[0].Kind)
+	}
+
+	updated, _ := mdl.saveConfirmed()
+	mdl = updated.(model)
+	if !mdl.saved {
+		t.Fatalf("should be saved")
+	}
+	if len(mdl.result.TaskCreates) != 1 {
+		t.Fatalf("len(result.TaskCreates) = %d, want 1", len(mdl.result.TaskCreates))
+	}
+	if mdl.result.TaskCreates[0].Name != "ElevatedApp" {
+		t.Fatalf("task create name = %q", mdl.result.TaskCreates[0].Name)
 	}
 }

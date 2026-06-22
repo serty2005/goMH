@@ -141,6 +141,8 @@ type WinUtils interface {
 	DeleteRegistryAutostartValue(scope AutostartScope, key AutostartRegistryKey, valueName string) error
 	RegistryAutostartValueExists(scope AutostartScope, key AutostartRegistryKey, valueName string) bool
 	ResolveShortcut(path string) (ShortcutInfo, error)
+	RequiresAdminElevation(exePath string) (bool, error)
+	AddScheduledAutostartTask(name, exePath, arguments string) error
 	UninstallSystemApp(partialName string) error
 	ExtractArchive(archivePath, destDir string, fullPaths bool) error
 	GetDesktopDir() (string, error)

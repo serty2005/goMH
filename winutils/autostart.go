@@ -76,17 +76,27 @@ func ApplyAutostartChanges(changes []core.AutostartChange) error {
 		}
 	}
 	for _, change := range changes {
-		if change.Enabled {
-			continue
-		}
 		switch change.Entry.Source {
 		case core.AutostartSourceRegistryRun, core.AutostartSourceRegistryRunOnce:
-			if err := DeleteRegistryAutostartValue(change.Entry.Scope, change.Entry.RegistryKey, change.Entry.RegistryValue); err != nil {
-				errs = append(errs, err)
+			if change.Enabled {
+				if err := SetRegistryAutostartValue(
+					change.Entry.Scope,
+					change.Entry.RegistryKey,
+					change.Entry.RegistryValue,
+					change.Entry.Command,
+				); err != nil {
+					errs = append(errs, err)
+				}
+			} else {
+				if err := DeleteRegistryAutostartValue(change.Entry.Scope, change.Entry.RegistryKey, change.Entry.RegistryValue); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		case core.AutostartSourceStartupFolder:
-			if err := os.Remove(change.Entry.FilePath); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, err)
+			if !change.Enabled {
+				if err := os.Remove(change.Entry.FilePath); err != nil && !os.IsNotExist(err) {
+					errs = append(errs, err)
+				}
 			}
 		}
 	}
@@ -123,7 +133,13 @@ func AddRegistryAutostartEntry(req core.AutostartCreateRequest) error {
 	if scope == "" {
 		scope = core.AutostartScopeUser
 	}
-	return SetRegistryAutostartValue(scope, key, name, buildAutostartCommand(targetPath, arguments))
+	if err := SetRegistryAutostartValue(scope, key, name, buildAutostartCommand(targetPath, arguments)); err != nil {
+		if scope == core.AutostartScopeMachine {
+			return fmt.Errorf("запись в HKLM\\...\\Run требует прав администратора; запустите программу от имени администратора: %w", err)
+		}
+		return err
+	}
+	return nil
 }
 
 func SetRegistryAutostartValue(scope core.AutostartScope, key core.AutostartRegistryKey, valueName, command string) error {
@@ -228,6 +244,7 @@ func listRegistryAutostartEntries() ([]core.AutostartEntry, error) {
 				if keyName == core.AutostartRegistryKeyRunOnce {
 					source = core.AutostartSourceRegistryRunOnce
 				}
+				targetPath, arguments := parseRegistryCommand(command)
 				entries = append(entries, core.AutostartEntry{
 					ID:            strings.Join([]string{"registry", string(scope), string(keyName), name}, "|"),
 					Name:          name,
@@ -235,6 +252,8 @@ func listRegistryAutostartEntries() ([]core.AutostartEntry, error) {
 					Scope:         scope,
 					Enabled:       true,
 					Command:       command,
+					TargetPath:    targetPath,
+					Arguments:     arguments,
 					RegistryKey:   keyName,
 					RegistryValue: name,
 					CanToggle:     true,
@@ -400,6 +419,26 @@ func buildAutostartApplyCommands(changes []core.AutostartChange) []autostartComm
 		})
 	}
 	return commands
+}
+
+func parseRegistryCommand(cmd string) (targetPath, arguments string) {
+	cmd = strings.TrimSpace(cmd)
+	if strings.HasPrefix(cmd, `"`) {
+		end := strings.Index(cmd[1:], `"`)
+		if end >= 0 {
+			targetPath = cmd[1 : end+1]
+			arguments = strings.TrimSpace(cmd[end+2:])
+			return
+		}
+	}
+	idx := strings.IndexByte(cmd, ' ')
+	if idx < 0 {
+		targetPath = cmd
+		return
+	}
+	targetPath = cmd[:idx]
+	arguments = strings.TrimSpace(cmd[idx+1:])
+	return
 }
 
 func buildAutostartCommand(executablePath, arguments string) string {

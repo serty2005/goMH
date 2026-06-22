@@ -288,3 +288,89 @@ func TestReportAutostartProgress(t *testing.T) {
 		t.Fatalf("found = %d, want 7", got[0].Found)
 	}
 }
+
+func TestParseRegistryCommand(t *testing.T) {
+	cases := []struct {
+		cmd        string
+		wantPath   string
+		wantArgs   string
+	}{
+		{`"C:\My App\app.exe" /flag`, `C:\My App\app.exe`, `/flag`},
+		{`"C:\My App\app.exe"`, `C:\My App\app.exe`, ``},
+		{`C:\app\app.exe`, `C:\app\app.exe`, ``},
+		{`C:\app\app.exe --quiet`, `C:\app\app.exe`, `--quiet`},
+		{`C:\app\app.exe --a --b`, `C:\app\app.exe`, `--a --b`},
+		{`"C:\Path\app.exe" --a --b`, `C:\Path\app.exe`, `--a --b`},
+		{``, ``, ``},
+	}
+	for _, c := range cases {
+		gotPath, gotArgs := parseRegistryCommand(c.cmd)
+		if gotPath != c.wantPath || gotArgs != c.wantArgs {
+			t.Errorf("parseRegistryCommand(%q) = (%q, %q), want (%q, %q)",
+				c.cmd, gotPath, gotArgs, c.wantPath, c.wantArgs)
+		}
+	}
+}
+
+func TestApplyAutostartChangesEnablesRegistryEntry(t *testing.T) {
+	const testValue = "goMH_test_enable_registry"
+	scope := core.AutostartScopeUser
+	key := core.AutostartRegistryKeyRun
+	command := `C:\TestApp\test.exe --flag`
+
+	_ = DeleteRegistryAutostartValue(scope, key, testValue)
+	t.Cleanup(func() { _ = DeleteRegistryAutostartValue(scope, key, testValue) })
+
+	err := ApplyAutostartChanges([]core.AutostartChange{
+		{
+			Entry: core.AutostartEntry{
+				ID:            "registry|user|Run|" + testValue,
+				Source:        core.AutostartSourceRegistryRun,
+				Scope:         scope,
+				RegistryKey:   key,
+				RegistryValue: testValue,
+				Command:       command,
+				Enabled:       false,
+			},
+			Enabled: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyAutostartChanges enable returned error: %v", err)
+	}
+	if !RegistryAutostartValueExists(scope, key, testValue) {
+		t.Fatalf("registry value should exist after enable")
+	}
+}
+
+func TestApplyAutostartChangesDisablesRegistryEntry(t *testing.T) {
+	const testValue = "goMH_test_disable_registry"
+	scope := core.AutostartScopeUser
+	key := core.AutostartRegistryKeyRun
+
+	if err := SetRegistryAutostartValue(scope, key, testValue, `C:\TestApp\test.exe`); err != nil {
+		t.Skipf("cannot write to HKCU registry: %v", err)
+	}
+	t.Cleanup(func() { _ = DeleteRegistryAutostartValue(scope, key, testValue) })
+
+	err := ApplyAutostartChanges([]core.AutostartChange{
+		{
+			Entry: core.AutostartEntry{
+				ID:            "registry|user|Run|" + testValue,
+				Source:        core.AutostartSourceRegistryRun,
+				Scope:         scope,
+				RegistryKey:   key,
+				RegistryValue: testValue,
+				Command:       `C:\TestApp\test.exe`,
+				Enabled:       true,
+			},
+			Enabled: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyAutostartChanges disable returned error: %v", err)
+	}
+	if RegistryAutostartValueExists(scope, key, testValue) {
+		t.Fatalf("registry value should not exist after disable")
+	}
+}

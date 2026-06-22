@@ -21,6 +21,68 @@ func (f *editWinUtilsFake) DeleteRegistryAutostartValue(scope core.AutostartScop
 	return nil
 }
 
+func TestApplyAutostartEditCreatesWithMachineScope(t *testing.T) {
+	fake := &editWinUtilsFake{}
+
+	err := applyAutostartEdit(fake, core.AutostartEdit{
+		Original: core.AutostartEntry{
+			ID:            "registry|machine|Run|App",
+			Name:          "App",
+			Source:        core.AutostartSourceRegistryRun,
+			Scope:         core.AutostartScopeMachine,
+			RegistryKey:   core.AutostartRegistryKeyRun,
+			RegistryValue: "App",
+		},
+		Name:      "App",
+		Path:      `C:\Program Files\App\app.exe`,
+		Arguments: "",
+	})
+	if err != nil {
+		t.Fatalf("applyAutostartEdit returned error: %v", err)
+	}
+	if len(fake.creates) != 1 {
+		t.Fatalf("len(creates) = %d, want 1", len(fake.creates))
+	}
+	if fake.creates[0].Scope != core.AutostartScopeMachine {
+		t.Fatalf("scope = %q, want machine", fake.creates[0].Scope)
+	}
+}
+
+func TestEditRoundTripPreservesComplexCommand(t *testing.T) {
+	original := core.AutostartEntry{
+		ID:            "registry|user|Run|MyApp",
+		Name:          "MyApp",
+		Source:        core.AutostartSourceRegistryRun,
+		Scope:         core.AutostartScopeUser,
+		RegistryKey:   core.AutostartRegistryKeyRun,
+		RegistryValue: "MyApp",
+		Command:       `"C:\My App\app.exe" /flag`,
+		TargetPath:    `C:\My App\app.exe`,
+		Arguments:     `/flag`,
+	}
+
+	fake := &editWinUtilsFake{}
+	err := applyAutostartEdit(fake, core.AutostartEdit{
+		Original:  original,
+		Name:      original.Name,
+		Path:      original.TargetPath,
+		Arguments: original.Arguments,
+	})
+	if err != nil {
+		t.Fatalf("applyAutostartEdit returned error: %v", err)
+	}
+	if len(fake.creates) != 1 {
+		t.Fatalf("len(creates) = %d, want 1", len(fake.creates))
+	}
+	create := fake.creates[0]
+	if create.Path != original.TargetPath {
+		t.Fatalf("round-trip path = %q, want %q", create.Path, original.TargetPath)
+	}
+	if create.Arguments != original.Arguments {
+		t.Fatalf("round-trip arguments = %q, want %q", create.Arguments, original.Arguments)
+	}
+}
+
 func TestApplyAutostartEditUpdatesRegistryValueBeforeDeletingOldName(t *testing.T) {
 	fake := &editWinUtilsFake{}
 

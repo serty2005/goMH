@@ -191,6 +191,14 @@ func (rw *RealWinUtils) ResolveShortcut(path string) (core.ShortcutInfo, error) 
 	return winutils.ResolveShortcut(path)
 }
 
+func (rw *RealWinUtils) RequiresAdminElevation(exePath string) (bool, error) {
+	return winutils.RequiresAdminElevation(exePath)
+}
+
+func (rw *RealWinUtils) AddScheduledAutostartTask(name, exePath, arguments string) error {
+	return winutils.AddScheduledAutostartTask(name, exePath, arguments)
+}
+
 func (rw *RealWinUtils) UninstallSystemApp(partialName string) error {
 	return rw.withRuntime().UninstallSystemApp(partialName)
 }

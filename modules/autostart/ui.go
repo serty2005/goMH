@@ -17,11 +17,20 @@ import (
 type addMode int
 
 const (
-	addModeNone addMode = iota
-	addModeKind
-	addModePath
-	addModeArgs
+	addModeNone              addMode = iota
+	addModePath                       // шаг 1: путь до exe/lnk
+	addModeCheckingElevation          // ожидание async-проверки прав
+	addModeScope                      // шаг 2a: HKCU/HKLM (только если не нужна задача)
+	addModeKind                       // шаг 2b: Run/RunOnce (только если не нужна задача)
+	addModeArgs                       // шаг 3: аргументы
 )
+
+type elevationChecker func(exePath string) (bool, error)
+
+type elevationCheckMsg struct {
+	needsTask bool
+	err       error
+}
 
 type statusFilter int
 
@@ -58,6 +67,7 @@ type confirmItemKind int
 const (
 	confirmItemChange confirmItemKind = iota
 	confirmItemCreate
+	confirmItemTaskCreate
 	confirmItemEdit
 )
 
@@ -104,8 +114,12 @@ type model struct {
 	scanCh          chan scanProgressMsg
 	scanArea        string
 	scanFound       int
-	adding          addMode
-	addKind         core.AutostartRegistryKey
+	adding           addMode
+	addScope         core.AutostartScope
+	addKind          core.AutostartRegistryKey
+	addNeedsTask     bool
+	elevationChecker elevationChecker
+	taskCreates      []core.AutostartCreateRequest
 	pathInput       textinput.Model
 	argsInput       textinput.Model
 	searchInput     textinput.Model
@@ -140,8 +154,8 @@ type model struct {
 	statusStyle     lipgloss.Style
 }
 
-func runUI(scanner autostartScanner) (*Config, error) {
-	program := tea.NewProgram(newScanningModel(scanner), tea.WithAltScreen(), tea.WithMouseCellMotion())
+func runUI(scanner autostartScanner, checkElevation elevationChecker) (*Config, error) {
+	program := tea.NewProgram(newScanningModel(scanner, checkElevation), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := program.Run()
 	if err != nil {
 		return nil, err
@@ -153,12 +167,13 @@ func runUI(scanner autostartScanner) (*Config, error) {
 	return &result.result, nil
 }
 
-func newScanningModel(scanner autostartScanner) model {
+func newScanningModel(scanner autostartScanner, checkElevation elevationChecker) model {
 	mdl := newModel(nil)
 	mdl.scanning = true
 	mdl.scanner = scanner
 	mdl.scanCh = make(chan scanProgressMsg, 8)
 	mdl.scanArea = "Подготовка сканирования"
+	mdl.elevationChecker = checkElevation
 	return mdl
 }
 
@@ -222,6 +237,19 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case elevationCheckMsg:
+		if m.adding != addModeCheckingElevation {
+			return m, nil
+		}
+		if msg.err == nil && msg.needsTask {
+			m.addNeedsTask = true
+			m.adding = addModeArgs
+			m.argsInput.Focus()
+			return m, textinput.Blink
+		}
+		m.addNeedsTask = false
+		m.adding = addModeScope
+		return m, nil
 	case copiedEditFieldBlinkMsg:
 		if m.copiedEditField != msg.field {
 			return m, nil
@@ -427,10 +455,66 @@ func (m model) View() string {
 
 func (m model) updateAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.adding {
-	case addModeKind:
+	case addModePath:
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			m.adding = addModeNone
+			m.pathInput.Blur()
+			return m, nil
+		case "ctrl+v":
+			return m.pasteIntoFocusedInput()
+		case "enter":
+			path := cleanAddedPath(m.pathInput.Value())
+			if path == "" {
+				m.errText = "Укажите путь до exe или lnk."
+				return m, nil
+			}
+			m.errText = ""
+			m.pathInput.Blur()
+			if m.elevationChecker != nil && !strings.EqualFold(filepath.Ext(path), ".lnk") {
+				m.adding = addModeCheckingElevation
+				return m, checkElevationCmd(m.elevationChecker, path)
+			}
+			m.addNeedsTask = false
+			m.adding = addModeScope
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.pathInput, cmd = m.pathInput.Update(msg)
+		return m, cmd
+	case addModeCheckingElevation:
+		if msg.String() == "ctrl+c" || msg.String() == "esc" {
+			m.adding = addModeNone
+			return m, nil
+		}
+		return m, nil
+	case addModeScope:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			m.adding = addModePath
+			m.pathInput.Focus()
+			return m, textinput.Blink
+		case "left", "up", "1":
+			m.addScope = core.AutostartScopeUser
+			return m, nil
+		case "right", "down", "2":
+			m.addScope = core.AutostartScopeMachine
+			return m, nil
+		case "tab", " ":
+			if m.addScope == core.AutostartScopeUser {
+				m.addScope = core.AutostartScopeMachine
+			} else {
+				m.addScope = core.AutostartScopeUser
+			}
+			return m, nil
+		case "enter":
+			m.adding = addModeKind
+			return m, nil
+		}
+	case addModeKind:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			m.adding = addModeScope
 			return m, nil
 		case "left", "up":
 			m.addKind = core.AutostartRegistryKeyRun
@@ -452,37 +536,20 @@ func (m model) updateAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.addKind = core.AutostartRegistryKeyRunOnce
 			return m, nil
 		case "enter":
-			m.adding = addModePath
-			m.pathInput.Focus()
-			return m, textinput.Blink
-		}
-	case addModePath:
-		switch msg.String() {
-		case "ctrl+c", "esc":
-			m.adding = addModeNone
-			m.pathInput.Blur()
-			return m, nil
-		case "ctrl+v":
-			return m.pasteIntoFocusedInput()
-		case "enter":
-			if strings.TrimSpace(m.pathInput.Value()) == "" {
-				m.errText = "Укажите путь до exe или lnk."
-				return m, nil
-			}
-			m.errText = ""
-			m.pathInput.Blur()
-			m.argsInput.Focus()
 			m.adding = addModeArgs
+			m.argsInput.Focus()
 			return m, textinput.Blink
 		}
-		var cmd tea.Cmd
-		m.pathInput, cmd = m.pathInput.Update(msg)
-		return m, cmd
 	case addModeArgs:
 		switch msg.String() {
 		case "ctrl+c", "esc":
-			m.adding = addModeNone
 			m.argsInput.Blur()
+			if m.addNeedsTask {
+				m.adding = addModePath
+				m.pathInput.Focus()
+				return m, textinput.Blink
+			}
+			m.adding = addModeKind
 			return m, nil
 		case "ctrl+v":
 			return m.pasteIntoFocusedInput()
@@ -497,7 +564,26 @@ func (m model) updateAdd(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func checkElevationCmd(checker elevationChecker, path string) tea.Cmd {
+	return func() tea.Msg {
+		needs, err := checker(path)
+		return elevationCheckMsg{needsTask: needs, err: err}
+	}
+}
+
 func (m model) updateAddMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.adding == addModeScope {
+		if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+			return m, nil
+		}
+		switch {
+		case m.addScopeHit(msg.X, msg.Y, core.AutostartScopeUser):
+			m.addScope = core.AutostartScopeUser
+		case m.addScopeHit(msg.X, msg.Y, core.AutostartScopeMachine):
+			m.addScope = core.AutostartScopeMachine
+		}
+		return m, nil
+	}
 	if m.adding == addModeKind {
 		if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 			return m, nil
@@ -630,10 +716,13 @@ func (m model) updateEditMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) startAdd() {
-	m.adding = addModeKind
+	m.adding = addModePath
+	m.addScope = core.AutostartScopeUser
 	m.addKind = core.AutostartRegistryKeyRun
+	m.addNeedsTask = false
 	m.pathInput.SetValue("")
 	m.argsInput.SetValue("")
+	m.pathInput.Focus()
 	m.errText = ""
 }
 
@@ -769,24 +858,37 @@ func (m *model) finishAdd() {
 		return
 	}
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	args := strings.TrimSpace(m.argsInput.Value())
 	req := core.AutostartCreateRequest{
-		Name:        name,
-		RegistryKey: m.addKind,
-		Scope:       core.AutostartScopeUser,
-		Path:        path,
-		Arguments:   strings.TrimSpace(m.argsInput.Value()),
+		Name:      name,
+		Path:      path,
+		Arguments: args,
 	}
-	m.creates = append(m.creates, req)
-	m.entries = append(m.entries, core.AutostartEntry{
-		ID:          fmt.Sprintf("new|%d", len(m.creates)-1),
-		Name:        name,
-		Source:      sourceForRegistryKey(m.addKind),
-		Scope:       core.AutostartScopeUser,
-		Enabled:     true,
-		Command:     strings.TrimSpace(path + " " + req.Arguments),
-		RegistryKey: m.addKind,
-		CanToggle:   false,
-	})
+	if m.addNeedsTask {
+		m.taskCreates = append(m.taskCreates, req)
+		m.entries = append(m.entries, core.AutostartEntry{
+			ID:       fmt.Sprintf("task|%d", len(m.taskCreates)-1),
+			Name:     name,
+			Source:   core.AutostartSourceScheduledTask,
+			Enabled:  true,
+			Command:  strings.TrimSpace(path + " " + args),
+			CanToggle: false,
+		})
+	} else {
+		req.RegistryKey = m.addKind
+		req.Scope = m.addScope
+		m.creates = append(m.creates, req)
+		m.entries = append(m.entries, core.AutostartEntry{
+			ID:          fmt.Sprintf("new|%d", len(m.creates)-1),
+			Name:        name,
+			Source:      sourceForRegistryKey(m.addKind),
+			Scope:       m.addScope,
+			Enabled:     true,
+			Command:     strings.TrimSpace(path + " " + args),
+			RegistryKey: m.addKind,
+			CanToggle:   false,
+		})
+	}
 	m.cursor = len(m.filteredEntries()) - 1
 	m.ensureCursorVisible()
 	m.adding = addModeNone
@@ -878,7 +980,7 @@ func (m *model) ensureCursorVisible() {
 }
 
 func (m model) dirty() bool {
-	return len(m.creates) > 0 || len(m.edits) > 0 || len(m.changes()) > 0
+	return len(m.creates) > 0 || len(m.taskCreates) > 0 || len(m.edits) > 0 || len(m.changes()) > 0
 }
 
 func (m model) changes() []core.AutostartChange {
@@ -906,7 +1008,7 @@ func (m *model) startConfirm() {
 }
 
 func (m model) buildConfirmItems() []confirmItem {
-	items := make([]confirmItem, 0, len(m.changes())+len(m.creates)+len(m.edits))
+	items := make([]confirmItem, 0, len(m.changes())+len(m.creates)+len(m.taskCreates)+len(m.edits))
 	for _, change := range m.changes() {
 		action := "выключить"
 		if change.Enabled {
@@ -923,6 +1025,14 @@ func (m model) buildConfirmItems() []confirmItem {
 		items = append(items, confirmItem{
 			Kind:     confirmItemCreate,
 			Label:    fmt.Sprintf("создать: %s (%s)", create.Name, create.RegistryKey),
+			Selected: true,
+			Create:   create,
+		})
+	}
+	for _, create := range m.taskCreates {
+		items = append(items, confirmItem{
+			Kind:     confirmItemTaskCreate,
+			Label:    fmt.Sprintf("создать задачу планировщика: %s", create.Name),
 			Selected: true,
 			Create:   create,
 		})
@@ -970,11 +1080,13 @@ func (m model) saveConfirmed() (tea.Model, tea.Cmd) {
 			result.Changes = append(result.Changes, item.Change)
 		case confirmItemCreate:
 			result.Creates = append(result.Creates, item.Create)
+		case confirmItemTaskCreate:
+			result.TaskCreates = append(result.TaskCreates, item.Create)
 		case confirmItemEdit:
 			result.Edits = append(result.Edits, item.Edit)
 		}
 	}
-	if len(result.Changes) == 0 && len(result.Creates) == 0 && len(result.Edits) == 0 {
+	if len(result.Changes) == 0 && len(result.Creates) == 0 && len(result.TaskCreates) == 0 && len(result.Edits) == 0 {
 		m.errText = "Выберите хотя бы одно изменение для сохранения."
 		return m, nil
 	}
@@ -1348,7 +1460,7 @@ func (m model) isStatusColumnX(x int) bool {
 
 func (m model) renderStatus() string {
 	changes := len(m.changes())
-	creates := len(m.creates)
+	creates := len(m.creates) + len(m.taskCreates)
 	save := "S сохранить"
 	if !m.dirty() {
 		save = "S сохранить (нет изменений)"
@@ -1359,10 +1471,30 @@ func (m model) renderStatus() string {
 func (m model) renderAdd(width, height int) string {
 	lines := []string{
 		m.titleStyle.Render("Добавление автозапуска"),
-		m.mutedStyle.Render("Esc отменить, Enter дальше"),
+		m.mutedStyle.Render("Esc назад, Enter дальше"),
 		"",
 	}
 	switch m.adding {
+	case addModePath:
+		lines = append(lines, "Полный путь до exe или lnk:", m.pathInput.View())
+	case addModeCheckingElevation:
+		lines = append(lines,
+			"Проверка требований к правам запуска...",
+			m.mutedStyle.Render("Пожалуйста, подождите. Esc отменить."),
+		)
+	case addModeScope:
+		user := "Текущий пользователь (HKCU)"
+		machine := "Все пользователи (HKLM)"
+		if m.addScope == core.AutostartScopeUser {
+			user = m.focusStyle.Render(user)
+		} else {
+			machine = m.focusStyle.Render(machine)
+		}
+		lines = append(lines,
+			"Выберите область действия:",
+			fmt.Sprintf("%s  %s", user, machine),
+			m.mutedStyle.Render("1 Текущий пользователь   2 Все пользователи   Tab переключить"),
+		)
 	case addModeKind:
 		run := "Run"
 		runOnce := "RunOnce"
@@ -1376,10 +1508,11 @@ func (m model) renderAdd(width, height int) string {
 			fmt.Sprintf("%s  %s", run, runOnce),
 			m.mutedStyle.Render("1 Run   2 RunOnce   Tab/Space переключить"),
 		)
-	case addModePath:
-		lines = append(lines, "Полный путь до exe или lnk:", m.pathInput.View())
 	case addModeArgs:
 		lines = append(lines, "Параметры запуска:", m.argsInput.View())
+		if m.addNeedsTask {
+			lines = append(lines, m.mutedStyle.Render("Программа требует прав администратора — будет создана задача планировщика."))
+		}
 	}
 	if m.errText != "" {
 		lines = append(lines, "", m.errorStyle.Render(m.errText))
@@ -1402,6 +1535,28 @@ func (m model) listTop() int {
 
 func (m model) confirmListTop() int {
 	return 3
+}
+
+func (m model) addScopeOptionsY() int {
+	return m.addPanelTop() + 6
+}
+
+func (m model) addScopeXRange(scope core.AutostartScope) (int, int) {
+	left := m.addPanelLeft() + 3
+	switch scope {
+	case core.AutostartScopeMachine:
+		return left + 30, left + 53
+	default:
+		return left, left + 28
+	}
+}
+
+func (m model) addScopeHit(x, y int, scope core.AutostartScope) bool {
+	if y != m.addScopeOptionsY() {
+		return false
+	}
+	start, end := m.addScopeXRange(scope)
+	return x >= start && x < end
 }
 
 func (m model) addKindOptionsY() int {

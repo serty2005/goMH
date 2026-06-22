@@ -9,9 +9,10 @@ import (
 type Module struct{}
 
 type Config struct {
-	Changes []core.AutostartChange
-	Creates []core.AutostartCreateRequest
-	Edits   []core.AutostartEdit
+	Changes     []core.AutostartChange
+	Creates     []core.AutostartCreateRequest
+	TaskCreates []core.AutostartCreateRequest // создаются как задачи планировщика (ONLOGON + HighestAvailable)
+	Edits       []core.AutostartEdit
 }
 
 type autostartEditWinUtils interface {
@@ -33,7 +34,7 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 }
 
 func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
-	return runUI(services.WinUtils.ListAutostartEntriesWithProgress)
+	return runUI(services.WinUtils.ListAutostartEntriesWithProgress, services.WinUtils.RequiresAdminElevation)
 }
 
 func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
@@ -65,6 +66,11 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 			return core.ModuleActionResult{}, err
 		}
 	}
+	for _, create := range cfg.TaskCreates {
+		if err := services.WinUtils.AddScheduledAutostartTask(create.Name, create.Path, create.Arguments); err != nil {
+			return core.ModuleActionResult{}, fmt.Errorf("не удалось создать задачу планировщика %q: %w", create.Name, err)
+		}
+	}
 	for _, edit := range cfg.Edits {
 		if err := applyAutostartEdit(services.WinUtils, edit); err != nil {
 			return core.ModuleActionResult{}, err
@@ -73,7 +79,7 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 	if err := services.WinUtils.ApplyAutostartChanges(cfg.Changes); err != nil {
 		return core.ModuleActionResult{}, err
 	}
-	total := len(cfg.Creates) + len(cfg.Edits) + len(cfg.Changes)
+	total := len(cfg.Creates) + len(cfg.TaskCreates) + len(cfg.Edits) + len(cfg.Changes)
 	ctx.Success(fmt.Sprintf("Изменения автозапуска применены: %d", total))
 	return core.ModuleActionResult{Note: fmt.Sprintf("Изменения автозапуска применены: %d", total)}, nil
 }
