@@ -2,6 +2,7 @@ package winutils
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/csv"
 	"fmt"
 	"goMH/dependencies"
@@ -17,12 +18,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/mholt/archives"
 	"go.bug.st/serial/enumerator"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+	"golang.org/x/text/encoding/charmap"
 )
 
 // IsAdmin остается без изменений
@@ -87,15 +91,52 @@ func buildShellExecuteParameters(args []string) string {
 	return strings.Join(escaped, " ")
 }
 
+// decodeOEMOutput конвертирует байты из Windows OEM-кодировки (CP866 на русских системах) в UTF-8.
+// Если байты уже валидный UTF-8 — возвращает без изменений.
+func decodeOEMOutput(b []byte) string {
+	if utf8.Valid(b) {
+		return string(b)
+	}
+	proc := syscall.NewLazyDLL("kernel32.dll").NewProc("GetConsoleOutputCP")
+	r, _, _ := proc.Call()
+	switch uint32(r) {
+	case 866:
+		if decoded, err := charmap.CodePage866.NewDecoder().Bytes(b); err == nil {
+			return string(decoded)
+		}
+	case 1251:
+		if decoded, err := charmap.Windows1251.NewDecoder().Bytes(b); err == nil {
+			return string(decoded)
+		}
+	case 850:
+		if decoded, err := charmap.CodePage850.NewDecoder().Bytes(b); err == nil {
+			return string(decoded)
+		}
+	}
+	return strings.ToValidUTF8(string(b), "?")
+}
+
+// encodeUTF16LE кодирует строку в UTF-16 LE с BOM.
+func encodeUTF16LE(s string) []byte {
+	runes := utf16.Encode([]rune(s))
+	buf := make([]byte, 2+len(runes)*2)
+	buf[0] = 0xFF
+	buf[1] = 0xFE
+	for i, v := range runes {
+		binary.LittleEndian.PutUint16(buf[2+i*2:], v)
+	}
+	return buf
+}
+
 // RunCommand остается без изменений
 func RunCommand(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("ошибка выполнения '%s %v': %v, вывод: %s", name, args, err, string(output))
+		return "", fmt.Errorf("ошибка выполнения '%s %v': %v, вывод: %s", name, args, err, decodeOEMOutput(output))
 	}
-	return strings.TrimSpace(string(output)), nil
+	return strings.TrimSpace(decodeOEMOutput(output)), nil
 }
 
 func RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error) {
@@ -173,18 +214,16 @@ func (r *Runtime) CreateScheduledTask(taskName, executablePath, arguments, worki
 	if err != nil {
 		return fmt.Errorf("не удалось создать временный XML-файл: %w", err)
 	}
-	// Гарантируем удаление временного файла после завершения функции
 	defer os.Remove(tempFile.Name())
 
-	// 3. Записываем XML во временный файл
-	if _, err := tempFile.Write([]byte(xmlContent)); err != nil {
-		tempFile.Close() // Закрываем файл перед попыткой удаления
+	// 3. Записываем XML как UTF-16 LE с BOM — именно этот формат ожидает schtasks.
+	if _, err := tempFile.Write(encodeUTF16LE(xmlContent)); err != nil {
+		tempFile.Close()
 		return fmt.Errorf("не удалось записать XML во временный файл: %w", err)
 	}
-	tempFile.Close() // Важно закрыть файл перед тем, как его прочитает schtasks
+	tempFile.Close()
 
 	// 4. Используем schtasks для создания/обновления задачи из XML
-	// Флаг /F (Force) автоматически перезаписывает задачу, если она уже существует.
 	output, err := RunCommand("schtasks", "/Create", "/TN", taskName, "/XML", tempFile.Name(), "/F")
 	if err != nil {
 		return fmt.Errorf("не удалось создать задачу из XML: %w", err)
@@ -200,9 +239,9 @@ func generateTaskXML(taskName, executablePath, arguments, workingDir string) (st
 	if err != nil {
 		return "", fmt.Errorf("не удалось определить текущего пользователя: %w", err)
 	}
-	// SID пользователя в формате S-1-5-21... или "BUILTIN\Administrators"
-	// Для современных систем лучше использовать его имя.
-	userID := currentUser.Username
+	// Используем SID (S-1-5-21-...) — чистый ASCII, нет проблем с кириллическими именами
+	// пользователей и с декларацией кодировки XML.
+	userID := currentUser.Uid
 
 	absExecutablePath, err := filepath.Abs(executablePath)
 	if err != nil {
