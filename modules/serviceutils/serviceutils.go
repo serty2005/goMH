@@ -900,6 +900,7 @@ func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, w
 		}
 
 		if isRunning {
+			slog.Warn("Обнаружен запущенный iikoFront, требуется завершение перед OrderCheck")
 			ctx.Info("ВНИМАНИЕ: Обнаружен запущенный iikoFront.")
 			ctx.Info("Для работы с entities требуется завершение кассовой программы.")
 			ctx.Info("Попытка корректного завершения...")
@@ -947,6 +948,7 @@ func (m *Module) runOrderCheckFlow(ctx core.TaskContext, am core.AssetManager, w
 
 	err = wu.StartDetachedProcess(exePath, cfg.TargetDatabasePath)
 	if err == nil {
+		slog.Info("OrderCheck успешно запущен")
 		ctx.Success("OrderCheck запущен.")
 	} else {
 		slog.Error("Ошибка выполнения OrderCheck", "error", err)
@@ -967,6 +969,7 @@ func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, w
 		return fmt.Errorf("ассет %s не найден", assetName)
 	}
 
+	slog.Info("Скачивание ассета FrontTools", "asset", assetName)
 	ctx.Info("Скачивание FrontTools...")
 	finalPath, err := am.Get(assetName)
 	if err != nil {
@@ -989,6 +992,7 @@ func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, w
 		slog.Info("Запуск FrontTools (Admin)", "path", exePath, "working_dir", workingDir)
 		err := wu.StartDetachedProcessInDir(exePath, workingDir)
 		if err == nil {
+			slog.Info("FrontTools успешно запущен (Admin)")
 			ctx.Success("FrontTools запущен.")
 		}
 		return err
@@ -1001,6 +1005,7 @@ func (m *Module) runFrontToolsFlow(ctx core.TaskContext, am core.AssetManager, w
 		}
 		_, err := wu.RunCommand("schtasks", "/Run", "/TN", taskName)
 		if err == nil {
+			slog.Info("FrontTools успешно запущен через планировщик")
 			ctx.Success("FrontTools запущен.")
 		}
 		_ = wu.DeleteScheduledTaskByName(taskName)

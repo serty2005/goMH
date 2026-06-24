@@ -26,8 +26,8 @@ func Run(cfgModules []config.ModuleDef, registry *moduleregistry.Registry, am co
 			AssetManager: am,
 			WinUtils:     wu,
 		},
-		ConfigureContext: core.NewSilentTaskContext(nil),
-		ImmediateContext: &dashboardImmediateContext{base: core.NewSilentTaskContext(context.Background())},
+		ConfigureContext: core.NewSlogTaskContext(context.Background()),
+		ImmediateContext: &dashboardImmediateContext{base: core.NewSlogTaskContext(context.Background())},
 		ConfirmPrepared: func(module core.QueueModule, config any, plan core.ModuleTaskPlan) (bool, error) {
 			return tui.ConfirmTaskPlan(plan, config)
 		},
