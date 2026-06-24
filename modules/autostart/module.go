@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"goMH/core"
 	"goMH/tui"
+	"log/slog"
 )
 
 type Module struct{}
@@ -62,24 +63,36 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 		return core.ModuleActionResult{}, err
 	}
 	for _, create := range cfg.Creates {
+		slog.Debug("Автозапуск: добавление записи реестра", "name", create.Name, "path", create.Path, "scope", create.Scope, "key", create.RegistryKey)
 		if err := services.WinUtils.AddRegistryAutostartEntry(create); err != nil {
+			slog.Info("Автозапуск: не удалось добавить запись реестра", "name", create.Name, "path", create.Path, "error", err)
 			return core.ModuleActionResult{}, err
 		}
 	}
 	for _, create := range cfg.TaskCreates {
+		slog.Debug("Автозапуск: создание задачи планировщика", "name", create.Name, "path", create.Path, "args", create.Arguments)
 		if err := services.WinUtils.AddScheduledAutostartTask(create.Name, create.Path, create.Arguments); err != nil {
-			return core.ModuleActionResult{}, fmt.Errorf("не удалось создать задачу планировщика %q: %w", create.Name, err)
+			wrapped := fmt.Errorf("не удалось создать задачу планировщика %q: %w", create.Name, err)
+			slog.Info("Автозапуск: ошибка создания задачи планировщика", "name", create.Name, "path", create.Path, "error", err)
+			return core.ModuleActionResult{}, wrapped
 		}
 	}
 	for _, edit := range cfg.Edits {
+		slog.Debug("Автозапуск: редактирование записи", "original_name", edit.Original.Name, "new_name", edit.Name, "new_path", edit.Path, "new_args", edit.Arguments)
 		if err := applyAutostartEdit(services.WinUtils, edit); err != nil {
+			slog.Info("Автозапуск: не удалось применить редактирование", "original_name", edit.Original.Name, "error", err)
 			return core.ModuleActionResult{}, err
 		}
 	}
+	for _, change := range cfg.Changes {
+		slog.Debug("Автозапуск: изменение состояния записи", "name", change.Entry.Name, "source", change.Entry.Source, "enabled", change.Enabled)
+	}
 	if err := services.WinUtils.ApplyAutostartChanges(cfg.Changes); err != nil {
+		slog.Info("Автозапуск: не удалось применить изменения состояния", "count", len(cfg.Changes), "error", err)
 		return core.ModuleActionResult{}, err
 	}
 	total := len(cfg.Creates) + len(cfg.TaskCreates) + len(cfg.Edits) + len(cfg.Changes)
+	slog.Debug("Автозапуск: все изменения применены", "total", total)
 	ctx.Success(fmt.Sprintf("Изменения автозапуска применены: %d", total))
 	return core.ModuleActionResult{Note: fmt.Sprintf("Изменения автозапуска применены: %d", total)}, nil
 }
