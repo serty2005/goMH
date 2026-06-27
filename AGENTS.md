@@ -28,7 +28,7 @@ goMH - Windows-first мультитул для сотрудников техпо
 - `config/` - структуры `config.json`, загрузка локального/удаленного конфига, дефолты логирования.
 - `core/` - общие интерфейсы: `TaskContext`, `WinUtils`, `AssetManager`, `QueueModule`, `ModuleServices`.
 - `modules/registry` - реестр модулей. Новый пользовательский модуль должен быть добавлен в `NewDefault()`.
-- `modules/*` - доменные модули: дистрибутивы, FRPC, удаленный доступ, драйверы ФР, плагины iiko, обслуживание, UTM, VComCaster, Regime.
+- `modules/*` - доменные модули: дистрибутивы, FRPC, удаленный доступ, драйверы ФР, плагины iiko, обслуживание (`serviceutils`), сетевая диагностика (`networkdiag`), UTM, VComCaster. Regime отключён (не в `config.json`), код сохранён.
 - `assetmgr/` - загрузка и кеширование ресурсов из `asset_catalog`, HTTP/FTP, прогресс, отмена загрузок.
 - `taskqueue/` - очередь задач, статусы, прогресс, task-log, cancel/remove/clear.
 - `app/modruntime` - общий runtime для TUI/automation. Он превращает `QueueModule` в задачу очереди или immediate action и прокидывает task-aware `AssetManager`/`WinUtils`.
@@ -36,6 +36,8 @@ goMH - Windows-first мультитул для сотрудников техпо
 - `app/automation` - non-interactive JSON contract для внешних оркестраторов. Документация: `docs/automation-cli.md`.
 - `logging/` и `logstream/` - общий лог приложения и отдельный live-log просмотр.
 - `app/platform` и `winutils/` - реальные Windows-операции. В тестах и новых слоях предпочитай зависеть от `core.WinUtils`, а не от конкретной реализации.
+- `modules/networkdiag/` - сбор и запись сетевой диагностики. Orchestration шагов, определение адреса сервера из XML, запись лога — здесь. Системные вызовы (реестр, WinHTTP) — только через `WinUtils`.
+- `modules/serviceutils/` - хаб вспомогательных утилит. Новые сервисные действия (без своей сложной конфигурации) добавляются как `ActionType` внутрь serviceutils, а не создаются как отдельные модули верхнего уровня.
 
 ## Контракт модулей
 
@@ -54,6 +56,46 @@ goMH - Windows-first мультитул для сотрудников техпо
 - Делай `Signature` достаточно уникальным, чтобы очередь могла ловить дубликаты.
 - Для операций, которые нельзя ставить в очередь, используй `ModuleRunModeImmediate`; если нужен особый UI hook, реализуй `core.ImmediateModuleAction`.
 - Не вызывай `winutils` напрямую из модуля, если можно использовать `services.WinUtils`.
+
+## Границы кода по зонам
+
+Строгие правила о том, где живёт каждый тип логики:
+
+### winutils / core.WinUtils — единственное место для Windows-API
+
+Весь код, обращающийся к Windows-специфичным системным вызовам, находится **только** в `winutils/` и выставляется через интерфейс `core.WinUtils`. Запрещено напрямую из модулей:
+
+- читать/писать реестр (`golang.org/x/sys/windows/registry`)
+- обращаться к WinINET/WinHTTP через реестр
+- вызывать syscall/windows напрямую
+
+Если нужен новый вид системной информации (пример: состояние TLS, настройки прокси):
+1. Добавь метод в интерфейс `core.WinUtils` (`core/types.go`).
+2. Реализуй в `winutils/` (отдельный файл по теме: `tls.go`, `proxy.go`, …).
+3. Добавь делегирующий метод в `app/platform/winutils.go`.
+4. Из модуля вызывай только через `wu.МойМетод()`.
+
+### modules/networkdiag — оркестрация сетевой диагностики
+
+Пакет отвечает за:
+- определение адреса сервера из `config.xml` iiko/Syrve (XML-парсинг через etree)
+- формирование списка шагов диагностики и их последовательный запуск
+- накопление и запись итогового лог-файла
+
+Пакет **не** содержит обращений к реестру, WinAPI или системным вызовам — только `wu.RunCommand(...)`, `wu.CollectTLSInfo()`, `wu.CollectProxyInfo()` и т.п.
+
+### modules/serviceutils — хаб сервисных утилит
+
+Вспомогательные одноэкранные действия для техподдержки (без сложного собственного конфига и жизненного цикла) добавляются как новый `ActionType` внутрь `serviceutils`, а **не** как отдельный модуль верхнего уровня. Пример: `ActionNetworkDiag` живёт в serviceutils и делегирует в `networkdiag.Module`.
+
+Отдельный модуль верхнего уровня оправдан только когда у фичи:
+- своя сложная конфигурация (несколько экранов ввода),
+- или своя долгосрочная очередь,
+- или она должна быть доступна через automation CLI.
+
+### modules/* — только бизнес-логика домена
+
+Модули не зависят от пакета `winutils` напрямую. Все операции с системой — через `services.WinUtils` или `services.AssetManager`. Модуль не должен знать о реализации: это позволяет мокировать WinUtils в тестах.
 
 ## Automation CLI
 
@@ -138,7 +180,7 @@ go build -v -o goMH.exe .
 
 - `main.go` сейчас совмещает запуск, self-update, resume, cleanup, signals и выбор UI. Править точечно.
 - Self-update меняет исполняемый файл и оставляет `.old`; не трогай без отдельной проверки сценария перезапуска.
-- Resume для `distro` и `regime` завязан на задачи планировщика и cleanup temp.
+- Resume для `distro` завязан на задачи планировщика и cleanup temp. Regime отключён в `config.json` — resume-флаг для него в `main.go` пока остался, но не активен.
 - `assetmgr` управляет повторными загрузками, прогрессом и cancelability; изменения могут затронуть TUI/automation одновременно.
 - `config.json` может содержать реальные URL и учетные данные.
 
@@ -155,7 +197,7 @@ go build -v -o goMH.exe .
 Что стоит улучшать постепенно:
 
 - Разгрузить `main.go` на отдельные пакеты запуска/bootstrapping.
-- Увеличить покрытие модулей без тестов: FRPC, fiscal-drivers, Regime, registry, UTM, VComCaster, selfupdate.
+- Увеличить покрытие модулей без тестов: FRPC, fiscal-drivers, registry, UTM, VComCaster, networkdiag, selfupdate.
 - Нормализовать JSON naming в конфиге: часть полей использует snake_case, часть PascalCase.
 - Завести безопасные fixtures для config-driven сценариев, чтобы не использовать рабочий `config.json` в тестах.
 - Расширить automation operations для частых задач техподдержки, сохраняя стабильность `gomh.automation/v1`.
