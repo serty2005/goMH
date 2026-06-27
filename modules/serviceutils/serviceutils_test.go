@@ -74,14 +74,14 @@ func TestBuildTaskKeepsQueuedModeForCollectLogs(t *testing.T) {
 	}
 }
 
-func TestServiceUtilsMenuShowsAutostartLast(t *testing.T) {
+func TestServiceUtilsMenuShowsNetworkDiagLast(t *testing.T) {
 	items := serviceUtilsMenuItems()
 	if len(items) == 0 {
 		t.Fatal("expected service utils menu items")
 	}
 	last := items[len(items)-1]
-	if last.Title != (&autostart.Module{}).MenuText() {
-		t.Fatalf("last service utils item = %q, want %q", last.Title, (&autostart.Module{}).MenuText())
+	if last.Title != "Диагностика сети" {
+		t.Fatalf("last service utils item = %q, want %q", last.Title, "Диагностика сети")
 	}
 }
 

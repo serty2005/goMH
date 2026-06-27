@@ -29,6 +29,9 @@ type SelectionConfig struct {
 	Search           bool
 	DisableShortcuts bool
 	Multi            bool
+	PreSelected      []int  // initial selection indices for Multi mode
+	ToggleKey        string // alternative key to toggle selection besides Space
+	ConfirmKey       string // additional key to confirm/apply selection besides Enter
 	SelectedText     string
 	OverlayKey       string
 	OverlayLabel     string
@@ -91,6 +94,11 @@ func newSelectionModel(items []ChoiceItem, config SelectionConfig) *selectionMod
 		selected: map[int]bool{},
 		input:    input,
 	}
+	for _, idx := range config.PreSelected {
+		if idx >= 0 && idx < len(items) && !items[idx].Disabled {
+			model.selected[idx] = true
+		}
+	}
 	model.applyFilter()
 	return model
 }
@@ -131,6 +139,13 @@ func (m *selectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if handleLiveLogOverlayKey(msg, m.height) {
 			return m, nil
+		}
+		if m.config.Multi && m.config.ToggleKey != "" && msg.String() == m.config.ToggleKey {
+			m.toggleSelection(m.currentIndex())
+			return m, nil
+		}
+		if m.config.ConfirmKey != "" && msg.String() == m.config.ConfirmKey {
+			return m, m.confirmCurrentSelection()
 		}
 		switch msg.String() {
 		case "ctrl+c":
@@ -316,13 +331,21 @@ func (m *selectionModel) footerHelp() []string {
 		}
 		firstLine = append(firstLine, m.theme.Key.Render("Up/Down")+" выбор")
 		if m.config.Multi {
-			secondLine = append(secondLine, m.theme.Key.Render("Space")+" отметить")
+			toggleHint := m.theme.Key.Render("Space") + " отметить"
+			if m.config.ToggleKey != "" {
+				toggleHint += "  " + m.theme.Key.Render(strings.ToUpper(m.config.ToggleKey)) + " отметить"
+			}
+			secondLine = append(secondLine, toggleHint)
 		}
 		if m.config.Overlay != nil {
 			firstLine = append(firstLine, m.theme.Key.Render(strings.ToUpper(m.overlayKey()))+" "+m.overlayLabel())
 		}
+		confirmHint := m.theme.Key.Render("Enter") + " подтвердить"
+		if m.config.ConfirmKey != "" {
+			confirmHint += "  " + m.theme.Key.Render(strings.ToUpper(m.config.ConfirmKey)) + " сохранить"
+		}
 		secondLine = append(secondLine,
-			m.theme.Key.Render("Enter")+" подтвердить",
+			confirmHint,
 			m.theme.Key.Render("Мышь")+" навести/клик",
 			m.theme.Key.Render("Esc")+" назад",
 		)
@@ -344,13 +367,21 @@ func (m *selectionModel) footerHelp() []string {
 	}
 	firstLine = append(firstLine, m.theme.Key.Render("Up/Down")+" выбор")
 	if m.config.Multi {
-		secondLine = append(secondLine, m.theme.Key.Render("Space")+" отметить")
+		toggleHint := m.theme.Key.Render("Space") + " отметить"
+		if m.config.ToggleKey != "" {
+			toggleHint += "  " + m.theme.Key.Render(strings.ToUpper(m.config.ToggleKey)) + " отметить"
+		}
+		secondLine = append(secondLine, toggleHint)
 	}
 	if m.config.Overlay != nil {
 		firstLine = append(firstLine, m.theme.Key.Render(strings.ToUpper(m.overlayKey()))+" "+m.overlayLabel())
 	}
+	confirmHint2 := m.theme.Key.Render("Enter") + " подтвердить"
+	if m.config.ConfirmKey != "" {
+		confirmHint2 += "  " + m.theme.Key.Render(strings.ToUpper(m.config.ConfirmKey)) + " сохранить"
+	}
 	secondLine = append(secondLine,
-		m.theme.Key.Render("Enter")+" подтвердить",
+		confirmHint2,
 		m.theme.Key.Render("Мышь")+" навести/клик",
 		m.theme.Key.Render("Esc")+" назад",
 	)

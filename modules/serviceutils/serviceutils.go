@@ -70,7 +70,7 @@ type ServiceUtilsConfig struct {
 	// Параметры для управления автозапуском
 	AutostartConfig *autostart.Config
 	// Параметры для диагностики сети
-	NetworkDiagHost string
+	NetworkDiagConfig *networkdiag.Config
 }
 
 func (cfg *ServiceUtilsConfig) TaskConfirmation() core.TaskConfirmation {
@@ -100,8 +100,12 @@ func (cfg *ServiceUtilsConfig) TaskConfirmation() core.TaskConfirmation {
 	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools {
 		confirmLabel = "Запустить"
 	}
-	if cfg.Action == ActionNetworkDiag {
-		details = append(details, "Сервер: "+cfg.NetworkDiagHost)
+	if cfg.Action == ActionNetworkDiag && cfg.NetworkDiagConfig != nil {
+		tc := cfg.NetworkDiagConfig.TaskConfirmation()
+		details = append(details, tc.Details...)
+		if tc.ConfirmLabel != "" {
+			confirmLabel = tc.ConfirmLabel
+		}
 	}
 
 	return core.TaskConfirmation{
@@ -147,8 +151,14 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 		title = "Управление автозапуском"
 		signature = "serviceutils|autostart"
 	case ActionNetworkDiag:
-		title = "Диагностика сети: " + cfg.NetworkDiagHost
-		signature = "serviceutils|networkdiag|" + cfg.NetworkDiagHost
+		if cfg.NetworkDiagConfig != nil {
+			ndPlan, _ := (&networkdiag.Module{}).BuildTask(cfg.NetworkDiagConfig)
+			title = ndPlan.Task.Title
+			signature = "serviceutils|" + ndPlan.Task.Signature
+		} else {
+			title = "Диагностика сети"
+			signature = "serviceutils|networkdiag"
+		}
 	}
 
 	plan := core.ModuleTaskPlan{
@@ -158,7 +168,7 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 			Signature: signature,
 		},
 	}
-	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools || cfg.Action == ActionAutostart || cfg.Action == ActionNetworkDiag {
+	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools || cfg.Action == ActionAutostart {
 		plan.Mode = core.ModuleRunModeImmediate
 		switch cfg.Action {
 		case ActionViewLog:
@@ -171,9 +181,6 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 			plan.SkipConfirmation = true
 		case ActionAutostart:
 			plan.Result.Note = "Изменения автозапуска подготовлены."
-			plan.SkipConfirmation = true
-		case ActionNetworkDiag:
-			plan.Result.Note = "Диагностика сети запущена."
 			plan.SkipConfirmation = true
 		}
 	}
@@ -397,8 +404,8 @@ func (m *Module) configureNetworkDiag(ctx core.TaskContext) (*ServiceUtilsConfig
 		return nil, err
 	}
 	return &ServiceUtilsConfig{
-		Action:          ActionNetworkDiag,
-		NetworkDiagHost: cfg.Host,
+		Action:            ActionNetworkDiag,
+		NetworkDiagConfig: cfg,
 	}, nil
 }
 
@@ -420,7 +427,7 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 		return err
 	case ActionNetworkDiag:
 		nd := &networkdiag.Module{}
-		return nd.RunDiag(ctx, wu, &networkdiag.Config{Host: cfg.NetworkDiagHost})
+		return nd.Execute(ctx, wu, cfg.NetworkDiagConfig)
 	}
 	return nil
 }
