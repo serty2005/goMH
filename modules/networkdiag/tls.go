@@ -20,7 +20,7 @@ var tlsFixLabel = map[string]string{
 	"tls12":                "TLS 1.2 (Client + Server)",
 	"tls13_server_disable": "TLS 1.3 Server (отключить для совместимости с iiko)",
 	"winhttp":              "WinHTTP DefaultSecureProtocols = 0xA00 (TLS 1.1 + 1.2)",
-	"dotnet":               ".NET SystemDefaultTlsVersions v4.x",
+	"dotnet":               ".NET v4.x: SystemDefaultTlsVersions + SchUseStrongCrypto",
 }
 
 // regWrite описывает одну запись реестра, которую нужно установить.
@@ -50,10 +50,12 @@ var tlsFixes = map[string][]regWrite{
 		{`SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\WinHttp`, "DefaultSecureProtocols", 0x00000A00},
 		{`SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Internet Settings\WinHttp`, "DefaultSecureProtocols", 0x00000A00},
 	},
-	// .NET v4.x: SystemDefaultTlsVersions=1 — позволяет .NET использовать TLS-версию по умолчанию ОС
+	// .NET v4.x: SystemDefaultTlsVersions + SchUseStrongCrypto
 	"dotnet": {
 		{`SOFTWARE\Microsoft\.NETFramework\v4.0.30319`, "SystemDefaultTlsVersions", 1},
+		{`SOFTWARE\Microsoft\.NETFramework\v4.0.30319`, "SchUseStrongCrypto", 1},
 		{`SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319`, "SystemDefaultTlsVersions", 1},
+		{`SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319`, "SchUseStrongCrypto", 1},
 	},
 }
 
@@ -155,8 +157,7 @@ func checkWinHTTP() TLSItem {
 	}
 }
 
-// checkDotNet проверяет SystemDefaultTlsVersions для .NET 4.x.
-// Позволяет .NET-приложениям использовать TLS-версию по умолчанию ОС.
+// checkDotNet проверяет SystemDefaultTlsVersions и SchUseStrongCrypto для .NET 4.x.
 func checkDotNet() TLSItem {
 	entries := []struct{ label, path string }{
 		{"v4 x64", `SOFTWARE\Microsoft\.NETFramework\v4.0.30319`},
@@ -166,20 +167,29 @@ func checkDotNet() TLSItem {
 	var parts []string
 	needsChange := false
 	for _, e := range entries {
-		val, ok := tlsReadDword(e.path, "SystemDefaultTlsVersions")
-		if !ok {
-			parts = append(parts, fmt.Sprintf("%s: —", e.label))
-			needsChange = true
-		} else if val == 1 {
-			parts = append(parts, fmt.Sprintf("%s: 1 [OK]", e.label))
-		} else {
-			parts = append(parts, fmt.Sprintf("%s: %d  →  1", e.label, val))
+		sysTLS, hasSysTLS := tlsReadDword(e.path, "SystemDefaultTlsVersions")
+		strong, hasStrong := tlsReadDword(e.path, "SchUseStrongCrypto")
+
+		sysTLSOK := hasSysTLS && sysTLS == 1
+		strongOK := hasStrong && strong == 1
+		if !sysTLSOK || !strongOK {
 			needsChange = true
 		}
+
+		sysTLSStr := dwordStr(sysTLS, hasSysTLS)
+		strongStr := dwordStr(strong, hasStrong)
+
+		part := fmt.Sprintf("%s: SysTLS=%-3s  Strong=%-3s", e.label, sysTLSStr, strongStr)
+		if sysTLSOK && strongOK {
+			part += " [OK]"
+		} else {
+			part += " → 1 / 1"
+		}
+		parts = append(parts, part)
 	}
 	return TLSItem{
 		Key:         "dotnet",
-		Label:       ".NET SystemDefaultTlsVersions (v4.x)",
+		Label:       ".NET v4.x (SystemDefaultTlsVersions + SchUseStrongCrypto)",
 		StatusText:  strings.Join(parts, "   "),
 		NeedsChange: needsChange,
 	}
