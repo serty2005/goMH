@@ -287,6 +287,54 @@ func (m *selectionModel) View() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panelStyle.Width(panelWidth).Render(strings.Join(lines, "\n")))
 }
 
+// overheadLines returns the number of non-item lines in the selection panel.
+func (m *selectionModel) overheadLines() int {
+	n := 1 // title
+	if m.config.Subtitle != "" {
+		n += strings.Count(m.config.Subtitle, "\n") + 1
+	}
+	if m.config.Search {
+		n += 2 // blank + input field
+	}
+	n++ // blank before items
+	helpLines := m.footerHelp()
+	if len(helpLines) > 0 {
+		n += 1 + len(helpLines)
+	}
+	_, fh := m.theme.PanelFocus.GetFrameSize()
+	n += fh
+	return n
+}
+
+// adaptiveItemCount returns how many list items fit in the current terminal window.
+func (m *selectionModel) adaptiveItemCount() int {
+	const minCount = 3
+	if m.height <= 0 {
+		return 10
+	}
+	available := m.height - m.overheadLines()
+	if available < minCount {
+		return minCount
+	}
+	count := 0
+	used := 0
+	for _, originalIndex := range m.filtered {
+		cost := 1
+		if m.items[originalIndex].Description != "" {
+			cost = 2
+		}
+		if used+cost > available {
+			break
+		}
+		used += cost
+		count++
+	}
+	if count < minCount {
+		return minCount
+	}
+	return count
+}
+
 func (m *selectionModel) renderItems(width int) []string {
 	if len(m.filtered) == 0 {
 		emptyText := m.config.EmptyText
@@ -296,7 +344,7 @@ func (m *selectionModel) renderItems(width int) []string {
 		return []string{m.theme.ItemMuted.Render(emptyText)}
 	}
 
-	start, end := visibleRange(m.cursor, len(m.filtered), 10)
+	start, end := visibleRange(m.cursor, len(m.filtered), m.adaptiveItemCount())
 	lines := make([]string, 0, (end-start)*2)
 	for pos := start; pos < end; pos++ {
 		originalIndex := m.filtered[pos]
@@ -472,7 +520,7 @@ func (m *selectionModel) handleShortcutKey(key string) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	start, end := visibleRange(m.cursor, len(m.filtered), 10)
+	start, end := visibleRange(m.cursor, len(m.filtered), m.adaptiveItemCount())
 	target := start + offset
 	if target < start || target >= end {
 		return nil
@@ -547,7 +595,7 @@ func (m *selectionModel) tryOpenOverlay(key string) bool {
 }
 
 func (m *selectionModel) visibleItems() []selectionVisibleItem {
-	start, end := visibleRange(m.cursor, len(m.filtered), 10)
+	start, end := visibleRange(m.cursor, len(m.filtered), m.adaptiveItemCount())
 	items := make([]selectionVisibleItem, 0, end-start)
 	lineStart := 0
 	for pos := start; pos < end; pos++ {
