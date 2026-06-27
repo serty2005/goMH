@@ -497,7 +497,7 @@ func netJoinHostPort(host string, port int) string {
 	return fmt.Sprintf("%s:%d", host, port)
 }
 
-func downloadPluginAsset(am core.AssetManager, parsedURL *url.URL, rawURL, dir string) (string, bool, error) {
+func downloadPluginAsset(am core.AssetManager, parsedURL *url.URL, _, dir string) (string, bool, error) {
 	switch strings.ToLower(parsedURL.Scheme) {
 	case ftpDirectoryScheme:
 		filename := path.Base(parsedURL.Path) + ".zip"

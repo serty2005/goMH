@@ -148,6 +148,8 @@ type WinUtils interface {
 	GetDesktopDir() (string, error)
 	CreateShortcut(targetPath, shortcutPath, arguments string) error
 	Reboot() error
+	CollectTLSInfo() string
+	CollectProxyInfo() string
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.

@@ -11,6 +11,7 @@ import (
 	"goMH/core"
 	"goMH/logstream"
 	"goMH/modules/autostart"
+	"goMH/modules/networkdiag"
 	"goMH/tui"
 	"io"
 	"io/fs"
@@ -44,6 +45,7 @@ const (
 	ActionOrderCheck
 	ActionFrontTools
 	ActionAutostart
+	ActionNetworkDiag
 )
 
 const cleanLogRetentionDays = 30
@@ -67,6 +69,8 @@ type ServiceUtilsConfig struct {
 	DatabaseType       string // "db" or "sdf"
 	// Параметры для управления автозапуском
 	AutostartConfig *autostart.Config
+	// Параметры для диагностики сети
+	NetworkDiagHost string
 }
 
 func (cfg *ServiceUtilsConfig) TaskConfirmation() core.TaskConfirmation {
@@ -95,6 +99,9 @@ func (cfg *ServiceUtilsConfig) TaskConfirmation() core.TaskConfirmation {
 	confirmLabel := "Добавить в очередь"
 	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools {
 		confirmLabel = "Запустить"
+	}
+	if cfg.Action == ActionNetworkDiag {
+		details = append(details, "Сервер: "+cfg.NetworkDiagHost)
 	}
 
 	return core.TaskConfirmation{
@@ -139,6 +146,9 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 	case ActionAutostart:
 		title = "Управление автозапуском"
 		signature = "serviceutils|autostart"
+	case ActionNetworkDiag:
+		title = "Диагностика сети: " + cfg.NetworkDiagHost
+		signature = "serviceutils|networkdiag|" + cfg.NetworkDiagHost
 	}
 
 	plan := core.ModuleTaskPlan{
@@ -148,7 +158,7 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 			Signature: signature,
 		},
 	}
-	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools || cfg.Action == ActionAutostart {
+	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools || cfg.Action == ActionAutostart || cfg.Action == ActionNetworkDiag {
 		plan.Mode = core.ModuleRunModeImmediate
 		switch cfg.Action {
 		case ActionViewLog:
@@ -161,6 +171,9 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 			plan.SkipConfirmation = true
 		case ActionAutostart:
 			plan.Result.Note = "Изменения автозапуска подготовлены."
+			plan.SkipConfirmation = true
+		case ActionNetworkDiag:
+			plan.Result.Note = "Диагностика сети запущена."
 			plan.SkipConfirmation = true
 		}
 	}
@@ -369,9 +382,24 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 	case 5:
 		return m.configureAutostart(ctx, am, wu)
 
+	case 6:
+		return m.configureNetworkDiag(ctx)
+
 	default:
 		return nil, nil
 	}
+}
+
+func (m *Module) configureNetworkDiag(ctx core.TaskContext) (*ServiceUtilsConfig, error) {
+	nd := &networkdiag.Module{}
+	cfg, err := nd.Configure(ctx)
+	if err != nil || cfg == nil {
+		return nil, err
+	}
+	return &ServiceUtilsConfig{
+		Action:          ActionNetworkDiag,
+		NetworkDiagHost: cfg.Host,
+	}, nil
 }
 
 // Execute - Выполнение логики (Worker слой)
@@ -390,6 +418,9 @@ func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.Win
 	case ActionAutostart:
 		_, err := (&autostart.Module{}).ExecuteImmediate(ctx, core.ModuleServices{AssetManager: am, WinUtils: wu}, cfg.AutostartConfig)
 		return err
+	case ActionNetworkDiag:
+		nd := &networkdiag.Module{}
+		return nd.RunDiag(ctx, wu, &networkdiag.Config{Host: cfg.NetworkDiagHost})
 	}
 	return nil
 }
@@ -408,6 +439,8 @@ func (cfg *ServiceUtilsConfig) actionLabel() string {
 		return "FrontTools"
 	case ActionAutostart:
 		return "Управление автозапуском"
+	case ActionNetworkDiag:
+		return "Диагностика сети"
 	default:
 		return "Неизвестно"
 	}
@@ -421,6 +454,7 @@ func serviceUtilsMenuItems() []tui.ChoiceItem {
 		{Title: "OrderCheck"},
 		{Title: "FrontTools"},
 		{Title: (&autostart.Module{}).MenuText()},
+		{Title: "Диагностика сети", Description: "Сбор сетевой информации для передачи в поддержку"},
 	}
 }
 

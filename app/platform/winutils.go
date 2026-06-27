@@ -218,3 +218,11 @@ func (rw *RealWinUtils) CreateShortcut(targetPath, shortcutPath, arguments strin
 func (rw *RealWinUtils) Reboot() error {
 	return winutils.Reboot()
 }
+
+func (rw *RealWinUtils) CollectTLSInfo() string {
+	return rw.withRuntime().CollectTLSInfo()
+}
+
+func (rw *RealWinUtils) CollectProxyInfo() string {
+	return rw.withRuntime().CollectProxyInfo()
+}
