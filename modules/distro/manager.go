@@ -363,9 +363,11 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 		return err
 	}
 
+	runAfter := effectiveIikoFrontRunAfter(cfg)
+
 	// 4. Патчинг (если выбран)
 	if cfg.Patch != nil {
-		installDir := filepath.Dir(cfg.Component.RunAfter)
+		installDir := filepath.Dir(runAfter)
 		// Если RunAfter пуст (например, iikoCard), патчинг невозможен
 		if installDir == "." || installDir == "" {
 			ctx.Warn("Не удалось определить папку установки для патчинга.")
@@ -390,9 +392,9 @@ func (m *Module) executeInstallComponent(ctx core.TaskContext, am core.AssetMana
 		}
 	}
 
-	if cfg.Component.RunAfter != "" {
-		ctx.Info(fmt.Sprintf("Запуск приложения: %s", cfg.Component.RunAfter))
-		if err := startConfiguredExecutable(wu, cfg.Component.RunAfter); err != nil {
+	if runAfter != "" {
+		ctx.Info(fmt.Sprintf("Запуск приложения: %s", runAfter))
+		if err := startConfiguredExecutable(wu, runAfter); err != nil {
 			return err
 		}
 		ctx.Success("Приложение запущено.")
@@ -458,7 +460,7 @@ func (m *Module) executeInstallPortable(ctx core.TaskContext, am core.AssetManag
 	exeName := filepath.Base(cfg.Component.RunAfter)
 	if exeName == "." || exeName == "" {
 		if strings.Contains(strings.ToLower(cfg.Component.ID), "front") {
-			exeName = "iikoFront.Net.exe"
+			exeName = iikoplugins.IikoFrontExecutableNameForVersion(cfg.Version)
 		} else {
 			exeName = "BackOffice.exe"
 		}
@@ -471,7 +473,7 @@ func (m *Module) executeInstallPortable(ctx core.TaskContext, am core.AssetManag
 			if found, err := iikoplugins.FindIikoFrontExecutableInDir(destDir); err == nil {
 				targetExePath = found
 			} else {
-				ctx.Warn(fmt.Sprintf("Файл *iikoFront*.exe не найден, ярлык может не работать: %v", err))
+				ctx.Warn(fmt.Sprintf("Исполняемый файл iikoFront не найден, ярлык может не работать: %v", err))
 			}
 		} else if found, err := wu.FindFileRecursive(destDir, exeName); err == nil {
 			targetExePath = found
@@ -520,6 +522,30 @@ func (m *Module) executeManualPatch(ctx core.TaskContext, am core.AssetManager, 
 	}
 	ctx.Success("Патч успешно установлен.")
 	return nil
+}
+
+func effectiveIikoFrontRunAfter(cfg *DistroInstallConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	runAfter := strings.TrimSpace(cfg.Component.RunAfter)
+	if runAfter == "" || !isIikoFrontComponent(cfg) {
+		return runAfter
+	}
+
+	dir := filepath.Dir(runAfter)
+	if dir == "." || dir == "" {
+		return iikoplugins.IikoFrontExecutableNameForVersion(cfg.Version)
+	}
+	return iikoplugins.IikoFrontExecutablePathForVersion(dir, cfg.Version)
+}
+
+func isIikoFrontComponent(cfg *DistroInstallConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	return strings.EqualFold(cfg.Brand, "iiko") &&
+		strings.Contains(strings.ToLower(cfg.Component.ID), "front")
 }
 
 // uninstallVersion удаляет старую версию перед установкой новой

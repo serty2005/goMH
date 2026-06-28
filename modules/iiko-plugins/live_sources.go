@@ -28,6 +28,12 @@ const livePluginsCacheSource = "cache"
 
 const defaultIikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
 
+const legacyIikoFrontExecutableName = "iikoFront.Net.exe"
+
+const modernIikoFrontExecutableName = "Resto.Front.Main.exe"
+
+const modernIikoFrontExecutableMinVersion = "9.5.0.0"
+
 const ftpPluginFileIdleTimeout = 2 * time.Minute
 
 type livePluginsCache struct {
@@ -107,6 +113,17 @@ func FindIikoFrontExecutable() (string, error) {
 	return FindIikoFrontExecutableInDir(defaultIikoFrontDir)
 }
 
+func IikoFrontExecutableNameForVersion(version string) string {
+	if compareSemanticVersions(version, modernIikoFrontExecutableMinVersion) >= 0 {
+		return modernIikoFrontExecutableName
+	}
+	return legacyIikoFrontExecutableName
+}
+
+func IikoFrontExecutablePathForVersion(root, version string) string {
+	return filepath.Join(root, IikoFrontExecutableNameForVersion(version))
+}
+
 func FindIikoFrontExecutableInDir(root string) (string, error) {
 	var candidates []string
 	err := filepath.WalkDir(root, func(current string, entry os.DirEntry, err error) error {
@@ -143,7 +160,8 @@ func isIikoFrontExecutableName(name string) bool {
 	if !strings.EqualFold(filepath.Ext(name), ".exe") {
 		return false
 	}
-	return strings.Contains(strings.ToLower(name), "iikofront")
+	return strings.Contains(strings.ToLower(name), "iikofront") ||
+		strings.EqualFold(name, modernIikoFrontExecutableName)
 }
 
 func executablePathDepth(root, candidate string) int {

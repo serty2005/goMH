@@ -2,6 +2,7 @@ package distro
 
 import (
 	"errors"
+	"goMH/config"
 	"testing"
 )
 
@@ -26,6 +27,57 @@ func TestStartConfiguredExecutableReturnsStarterError(t *testing.T) {
 	err := startConfiguredExecutable(starter, `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestEffectiveIikoFrontRunAfterUsesLegacyExecutableBefore95(t *testing.T) {
+	cfg := &DistroInstallConfig{
+		Brand:   "iiko",
+		Version: "9.4.8049.0",
+		Component: config.DistroComponent{
+			ID:       "iiko_front",
+			RunAfter: `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`,
+		},
+	}
+
+	got := effectiveIikoFrontRunAfter(cfg)
+	want := `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`
+	if got != want {
+		t.Fatalf("effectiveIikoFrontRunAfter() = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveIikoFrontRunAfterUsesModernExecutableFrom95(t *testing.T) {
+	cfg := &DistroInstallConfig{
+		Brand:   "iiko",
+		Version: "9.5.0.0",
+		Component: config.DistroComponent{
+			ID:       "iiko_front",
+			RunAfter: `C:\Program Files\iiko\iikoRMS\Front.Net\iikoFront.Net.exe`,
+		},
+	}
+
+	got := effectiveIikoFrontRunAfter(cfg)
+	want := `C:\Program Files\iiko\iikoRMS\Front.Net\Resto.Front.Main.exe`
+	if got != want {
+		t.Fatalf("effectiveIikoFrontRunAfter() = %q, want %q", got, want)
+	}
+}
+
+func TestEffectiveIikoFrontRunAfterLeavesNonIikoFrontPath(t *testing.T) {
+	cfg := &DistroInstallConfig{
+		Brand:   "syrve",
+		Version: "9.5.0.0",
+		Component: config.DistroComponent{
+			ID:       "syrve_front",
+			RunAfter: `C:\Program Files\Syrve\Front.Net\iikoFront.Net.exe`,
+		},
+	}
+
+	got := effectiveIikoFrontRunAfter(cfg)
+	want := cfg.Component.RunAfter
+	if got != want {
+		t.Fatalf("effectiveIikoFrontRunAfter() = %q, want %q", got, want)
 	}
 }
 

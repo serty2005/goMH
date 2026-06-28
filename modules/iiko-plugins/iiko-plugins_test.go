@@ -269,6 +269,7 @@ func TestIsIikoFrontExecutableName(t *testing.T) {
 		{name: "iikoFront.Net.exe", want: true},
 		{name: "iikoFront.exe", want: true},
 		{name: "New.iikoFront.Launcher.EXE", want: true},
+		{name: "Resto.Front.Main.exe", want: true},
 		{name: "BackOffice.exe", want: false},
 		{name: "iikoFront.exe.config", want: false},
 	}
@@ -277,6 +278,27 @@ func TestIsIikoFrontExecutableName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isIikoFrontExecutableName(tt.name); got != tt.want {
 				t.Fatalf("isIikoFrontExecutableName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIikoFrontExecutableNameForVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		version string
+		want    string
+	}{
+		{version: "9.4.8049.0", want: "iikoFront.Net.exe"},
+		{version: "9.5.0.0", want: "Resto.Front.Main.exe"},
+		{version: "9.5.1234.0", want: "Resto.Front.Main.exe"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			if got := IikoFrontExecutableNameForVersion(tt.version); got != tt.want {
+				t.Fatalf("IikoFrontExecutableNameForVersion(%q) = %q, want %q", tt.version, got, tt.want)
 			}
 		})
 	}
@@ -308,6 +330,24 @@ func TestFindIikoFrontExecutableInDirFindsShallowExe(t *testing.T) {
 	}
 	if got != shallowExe {
 		t.Fatalf("FindIikoFrontExecutableInDir() = %q, want %q", got, shallowExe)
+	}
+}
+
+func TestFindIikoFrontExecutableInDirFindsModernExe(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	modernExe := filepath.Join(root, "Resto.Front.Main.exe")
+	if err := os.WriteFile(modernExe, []byte("exe"), 0o644); err != nil {
+		t.Fatalf("write modern exe: %v", err)
+	}
+
+	got, err := FindIikoFrontExecutableInDir(root)
+	if err != nil {
+		t.Fatalf("FindIikoFrontExecutableInDir() error = %v", err)
+	}
+	if got != modernExe {
+		t.Fatalf("FindIikoFrontExecutableInDir() = %q, want %q", got, modernExe)
 	}
 }
 
