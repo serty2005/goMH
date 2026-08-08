@@ -380,11 +380,6 @@ func execute() error {
 	}
 
 	// --- КОНСОЛЬНЫЙ РЕЖИМ ---
-	// Устанавливаем комфортный размер окна (поуже и повыше стандартного)
-	if err := winutils.SetConsoleSize(120, 20); err != nil {
-		slog.Warn("Не удалось изменить размер консоли", "error", err)
-	}
-
 	registry := moduleregistry.NewDefault()
 	if err := consolequeue.Run(cfg.Modules, registry, assetManager, RealWinUtils); err != nil {
 		slog.Error("Ошибка консольного интерфейса", "error", err)

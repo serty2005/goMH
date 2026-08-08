@@ -1061,17 +1061,3 @@ func (r *Runtime) CreateShortcut(targetPath, shortcutPath, arguments string) err
 
 	return nil
 }
-
-// SetConsoleSize задает размер окна консоли (колонки и строки).
-func SetConsoleSize(cols, lines int) error {
-	return NewRuntime().SetConsoleSize(cols, lines)
-}
-
-func (r *Runtime) SetConsoleSize(cols, lines int) error {
-	// Формируем команду "mode con cols=XX lines=YY"
-	cmd := exec.Command("mode", "con", fmt.Sprintf("cols=%d", cols), fmt.Sprintf("lines=%d", lines))
-	// Направляем вывод в текущую консоль, чтобы команда применилась к ней
-	cmd.Stdout = r.stdoutWriter()
-	cmd.Stderr = r.stderrWriter()
-	return cmd.Run()
-}

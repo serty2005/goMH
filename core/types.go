@@ -80,7 +80,7 @@ type IPv4RouteInfo struct {
 	Metric         uint32
 }
 
-// TaskContext определяет методы для взаимодействия логики с интерфейсом (CLI или GUI).
+// TaskContext определяет методы для взаимодействия логики с TUI или automation CLI.
 type TaskContext interface {
 	Context() context.Context
 	Info(msg string)

@@ -126,7 +126,6 @@ func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	// 1. Конфигурация (меню с обновляемыми статусами)
 	// В консольной версии мы хотим возвращаться в меню после установки,
 	// поэтому цикл for оставим здесь, в Run.
-	// В GUI это будет просто вызов диалога один раз.
 	for {
 		cfg, err := m.Configure(ctx, am, wu)
 		if err != nil {

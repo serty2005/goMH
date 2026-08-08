@@ -17,7 +17,7 @@ goMH - Windows-first мультитул для сотрудников техпо
 - Automation smoke-команды:
   - `go run . automation list-operations`
   - `go run . automation run --config .\config.json --request .\request.json`
-- Интерактивный TUI/GUI требует Windows и прав администратора; в обычной агентской сессии не запускай установочные действия без явного запроса.
+- Интерактивный TUI требует Windows и прав администратора; в обычной агентской сессии не запускай установочные действия без явного запроса.
 
 ## Текущая архитектура
 
@@ -105,7 +105,7 @@ Automation предназначен для saga/adapters и других вне�
 - `stderr` - диагностические/status JSON-lines.
 - Контракт версии: `gomh.automation/v1`.
 - Зарегистрированные операции находятся в `app/automation/registry.go`.
-- Runner использует тот же `modules/registry`, `modruntime.Service` и `taskqueue`, что TUI/GUI.
+- Runner использует тот же `modules/registry`, `modruntime.Service` и `taskqueue`, что TUI.
 
 При добавлении automation-операции:
 
@@ -188,7 +188,7 @@ go build -v -o goMH.exe .
 
 Что уже хорошо:
 
-- Есть единый runtime для TUI/GUI/automation.
+- Есть единый runtime для TUI/automation.
 - `core` содержит интерфейсы, удобные для тестов и fake-реализаций.
 - Automation contract документирован и покрыт тестами.
 - Очередь задач и task-log выделены отдельно.

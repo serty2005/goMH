@@ -7,7 +7,7 @@
 Цели режима:
 
 - принимать стабильный JSON request;
-- запускать существующие операции goMH без TUI/GUI;
+- запускать существующие операции goMH без интерактивного TUI;
 - возвращать структурированный JSON result в `stdout`;
 - писать только диагностические/status-сообщения в `stderr`;
 - использовать текущий `app/modruntime` и `taskqueue`, а не отдельный runtime.
@@ -46,7 +46,7 @@ goMH.exe automation list-operations
 
 - `stdout`: только один финальный JSON response.
 - `stderr`: только диагностические/status-сообщения.
-- В automation mode не используются интерактивные prompt, `WaitForAnyKey`, GUI/TUI overlays и human-only текст в `stdout`.
+- В automation mode не используются интерактивные prompt, `WaitForAnyKey`, TUI overlays и human-only текст в `stdout`.
 
 Статус в `stderr` пишется JSON-line событиями вида:
 
