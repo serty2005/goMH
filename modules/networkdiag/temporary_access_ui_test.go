@@ -10,13 +10,20 @@ import (
 
 func TestTemporarySessionMenuContainsOnlyHTTPBrowserAction(t *testing.T) {
 	items := temporarySessionMenuItems()
-	if len(items) != 4 || items[0].Title != "Открыть HTTP" {
+	if len(items) != 5 || items[0].Title != "Открыть HTTP" {
 		t.Fatalf("unexpected session menu: %#v", items)
 	}
 	for _, item := range items {
 		if strings.Contains(strings.ToUpper(item.Title), "HTTPS") {
 			t.Fatalf("HTTPS action must not be shown: %q", item.Title)
 		}
+	}
+}
+
+func TestTemporarySessionMenuCanLeaveAddressInBackground(t *testing.T) {
+	items := temporarySessionMenuItems()
+	if !strings.Contains(items[4].Title, "фоне") {
+		t.Fatalf("background action is missing: %#v", items)
 	}
 }
 

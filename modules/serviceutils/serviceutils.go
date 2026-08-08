@@ -477,7 +477,7 @@ func serviceUtilsMenuItems() []tui.ChoiceItem {
 		{Title: "OrderCheck"},
 		{Title: "FrontTools"},
 		{Title: (&autostart.Module{}).MenuText()},
-		{Title: "Диагностика сети", Description: "Сбор сетевой информации для передачи в поддержку"},
+		{Title: "Диагностика сети"},
 	}
 }
 

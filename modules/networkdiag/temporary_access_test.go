@@ -110,6 +110,10 @@ func (fake *temporarySystemFake) OpenURL(_ string) error { return nil }
 func testTemporaryConfig(t *testing.T) TemporaryAccessConfig {
 	t.Helper()
 	address := netip.MustParseAddr("192.168.10.57")
+	stateDir := filepath.Join(t.TempDir(), transactionDirName)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	return TemporaryAccessConfig{
 		Interface: core.NetworkInterfaceInfo{
 			LUID:        42,
@@ -126,7 +130,7 @@ func testTemporaryConfig(t *testing.T) TemporaryAccessConfig {
 		TargetIP:        netip.MustParseAddr("192.168.0.100"),
 		PreferredIP:     netip.MustParseAddr("192.168.0.101"),
 		TTL:             time.Minute,
-		StateDir:        t.TempDir(),
+		StateDir:        stateDir,
 		ExecutablePath:  `C:\MH\goMH.exe`,
 		DADTimeout:      20 * time.Millisecond,
 		DADPollInterval: time.Millisecond,
@@ -159,6 +163,9 @@ func TestStartTemporaryAccessHappyPathAndIdempotentCleanup(t *testing.T) {
 	if fake.watchdogExists || len(fake.deleted) != 1 {
 		t.Fatalf("cleanup result: watchdog=%v deletes=%d", fake.watchdogExists, len(fake.deleted))
 	}
+	if _, err := os.Stat(cfg.StateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("transaction directory still exists after cleanup: %v", err)
+	}
 }
 
 func TestStartTemporaryAccessRetriesAfterDADDuplicate(t *testing.T) {
@@ -184,6 +191,9 @@ func TestStartTemporaryAccessDoesNotMutateWhenWatchdogFails(t *testing.T) {
 	if err == nil || len(fake.created) != 0 {
 		t.Fatalf("err=%v created=%d", err, len(fake.created))
 	}
+	if _, statErr := os.Stat(cfg.StateDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("transaction directory remains after watchdog failure: %v", statErr)
+	}
 }
 
 func TestStartTemporaryAccessDisarmsWatchdogOnCreateError(t *testing.T) {
@@ -195,6 +205,9 @@ func TestStartTemporaryAccessDisarmsWatchdogOnCreateError(t *testing.T) {
 	}
 	if fake.watchdogExists || len(fake.created) != 1 || len(fake.deleted) != 0 {
 		t.Fatalf("watchdog=%v creates=%d deletes=%d", fake.watchdogExists, len(fake.created), len(fake.deleted))
+	}
+	if _, statErr := os.Stat(cfg.StateDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("transaction directory remains after create failure: %v", statErr)
 	}
 }
 
@@ -301,5 +314,73 @@ func TestCleanupRefusesAddressWithoutSavedOwnershipTimestamp(t *testing.T) {
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatal("address without saved ownership was deleted")
+	}
+}
+
+func TestCleanupKeepsDirectoryWhileAnotherTransactionExists(t *testing.T) {
+	cfg := testTemporaryConfig(t)
+	fake := &temporarySystemFake{
+		interfaces:   []core.NetworkInterfaceInfo{cfg.Interface},
+		dadSequences: map[netip.Addr][]core.IPAddressDADState{cfg.PreferredIP: {core.IPAddressDADPreferred}},
+	}
+	session, err := StartTemporaryAccess(core.NewSilentTaskContext(t.Context()), fake, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(cfg.StateDir, "keep.json")
+	if err := os.WriteFile(marker, []byte("diagnostic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupTemporaryAccess(core.NewSilentTaskContext(t.Context()), fake, session.TransactionPath, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("unrelated file was removed: %v", err)
+	}
+	if _, err := os.Stat(session.TransactionPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed transaction was not removed: %v", err)
+	}
+}
+
+func TestListAndResumeActiveTemporaryTransaction(t *testing.T) {
+	cfg := testTemporaryConfig(t)
+	fake := &temporarySystemFake{
+		interfaces:   []core.NetworkInterfaceInfo{cfg.Interface},
+		dadSequences: map[netip.Addr][]core.IPAddressDADState{cfg.PreferredIP: {core.IPAddressDADPreferred}},
+	}
+	session, err := StartTemporaryAccess(core.NewSilentTaskContext(t.Context()), fake, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := listActiveTemporaryTransactions(cfg.StateDir, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].path != session.TransactionPath {
+		t.Fatalf("unexpected active transactions: %#v", active)
+	}
+	resumed, err := ResumeTemporaryAccess(t.Context(), fake, session.TransactionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Transaction.ID != session.Transaction.ID || resumed.Transaction.TemporaryIP != cfg.PreferredIP {
+		t.Fatalf("unexpected resumed session: %#v", resumed)
+	}
+}
+
+func TestResumeRejectsEntryWithDifferentCreationTimestamp(t *testing.T) {
+	cfg := testTemporaryConfig(t)
+	fake := &temporarySystemFake{
+		dadSequences: map[netip.Addr][]core.IPAddressDADState{cfg.PreferredIP: {core.IPAddressDADPreferred}},
+	}
+	session, err := StartTemporaryAccess(core.NewSilentTaskContext(t.Context()), fake, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := fake.entries[cfg.PreferredIP]
+	entry.CreationTimestamp++
+	fake.entries[cfg.PreferredIP] = entry
+	if _, err := ResumeTemporaryAccess(t.Context(), fake, session.TransactionPath); err == nil {
+		t.Fatal("expected ownership verification error")
 	}
 }

@@ -99,6 +99,11 @@ type TemporaryAccessSession struct {
 	Reachability    ReachabilityResult
 }
 
+type temporaryTransactionFile struct {
+	path        string
+	transaction temporaryAccessTransaction
+}
+
 func defaultTransactionDir(rootPath string) string {
 	return filepath.Join(rootPath, transactionDirName)
 }
@@ -188,7 +193,7 @@ func StartTemporaryAccess(ctx core.TaskContext, system temporaryAccessSystem, cf
 		transaction.State = transactionComplete
 		transaction.CleanupReason = "watchdog_arm_failed"
 		transaction.CleanupResult = err.Error()
-		_ = saveTransaction(transactionPath, &transaction)
+		_ = finalizeTransaction(transactionPath, &transaction)
 		return nil, fmt.Errorf("watchdog не создан, сеть не изменена: %w", err)
 	}
 	logTransaction(&transaction, "temporary IPv4 watchdog armed", "watchdog_task", transaction.WatchdogTask)
@@ -288,9 +293,11 @@ func CleanupTemporaryAccess(ctx core.TaskContext, system temporaryAccessSystem, 
 	}
 	if transaction.State == transactionComplete {
 		if exists, taskErr := system.ScheduledTaskExists(transaction.WatchdogTask); taskErr == nil && exists {
-			return system.DeleteScheduledTaskByName(transaction.WatchdogTask)
+			if err := system.DeleteScheduledTaskByName(transaction.WatchdogTask); err != nil {
+				return err
+			}
 		}
-		return nil
+		return removeTransactionArtifacts(transactionPath)
 	}
 	transaction.State = transactionCleaning
 	transaction.CleanupReason = reason
@@ -343,7 +350,7 @@ func CleanupTemporaryAccess(ctx core.TaskContext, system temporaryAccessSystem, 
 		return err
 	}
 	logTransaction(transaction, "temporary IPv4 cleanup complete", "reason", reason)
-	return nil
+	return removeTransactionArtifacts(transactionPath)
 }
 
 func ExtendTemporaryAccess(system temporaryAccessSystem, transactionPath, executablePath string, extension time.Duration) (*temporaryAccessTransaction, error) {
@@ -384,6 +391,9 @@ func RefreshTemporaryAccess(ctx context.Context, system temporaryAccessSystem, t
 	if err != nil {
 		return core.TemporaryIPv4Info{}, ReachabilityResult{}, err
 	}
+	if transaction.Entry == nil || entry.CreationTimestamp != transaction.Entry.CreationTimestamp {
+		return entry, ReachabilityResult{}, errors.New("ownership verification временного IPv4 не пройдена")
+	}
 	route, err := system.GetBestRouteIPv4(transaction.InterfaceLUID, transaction.InterfaceIndex, transaction.TemporaryIP, transaction.TargetIP)
 	if err != nil {
 		return entry, ReachabilityResult{}, err
@@ -407,6 +417,9 @@ func RecoverTemporaryTransactions(ctx core.TaskContext, system temporaryAccessSy
 			continue
 		}
 		if transaction.State == transactionComplete {
+			if err := CleanupTemporaryAccess(ctx, system, path, "startup_completed_recovery"); err != nil {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf("cleanup completed transaction %s: %w", transaction.ID, err))
+			}
 			continue
 		}
 		if !now.Before(transaction.ExpiresAt) {
@@ -450,7 +463,51 @@ func RecoverTemporaryTransactions(ctx core.TaskContext, system temporaryAccessSy
 		ctx.Info(message)
 		slog.Info("Обнаружена active temporary network transaction", "transaction_id", transaction.ID, "target", transaction.TargetIP, "interface", transaction.InterfaceAlias, "expires_at", transaction.ExpiresAt)
 	}
+	if err := removeEmptyTransactionDir(stateDir); err != nil {
+		recoveryErrors = append(recoveryErrors, err)
+	}
 	return errors.Join(recoveryErrors...)
+}
+
+func listActiveTemporaryTransactions(stateDir string, now time.Time) ([]temporaryTransactionFile, error) {
+	paths, err := filepath.Glob(filepath.Join(stateDir, "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	result := make([]temporaryTransactionFile, 0, len(paths))
+	for _, path := range paths {
+		transaction, err := loadTransaction(path)
+		if err != nil {
+			return nil, err
+		}
+		if transaction.State == transactionActive && now.Before(transaction.ExpiresAt) {
+			result = append(result, temporaryTransactionFile{path: path, transaction: *transaction})
+		}
+	}
+	slices.SortFunc(result, func(left, right temporaryTransactionFile) int {
+		return left.transaction.ExpiresAt.Compare(right.transaction.ExpiresAt)
+	})
+	return result, nil
+}
+
+func ResumeTemporaryAccess(ctx context.Context, system temporaryAccessSystem, transactionPath string) (*TemporaryAccessSession, error) {
+	transaction, err := loadTransaction(transactionPath)
+	if err != nil {
+		return nil, err
+	}
+	if transaction.State != transactionActive {
+		return nil, fmt.Errorf("network transaction %s не активна: %s", transaction.ID, transaction.State)
+	}
+	if !time.Now().Before(transaction.ExpiresAt) {
+		return nil, errors.New("время временного доступа истекло; адрес будет удалён watchdog")
+	}
+	entry, reachability, err := RefreshTemporaryAccess(ctx, system, transactionPath)
+	if err != nil {
+		return nil, err
+	}
+	transaction.Entry = &entry
+	transaction.Reachability = &reachability
+	return &TemporaryAccessSession{TransactionPath: transactionPath, Transaction: *transaction, Reachability: reachability}, nil
 }
 
 func waitForPreferred(ctx context.Context, system temporaryAccessSystem, entry core.TemporaryIPv4Info, timeout, interval time.Duration) (core.TemporaryIPv4Info, error) {
@@ -553,7 +610,35 @@ func disarmPreparedTransaction(system temporaryAccessSystem, path string, transa
 	transaction.State = transactionComplete
 	transaction.CleanupReason = reason
 	transaction.CleanupResult = "сеть не изменена"
-	return saveTransaction(path, transaction)
+	return finalizeTransaction(path, transaction)
+}
+
+func finalizeTransaction(path string, transaction *temporaryAccessTransaction) error {
+	if err := saveTransaction(path, transaction); err != nil {
+		return err
+	}
+	return removeTransactionArtifacts(path)
+}
+
+func removeTransactionArtifacts(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("удаление завершённой network transaction: %w", err)
+	}
+	return removeEmptyTransactionDir(filepath.Dir(path))
+}
+
+func removeEmptyTransactionDir(path string) error {
+	if filepath.Base(filepath.Clean(path)) != transactionDirName {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Непустой каталог содержит другую активную или диагностическую transaction.
+		if entries, readErr := os.ReadDir(path); readErr == nil && len(entries) > 0 {
+			return nil
+		}
+		return fmt.Errorf("удаление пустого каталога network transaction: %w", err)
+	}
+	return nil
 }
 
 func snapshotInterface(info core.NetworkInterfaceInfo) networkSnapshot {

@@ -50,11 +50,12 @@ type Config struct {
 	Subnets []string
 
 	// ActionTemporarySubnetAccess
-	TemporaryTargetIP   netip.Addr
-	TemporaryIP         netip.Addr
-	TemporaryInterface  core.NetworkInterfaceInfo
-	ExcludedAddresses   []netip.Addr
-	TransactionStateDir string
+	TemporaryTargetIP        netip.Addr
+	TemporaryIP              netip.Addr
+	TemporaryInterface       core.NetworkInterfaceInfo
+	ExcludedAddresses        []netip.Addr
+	TransactionStateDir      string
+	TemporaryTransactionPath string
 }
 
 func (cfg *Config) TaskConfirmation() core.TaskConfirmation {
@@ -82,6 +83,9 @@ func (cfg *Config) TaskConfirmation() core.TaskConfirmation {
 			ConfirmLabel: "Запустить сканирование",
 		}
 	case ActionTemporarySubnetAccess:
+		if cfg.TemporaryTransactionPath != "" {
+			return core.TaskConfirmation{}
+		}
 		currentAddress := "—"
 		if len(cfg.TemporaryInterface.IPv4Addresses) > 0 {
 			address := cfg.TemporaryInterface.IPv4Addresses[0]
@@ -176,6 +180,9 @@ func (m *Module) BuildTask(c any) (core.ModuleTaskPlan, error) {
 		plan.Mode = core.ModuleRunModeImmediate
 		plan.Task.Exclusive = true
 		plan.Result.Note = "Сеанс временного доступа завершён."
+		if cfg.TemporaryTransactionPath != "" {
+			plan.SkipConfirmation = true
+		}
 	}
 	return plan, nil
 }
@@ -212,9 +219,8 @@ func (m *Module) Configure(ctx core.TaskContext, services core.ModuleServices) (
 		{Title: "Сканирование сети", Description: "Поиск активных устройств в локальных подсетях"},
 		{Title: "Временный доступ к подсети устройства", Description: "Добавить безопасный transient IPv4 без отключения DHCP"},
 	}, tui.SelectionConfig{
-		Title:            "Диагностика сети",
-		Subtitle:         "Выберите действие:",
-		DisableShortcuts: true,
+		Title:    "Диагностика сети",
+		Subtitle: "Выберите действие:",
 	})
 	if err != nil {
 		return nil, err
@@ -238,6 +244,39 @@ func (m *Module) Configure(ctx core.TaskContext, services core.ModuleServices) (
 func (m *Module) configureTemporarySubnetAccess(ctx core.TaskContext, services core.ModuleServices) (*Config, error) {
 	if services.WinUtils == nil || services.AssetManager == nil || services.AssetManager.Cfg() == nil {
 		return nil, errors.New("системные службы NetworkDiag не инициализированы")
+	}
+	stateDir := defaultTransactionDir(services.AssetManager.Cfg().RootPath)
+	activeTransactions, err := listActiveTemporaryTransactions(stateDir, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("чтение активных network transaction: %w", err)
+	}
+	if len(activeTransactions) > 0 {
+		choices := make([]tui.ChoiceItem, 0, len(activeTransactions)+1)
+		for _, item := range activeTransactions {
+			choices = append(choices, tui.ChoiceItem{
+				Title:       fmt.Sprintf("Вернуться к %s через %s", item.transaction.TargetIP, item.transaction.InterfaceAlias),
+				Description: fmt.Sprintf("Временный IP %s/24, автоудаление %s", item.transaction.TemporaryIP, item.transaction.ExpiresAt.Local().Format("02.01.2006 15:04:05")),
+			})
+		}
+		choices = append(choices, tui.ChoiceItem{Title: "Создать новый временный доступ", Description: "Настроить адрес на другом сетевом интерфейсе"})
+		choice, selectErr := tui.SelectItem(choices, tui.SelectionConfig{
+			Title:    "Временный доступ к подсети устройства",
+			Subtitle: "Активный адрес продолжает работать в фоне. Можно вернуться к управлению им.",
+		})
+		if selectErr != nil || choice < 0 {
+			return nil, selectErr
+		}
+		if choice < len(activeTransactions) {
+			item := activeTransactions[choice]
+			return &Config{
+				Action:                   ActionTemporarySubnetAccess,
+				TemporaryTargetIP:        item.transaction.TargetIP,
+				TemporaryIP:              item.transaction.TemporaryIP,
+				TemporaryInterface:       core.NetworkInterfaceInfo{LUID: item.transaction.InterfaceLUID, Index: item.transaction.InterfaceIndex, Alias: item.transaction.InterfaceAlias},
+				TransactionStateDir:      stateDir,
+				TemporaryTransactionPath: item.path,
+			}, nil
+		}
 	}
 	rawTarget, err := tui.PromptText(tui.InputConfig{
 		Title:       "Временный доступ к подсети устройства",
@@ -317,9 +356,8 @@ func (m *Module) configureTemporarySubnetAccess(ctx core.TaskContext, services c
 			}
 		}
 		index, selectErr := tui.SelectItem(choices, tui.SelectionConfig{
-			Title:            "Выбор сетевого интерфейса",
-			Subtitle:         "Подтвердите физический интерфейс. VPN и виртуальные адаптеры не выбираются автоматически.",
-			DisableShortcuts: true,
+			Title:    "Выбор сетевого интерфейса",
+			Subtitle: "Подтвердите физический интерфейс. VPN и виртуальные адаптеры не выбираются автоматически.",
 		})
 		if selectErr != nil || index < 0 {
 			return nil, selectErr
@@ -362,7 +400,7 @@ func (m *Module) configureTemporarySubnetAccess(ctx core.TaskContext, services c
 		TemporaryIP:         temporaryIP,
 		TemporaryInterface:  selected,
 		ExcludedAddresses:   excluded,
-		TransactionStateDir: defaultTransactionDir(services.AssetManager.Cfg().RootPath),
+		TransactionStateDir: stateDir,
 	}, nil
 }
 
@@ -388,9 +426,8 @@ func (m *Module) configureFullDiag(ctx core.TaskContext) (*Config, error) {
 			{Title: host, Description: fmt.Sprintf("Из config.xml (%s)", brand)},
 			{Title: "Ввести адрес вручную"},
 		}, tui.SelectionConfig{
-			Title:            "Диагностика сети — Полная",
-			Subtitle:         "Выберите адрес сервера:",
-			DisableShortcuts: true,
+			Title:    "Диагностика сети — Полная",
+			Subtitle: "Выберите адрес сервера:",
 		})
 		if err != nil {
 			return nil, err
@@ -444,20 +481,18 @@ func (m *Module) configureTLS(_ core.TaskContext) (*Config, error) {
 	if len(preSelected) == 0 {
 		// Всё в порядке — показываем статус и выходим
 		tui.SelectItem(choices, tui.SelectionConfig{ //nolint:errcheck
-			Title:            "Настройка TLS",
-			Subtitle:         "Все параметры TLS настроены корректно.",
-			DisableShortcuts: true,
+			Title:    "Настройка TLS",
+			Subtitle: "Все параметры TLS настроены корректно.",
 		})
 		return nil, nil
 	}
 
 	indices, err := tui.SelectItems(choices, tui.SelectionConfig{
-		Title:            "Настройка TLS",
-		Subtitle:         "Выберите параметры для исправления:",
-		Multi:            true,
-		DisableShortcuts: true,
-		PreSelected:      preSelected,
-		ConfirmKey:       "s",
+		Title:       "Настройка TLS",
+		Subtitle:    "Выберите параметры для исправления:",
+		Multi:       true,
+		PreSelected: preSelected,
+		ConfirmKey:  "s",
 	})
 	if err != nil || len(indices) == 0 {
 		return nil, err
@@ -497,11 +532,10 @@ func (m *Module) configureNetScan(_ core.TaskContext) (*Config, error) {
 	}
 
 	indices, err := tui.SelectItems(choices, tui.SelectionConfig{
-		Title:            "Сканирование сети",
-		Subtitle:         "Выберите подсети для сканирования  [Space — отметить]:",
-		Multi:            true,
-		DisableShortcuts: true,
-		PreSelected:      preSelected,
+		Title:       "Сканирование сети",
+		Subtitle:    "Выберите подсети для сканирования  [Space — отметить]:",
+		Multi:       true,
+		PreSelected: preSelected,
 	})
 	if err != nil || len(indices) == 0 {
 		return nil, err

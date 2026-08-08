@@ -85,6 +85,9 @@ func TestServiceUtilsMenuShowsNetworkDiagLast(t *testing.T) {
 	if last.Title != "Диагностика сети" {
 		t.Fatalf("last service utils item = %q, want %q", last.Title, "Диагностика сети")
 	}
+	if last.Description != "" {
+		t.Fatalf("network diagnostics menu item must not have a description: %q", last.Description)
+	}
 }
 
 func TestBuildTaskRunsAutostartImmediately(t *testing.T) {

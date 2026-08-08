@@ -25,11 +25,18 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 		return core.ModuleActionResult{}, fmt.Errorf("путь goMH.exe: %w", err)
 	}
 
+	status := "Подготовка безопасной сетевой операции..."
+	if cfg.TemporaryTransactionPath != "" {
+		status = "Проверка активного временного адреса..."
+	}
 	session, err := tui.RunWithSpinnerStatus(
 		"Временный доступ к подсети устройства",
-		"Подготовка безопасной сетевой операции...",
+		status,
 		func(setStatus func(string)) (*TemporaryAccessSession, error) {
 			spinnerCtx := &spinnerTaskContext{TaskContext: ctx, setStatus: setStatus}
+			if cfg.TemporaryTransactionPath != "" {
+				return ResumeTemporaryAccess(spinnerCtx.Context(), services.WinUtils, cfg.TemporaryTransactionPath)
+			}
 			return StartTemporaryAccess(spinnerCtx, services.WinUtils, TemporaryAccessConfig{
 				Interface:         cfg.TemporaryInterface,
 				TargetIP:          cfg.TemporaryTargetIP,
@@ -47,13 +54,11 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 
 	for {
 		choice, selectErr := tui.SelectItem(temporarySessionMenuItems(), tui.SelectionConfig{
-			Title:            "Временный доступ к подсети устройства",
-			Subtitle:         temporarySessionSubtitle(&session.Transaction, session.Reachability),
-			DisableShortcuts: true,
+			Title:    "Временный доступ к подсети устройства",
+			Subtitle: temporarySessionSubtitle(&session.Transaction, session.Reachability),
 		})
 		if selectErr != nil || choice < 0 {
-			cleanupErr := runCleanupWithSpinner(ctx, services.WinUtils, session.TransactionPath, "user_cancelled")
-			return core.ModuleActionResult{}, errors.Join(selectErr, cleanupErr)
+			return backgroundTemporaryAccessResult(&session.Transaction), selectErr
 		}
 
 		switch choice {
@@ -89,6 +94,8 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 			}
 			ctx.Success("Временный IPv4 удалён. DHCP, gateway и DNS не изменялись.")
 			return core.ModuleActionResult{Note: "Временный доступ завершён."}, nil
+		case 4:
+			return backgroundTemporaryAccessResult(&session.Transaction), nil
 		}
 	}
 }
@@ -99,7 +106,16 @@ func temporarySessionMenuItems() []tui.ChoiceItem {
 		{Title: "Проверить снова", Description: "Повторить DAD/route/reachability verification"},
 		{Title: "Продлить на 30 минут", Description: "Сначала перенести watchdog, затем продлить NetIO lifetime"},
 		{Title: "Завершить временный доступ", Description: "Удалить только созданный goMH IPv4"},
+		{Title: "Оставить работать в фоне", Description: "Вернуться в главное меню; адрес удалит watchdog, к экрану можно вернуться"},
 	}
+}
+
+func backgroundTemporaryAccessResult(transaction *temporaryAccessTransaction) core.ModuleActionResult {
+	return core.ModuleActionResult{Note: fmt.Sprintf(
+		"Временный IP %s/24 продолжает работать в фоне до %s. Вернуться к управлению можно через этот же пункт меню.",
+		transaction.TemporaryIP,
+		transaction.ExpiresAt.Local().Format("02.01.2006 15:04:05"),
+	)}
 }
 
 func temporarySessionSubtitle(transaction *temporaryAccessTransaction, reachability ReachabilityResult) string {
