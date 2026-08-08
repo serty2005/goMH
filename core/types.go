@@ -3,9 +3,82 @@ package core
 import (
 	"context"
 	"goMH/config"
+	"net/netip"
+	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
+
+// IPAddressDADState описывает состояние Windows Duplicate Address Detection.
+type IPAddressDADState int
+
+const (
+	IPAddressDADInvalid IPAddressDADState = iota
+	IPAddressDADTentative
+	IPAddressDADDuplicate
+	IPAddressDADDeprecated
+	IPAddressDADPreferred
+)
+
+// NetworkIPv4Address описывает IPv4-адрес, назначенный интерфейсу Windows.
+type NetworkIPv4Address struct {
+	Address           netip.Addr
+	PrefixLength      uint8
+	PrefixOrigin      uint32
+	SuffixOrigin      uint32
+	DADState          IPAddressDADState
+	ValidLifetime     time.Duration
+	PreferredLifetime time.Duration
+	CreationTimestamp int64
+}
+
+// NetworkInterfaceInfo содержит read-only snapshot сетевого интерфейса.
+type NetworkInterfaceInfo struct {
+	LUID            uint64
+	GUID            string
+	Index           uint32
+	Alias           string
+	Description     string
+	MAC             string
+	Type            uint32
+	Virtual         bool
+	Up              bool
+	DHCPEnabled     bool
+	IPv4Addresses   []NetworkIPv4Address
+	DefaultGateways []netip.Addr
+	DNSServers      []netip.Addr
+}
+
+// TemporaryIPv4Request задаёт единственную transient NetIO-запись.
+type TemporaryIPv4Request struct {
+	InterfaceLUID     uint64
+	InterfaceIndex    uint32
+	Address           netip.Addr
+	PrefixLength      uint8
+	ValidLifetime     time.Duration
+	PreferredLifetime time.Duration
+}
+
+// TemporaryIPv4Info идентифицирует transient-запись для проверки и удаления.
+type TemporaryIPv4Info struct {
+	InterfaceLUID     uint64
+	InterfaceIndex    uint32
+	Address           netip.Addr
+	PrefixLength      uint8
+	DADState          IPAddressDADState
+	ValidLifetime     time.Duration
+	PreferredLifetime time.Duration
+	CreationTimestamp int64
+}
+
+// IPv4RouteInfo описывает выбранный Windows маршрут и source address.
+type IPv4RouteInfo struct {
+	InterfaceLUID  uint64
+	InterfaceIndex uint32
+	SourceAddress  netip.Addr
+	NextHop        netip.Addr
+	Metric         uint32
+}
 
 // TaskContext определяет методы для взаимодействия логики с интерфейсом (CLI или GUI).
 type TaskContext interface {
@@ -150,6 +223,15 @@ type WinUtils interface {
 	Reboot() error
 	CollectTLSInfo() string
 	CollectProxyInfo() string
+	ListNetworkInterfaces() ([]NetworkInterfaceInfo, error)
+	CreateTemporaryIPv4(req TemporaryIPv4Request) (TemporaryIPv4Info, error)
+	GetTemporaryIPv4(interfaceLUID uint64, interfaceIndex uint32, address netip.Addr) (TemporaryIPv4Info, error)
+	SetTemporaryIPv4Lifetimes(info TemporaryIPv4Info, valid, preferred time.Duration) (TemporaryIPv4Info, error)
+	DeleteTemporaryIPv4(info TemporaryIPv4Info) error
+	GetBestRouteIPv4(interfaceLUID uint64, interfaceIndex uint32, source, destination netip.Addr) (IPv4RouteInfo, error)
+	CreateOneShotScheduledTask(taskName, executablePath string, arguments []string, workingDir string, runAt time.Time) error
+	ScheduledTaskExists(taskName string) (bool, error)
+	OpenURL(rawURL string) error
 }
 
 // AssetManager определяет контракт для менеджера ресурсов.

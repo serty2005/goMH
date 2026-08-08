@@ -131,6 +131,10 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 
 	title := "Утилиты обслуживания"
 	signature := "serviceutils|generic"
+	mode := core.ModuleRunModeQueue
+	exclusive := false
+	skipConfirmation := false
+	result := core.ModuleActionResult{}
 	switch cfg.Action {
 	case ActionCleanTemp:
 		title = "Очистка временных файлов"
@@ -152,9 +156,16 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 		signature = "serviceutils|autostart"
 	case ActionNetworkDiag:
 		if cfg.NetworkDiagConfig != nil {
-			ndPlan, _ := (&networkdiag.Module{}).BuildTask(cfg.NetworkDiagConfig)
+			ndPlan, buildErr := (&networkdiag.Module{}).BuildTask(cfg.NetworkDiagConfig)
+			if buildErr != nil {
+				return core.ModuleTaskPlan{}, buildErr
+			}
 			title = ndPlan.Task.Title
 			signature = "serviceutils|" + ndPlan.Task.Signature
+			mode = ndPlan.Mode
+			exclusive = ndPlan.Task.Exclusive
+			skipConfirmation = ndPlan.SkipConfirmation
+			result = ndPlan.Result
 		} else {
 			title = "Диагностика сети"
 			signature = "serviceutils|networkdiag"
@@ -162,11 +173,14 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 	}
 
 	plan := core.ModuleTaskPlan{
-		Mode: core.ModuleRunModeQueue,
+		Mode: mode,
 		Task: core.ModuleTaskSpec{
 			Title:     title,
 			Signature: signature,
+			Exclusive: exclusive,
 		},
+		Result:           result,
+		SkipConfirmation: skipConfirmation,
 	}
 	if cfg.Action == ActionViewLog || cfg.Action == ActionOrderCheck || cfg.Action == ActionFrontTools || cfg.Action == ActionAutostart {
 		plan.Mode = core.ModuleRunModeImmediate
@@ -230,6 +244,8 @@ func (m *Module) ExecuteImmediate(ctx core.TaskContext, services core.ModuleServ
 		return result, err
 	case ActionAutostart:
 		return (&autostart.Module{}).ExecuteImmediate(ctx, services, cfg.AutostartConfig)
+	case ActionNetworkDiag:
+		return (&networkdiag.Module{}).ExecuteImmediate(ctx, services, cfg.NetworkDiagConfig)
 	default:
 		return core.ModuleActionResult{}, errors.New("немедленное выполнение для этого действия не поддерживается")
 	}
@@ -390,16 +406,16 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		return m.configureAutostart(ctx, am, wu)
 
 	case 6:
-		return m.configureNetworkDiag(ctx)
+		return m.configureNetworkDiag(ctx, am, wu)
 
 	default:
 		return nil, nil
 	}
 }
 
-func (m *Module) configureNetworkDiag(ctx core.TaskContext) (*ServiceUtilsConfig, error) {
+func (m *Module) configureNetworkDiag(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) (*ServiceUtilsConfig, error) {
 	nd := &networkdiag.Module{}
-	cfg, err := nd.Configure(ctx)
+	cfg, err := nd.Configure(ctx, core.ModuleServices{AssetManager: am, WinUtils: wu})
 	if err != nil || cfg == nil {
 		return nil, err
 	}

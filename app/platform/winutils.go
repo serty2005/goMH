@@ -4,6 +4,8 @@ import (
 	"goMH/core"
 	"goMH/winutils"
 	"io"
+	"net/netip"
+	"time"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -225,4 +227,40 @@ func (rw *RealWinUtils) CollectTLSInfo() string {
 
 func (rw *RealWinUtils) CollectProxyInfo() string {
 	return rw.withRuntime().CollectProxyInfo()
+}
+
+func (rw *RealWinUtils) ListNetworkInterfaces() ([]core.NetworkInterfaceInfo, error) {
+	return winutils.ListNetworkInterfaces()
+}
+
+func (rw *RealWinUtils) CreateTemporaryIPv4(req core.TemporaryIPv4Request) (core.TemporaryIPv4Info, error) {
+	return winutils.CreateTemporaryIPv4(req)
+}
+
+func (rw *RealWinUtils) GetTemporaryIPv4(interfaceLUID uint64, interfaceIndex uint32, address netip.Addr) (core.TemporaryIPv4Info, error) {
+	return winutils.GetTemporaryIPv4(interfaceLUID, interfaceIndex, address)
+}
+
+func (rw *RealWinUtils) SetTemporaryIPv4Lifetimes(info core.TemporaryIPv4Info, valid, preferred time.Duration) (core.TemporaryIPv4Info, error) {
+	return winutils.SetTemporaryIPv4Lifetimes(info, valid, preferred)
+}
+
+func (rw *RealWinUtils) DeleteTemporaryIPv4(info core.TemporaryIPv4Info) error {
+	return winutils.DeleteTemporaryIPv4(info)
+}
+
+func (rw *RealWinUtils) GetBestRouteIPv4(interfaceLUID uint64, interfaceIndex uint32, source, destination netip.Addr) (core.IPv4RouteInfo, error) {
+	return winutils.GetBestRouteIPv4(interfaceLUID, interfaceIndex, source, destination)
+}
+
+func (rw *RealWinUtils) CreateOneShotScheduledTask(taskName, executablePath string, arguments []string, workingDir string, runAt time.Time) error {
+	return winutils.CreateOneShotScheduledTask(taskName, executablePath, arguments, workingDir, runAt)
+}
+
+func (rw *RealWinUtils) ScheduledTaskExists(taskName string) (bool, error) {
+	return winutils.ScheduledTaskExists(taskName)
+}
+
+func (rw *RealWinUtils) OpenURL(rawURL string) error {
+	return winutils.OpenURL(rawURL)
 }

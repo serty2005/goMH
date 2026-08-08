@@ -1,6 +1,7 @@
 package serviceutils
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/modules/autostart"
+	"goMH/modules/networkdiag"
 )
 
 func TestBuildTaskRunsOrderCheckAndFrontToolsImmediately(t *testing.T) {
@@ -101,6 +103,29 @@ func TestBuildTaskRunsAutostartImmediately(t *testing.T) {
 	}
 	if !plan.SkipConfirmation {
 		t.Fatal("expected autostart launch without extra serviceutils confirmation")
+	}
+}
+
+func TestBuildTaskPropagatesTemporaryNetworkImmediatePlan(t *testing.T) {
+	module := &Module{}
+	cfg := &ServiceUtilsConfig{
+		Action: ActionNetworkDiag,
+		NetworkDiagConfig: &networkdiag.Config{
+			Action:             networkdiag.ActionTemporarySubnetAccess,
+			TemporaryTargetIP:  netip.MustParseAddr("192.168.0.100"),
+			TemporaryIP:        netip.MustParseAddr("192.168.0.101"),
+			TemporaryInterface: core.NetworkInterfaceInfo{LUID: 42, Alias: "Ethernet"},
+		},
+	}
+	plan, err := module.BuildTask(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Mode != core.ModuleRunModeImmediate || !plan.Task.Exclusive {
+		t.Fatalf("delegated plan: mode=%v exclusive=%v", plan.Mode, plan.Task.Exclusive)
+	}
+	if plan.Task.Signature != "serviceutils|networkdiag|temporary_ipv4|42" {
+		t.Fatalf("signature = %q", plan.Task.Signature)
 	}
 }
 

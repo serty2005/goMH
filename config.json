@@ -285,7 +285,7 @@
 			"download_method": "HTTP"
 		},
 		"DTO_Installer": {
-			"url": "ftp://ftp.serty.top/KKT10-10.10.8.0-windows32-setup.exe",
+			"url": "ftp://ftp.serty.top/KKT10-10.10.9.0-windows32-setup.exe",
 			"type": "file",
 			"destination": "_assets",
 			"download_method": "FTP"

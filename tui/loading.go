@@ -12,6 +12,8 @@ type loadingResultMsg[T any] struct {
 	err   error
 }
 
+type loadingStatusMsg string
+
 type loadingModel[T any] struct {
 	theme         Theme
 	title         string
@@ -27,15 +29,31 @@ type loadingModel[T any] struct {
 }
 
 func RunWithSpinner[T any](title string, subtitle string, fn func() (T, error)) (T, error) {
+	return runWithSpinnerStatus(title, subtitle, func(_ func(string)) (T, error) {
+		return fn()
+	})
+}
+
+// RunWithSpinnerStatus показывает spinner и позволяет фоновой операции менять
+// подпись текущего этапа без прямой записи в alternate screen.
+func RunWithSpinnerStatus[T any](title string, subtitle string, fn func(setStatus func(string)) (T, error)) (T, error) {
+	return runWithSpinnerStatus(title, subtitle, fn)
+}
+
+func runWithSpinnerStatus[T any](title string, subtitle string, fn func(setStatus func(string)) (T, error)) (T, error) {
 	model := loadingModel[T]{
 		theme:         DefaultTheme(),
 		title:         title,
 		subtitle:      subtitle,
 		spinnerFrames: []string{"|", "/", "-", "\\"},
-		fn:            fn,
 	}
 
 	program := tea.NewProgram(&model, tea.WithAltScreen())
+	model.fn = func() (T, error) {
+		return fn(func(status string) {
+			program.Send(loadingStatusMsg(status))
+		})
+	}
 	finalModel, err := program.Run()
 	if err != nil {
 		var zero T
@@ -66,6 +84,9 @@ func (m *loadingModel[T]) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.spinnerIndex = (m.spinnerIndex + 1) % len(m.spinnerFrames)
 		return m, spinnerTickCmd()
+	case loadingStatusMsg:
+		m.subtitle = string(msg)
+		return m, nil
 	case liveLogOverlayTickMsg:
 		consumeLiveLogOverlayUpdates()
 		return m, liveLogOverlayTickCmd()

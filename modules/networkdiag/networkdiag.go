@@ -1,11 +1,14 @@
 package networkdiag
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,9 +24,10 @@ const sectionLine = "***********************************************************
 type ActionType int
 
 const (
-	ActionFullDiag ActionType = iota // полный сбор диагностики
-	ActionTLS                        // проверка и настройка TLS
-	ActionNetScan                    // сканирование сети
+	ActionFullDiag              ActionType = iota // полный сбор диагностики
+	ActionTLS                                     // проверка и настройка TLS
+	ActionNetScan                                 // сканирование сети
+	ActionTemporarySubnetAccess                   // transient IPv4 для доступа к сетевому устройству
 )
 
 // Module реализует QueueModule для диагностики сетевого подключения.
@@ -44,6 +48,13 @@ type Config struct {
 
 	// ActionNetScan — CIDR-подсети для сканирования
 	Subnets []string
+
+	// ActionTemporarySubnetAccess
+	TemporaryTargetIP   netip.Addr
+	TemporaryIP         netip.Addr
+	TemporaryInterface  core.NetworkInterfaceInfo
+	ExcludedAddresses   []netip.Addr
+	TransactionStateDir string
 }
 
 func (cfg *Config) TaskConfirmation() core.TaskConfirmation {
@@ -70,6 +81,27 @@ func (cfg *Config) TaskConfirmation() core.TaskConfirmation {
 			Details:      append([]string{"Сканируемые подсети:"}, cfg.Subnets...),
 			ConfirmLabel: "Запустить сканирование",
 		}
+	case ActionTemporarySubnetAccess:
+		currentAddress := "—"
+		if len(cfg.TemporaryInterface.IPv4Addresses) > 0 {
+			address := cfg.TemporaryInterface.IPv4Addresses[0]
+			currentAddress = fmt.Sprintf("%s/%d", address.Address, address.PrefixLength)
+		}
+		dhcp := "отключён"
+		if cfg.TemporaryInterface.DHCPEnabled {
+			dhcp = "включён"
+		}
+		return core.TaskConfirmation{
+			Details: []string{
+				"Интерфейс: " + cfg.TemporaryInterface.Alias,
+				"Текущий адрес: " + currentAddress + " (DHCP " + dhcp + ")",
+				"Временный адрес: " + cfg.TemporaryIP.String() + "/24",
+				"Устройство: " + cfg.TemporaryTargetIP.String(),
+				"Автоматическое удаление: через 30 минут",
+				"Основной DHCP-адрес, шлюз и DNS изменены не будут.",
+			},
+			ConfirmLabel: "Создать временный доступ",
+		}
 	}
 	return core.TaskConfirmation{}
 }
@@ -83,11 +115,11 @@ func toConfig(c any) (*Config, error) {
 }
 
 // Run — точка входа для консольного режима (прямой запуск без очереди).
-func (m *Module) Run(_ core.AssetManager, wu core.WinUtils) error {
+func (m *Module) Run(am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Запуск модуля NetworkDiag")
 	ctx := tui.NewConsoleContext()
 
-	cfg, err := m.Configure(ctx)
+	cfg, err := m.Configure(ctx, core.ModuleServices{AssetManager: am, WinUtils: wu})
 	if err != nil {
 		slog.Error("Ошибка конфигурации NetworkDiag", "error", err)
 		return err
@@ -96,12 +128,16 @@ func (m *Module) Run(_ core.AssetManager, wu core.WinUtils) error {
 		slog.Info("Диагностика сети отменена пользователем")
 		return nil
 	}
+	if cfg.Action == ActionTemporarySubnetAccess {
+		_, err := m.ExecuteImmediate(ctx, core.ModuleServices{AssetManager: am, WinUtils: wu}, cfg)
+		return err
+	}
 
 	return m.Execute(ctx, wu, cfg)
 }
 
-func (m *Module) ConfigureTask(ctx core.TaskContext, _ core.ModuleServices) (any, error) {
-	return m.Configure(ctx)
+func (m *Module) ConfigureTask(ctx core.TaskContext, services core.ModuleServices) (any, error) {
+	return m.Configure(ctx, services)
 }
 
 func (m *Module) BuildTask(c any) (core.ModuleTaskPlan, error) {
@@ -121,6 +157,9 @@ func (m *Module) BuildTask(c any) (core.ModuleTaskPlan, error) {
 	case ActionNetScan:
 		title = "Сканирование сети: " + strings.Join(cfg.Subnets, ", ")
 		sig = "networkdiag|netscan|" + strings.Join(cfg.Subnets, "|")
+	case ActionTemporarySubnetAccess:
+		title = "Временный доступ к устройству: " + cfg.TemporaryTargetIP.String()
+		sig = fmt.Sprintf("networkdiag|temporary_ipv4|%d", cfg.TemporaryInterface.LUID)
 	}
 
 	plan := core.ModuleTaskPlan{
@@ -132,6 +171,11 @@ func (m *Module) BuildTask(c any) (core.ModuleTaskPlan, error) {
 	}
 	if cfg.Action == ActionNetScan {
 		plan.SkipConfirmation = true
+	}
+	if cfg.Action == ActionTemporarySubnetAccess {
+		plan.Mode = core.ModuleRunModeImmediate
+		plan.Task.Exclusive = true
+		plan.Result.Note = "Сеанс временного доступа завершён."
 	}
 	return plan, nil
 }
@@ -153,17 +197,20 @@ func (m *Module) Execute(ctx core.TaskContext, wu core.WinUtils, cfg *Config) er
 		return m.RunTLS(ctx, cfg)
 	case ActionNetScan:
 		return m.RunNetScan(ctx, cfg)
+	case ActionTemporarySubnetAccess:
+		return errors.New("временный доступ должен выполняться как immediate action")
 	}
 	return fmt.Errorf("неизвестное действие NetworkDiag: %d", cfg.Action)
 }
 
 // ── Configure: подменю и делегирование ──────────────────────────────────────
 
-func (m *Module) Configure(ctx core.TaskContext) (*Config, error) {
+func (m *Module) Configure(ctx core.TaskContext, services core.ModuleServices) (*Config, error) {
 	idx, err := tui.SelectItem([]tui.ChoiceItem{
 		{Title: "Полная диагностика", Description: "Сбор сетевых данных для передачи в поддержку"},
 		{Title: "Настройка TLS", Description: "Проверка и исправление SCHANNEL / WinHTTP / .NET"},
 		{Title: "Сканирование сети", Description: "Поиск активных устройств в локальных подсетях"},
+		{Title: "Временный доступ к подсети устройства", Description: "Добавить безопасный transient IPv4 без отключения DHCP"},
 	}, tui.SelectionConfig{
 		Title:            "Диагностика сети",
 		Subtitle:         "Выберите действие:",
@@ -182,8 +229,155 @@ func (m *Module) Configure(ctx core.TaskContext) (*Config, error) {
 		return m.configureTLS(ctx)
 	case 2:
 		return m.configureNetScan(ctx)
+	case 3:
+		return m.configureTemporarySubnetAccess(ctx, services)
 	}
 	return nil, nil
+}
+
+func (m *Module) configureTemporarySubnetAccess(ctx core.TaskContext, services core.ModuleServices) (*Config, error) {
+	if services.WinUtils == nil || services.AssetManager == nil || services.AssetManager.Cfg() == nil {
+		return nil, errors.New("системные службы NetworkDiag не инициализированы")
+	}
+	rawTarget, err := tui.PromptText(tui.InputConfig{
+		Title:       "Временный доступ к подсети устройства",
+		Subtitle:    "Введите текущий IPv4 принтера или другого устройства:",
+		Placeholder: "192.168.0.100",
+		Validate: func(value string) error {
+			_, parseErr := parseDeviceIPv4(strings.TrimSpace(value))
+			return parseErr
+		},
+	})
+	if err != nil || strings.TrimSpace(rawTarget) == "" {
+		return nil, err
+	}
+	target, _ := parseDeviceIPv4(strings.TrimSpace(rawTarget))
+	type networkInspection struct {
+		interfaces []core.NetworkInterfaceInfo
+		reachable  bool
+	}
+	inspection, err := tui.RunWithSpinner("Временный доступ к подсети устройства", "Проверка текущих интерфейсов и доступности устройства...", func() (networkInspection, error) {
+		interfaces, inspectErr := services.WinUtils.ListNetworkInterfaces()
+		if inspectErr != nil {
+			return networkInspection{}, inspectErr
+		}
+		return networkInspection{
+			interfaces: interfaces,
+			reachable:  hasExistingTargetSubnet(interfaces, target) || probeTarget(ctx.Context(), target, netip.Addr{}).Reachable(),
+		}, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("получение сетевых интерфейсов: %w", err)
+	}
+	interfaces := inspection.interfaces
+	active := slices.DeleteFunc(interfaces, func(info core.NetworkInterfaceInfo) bool {
+		return !info.Up || len(info.IPv4Addresses) == 0 || info.Type == 24
+	})
+	if len(active) == 0 {
+		return nil, errors.New("не найден активный IPv4-интерфейс")
+	}
+	if inspection.reachable {
+		tui.Info("Устройство уже доступно через текущую сетевую конфигурацию. Временный IPv4 не требуется.")
+		return nil, nil
+	}
+	slices.SortStableFunc(active, func(left, right core.NetworkInterfaceInfo) int {
+		leftPhysical := left.Type == 6 || left.Type == 71
+		rightPhysical := right.Type == 6 || right.Type == 71
+		if leftPhysical != rightPhysical {
+			if leftPhysical {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(left.Alias, right.Alias)
+	})
+	selected := active[0]
+	if len(active) > 1 || active[0].Virtual {
+		choices := make([]tui.ChoiceItem, len(active))
+		for index, info := range active {
+			addresses := make([]string, len(info.IPv4Addresses))
+			for addressIndex, address := range info.IPv4Addresses {
+				addresses[addressIndex] = fmt.Sprintf("%s/%d", address.Address, address.PrefixLength)
+			}
+			kind := "физический"
+			if info.Virtual {
+				kind = "VPN/виртуальный"
+			}
+			dhcp := "DHCP off"
+			if info.DHCPEnabled {
+				dhcp = "DHCP on"
+			}
+			gateways := make([]string, len(info.DefaultGateways))
+			for gatewayIndex, gateway := range info.DefaultGateways {
+				gateways[gatewayIndex] = gateway.String()
+			}
+			choices[index] = tui.ChoiceItem{
+				Title:       info.Alias,
+				Description: fmt.Sprintf("%s · %s · index %d · %s · %s · gateway %s · %s", kind, info.Description, info.Index, info.MAC, strings.Join(addresses, ", "), strings.Join(gateways, ", "), dhcp),
+			}
+		}
+		index, selectErr := tui.SelectItem(choices, tui.SelectionConfig{
+			Title:            "Выбор сетевого интерфейса",
+			Subtitle:         "Подтвердите физический интерфейс. VPN и виртуальные адаптеры не выбираются автоматически.",
+			DisableShortcuts: true,
+		})
+		if selectErr != nil || index < 0 {
+			return nil, selectErr
+		}
+		selected = active[index]
+	}
+
+	excluded := allLocalIPv4(selected, interfaces)
+	defaultAddress, err := defaultTemporaryAddress(target, excluded)
+	if err != nil {
+		return nil, err
+	}
+	rawTemporary, err := tui.PromptText(tui.InputConfig{
+		Title:        "Временный IPv4",
+		Subtitle:     "Проверьте предлагаемый адрес или укажите другой адрес из подсети устройства /24:",
+		InitialValue: defaultAddress.String(),
+		Placeholder:  defaultAddress.String(),
+		Validate: func(value string) error {
+			address, parseErr := netip.ParseAddr(strings.TrimSpace(value))
+			if parseErr != nil || !address.Is4() || !deviceSubnet(target).Contains(address) || address == target {
+				return errors.New("нужен host IPv4 из той же /24 подсети, отличный от адреса устройства")
+			}
+			octets := address.As4()
+			if octets[3] == 0 || octets[3] == 255 {
+				return errors.New("нельзя использовать адрес сети или broadcast")
+			}
+			if slices.Contains(excluded, address) {
+				return errors.New("этот IPv4 уже назначен локальному компьютеру")
+			}
+			return nil
+		},
+	})
+	if err != nil || strings.TrimSpace(rawTemporary) == "" {
+		return nil, err
+	}
+	temporaryIP, _ := netip.ParseAddr(strings.TrimSpace(rawTemporary))
+	return &Config{
+		Action:              ActionTemporarySubnetAccess,
+		TemporaryTargetIP:   target,
+		TemporaryIP:         temporaryIP,
+		TemporaryInterface:  selected,
+		ExcludedAddresses:   excluded,
+		TransactionStateDir: defaultTransactionDir(services.AssetManager.Cfg().RootPath),
+	}, nil
+}
+
+func hasExistingTargetSubnet(interfaces []core.NetworkInterfaceInfo, target netip.Addr) bool {
+	for _, info := range interfaces {
+		if !info.Up {
+			continue
+		}
+		for _, address := range info.IPv4Addresses {
+			if address.PrefixLength <= 32 && netip.PrefixFrom(address.Address, int(address.PrefixLength)).Masked().Contains(target) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Module) configureFullDiag(ctx core.TaskContext) (*Config, error) {

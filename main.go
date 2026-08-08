@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"goMH/app/automation"
@@ -11,6 +12,7 @@ import (
 	"goMH/core"
 	"goMH/logging"
 	"goMH/modules/distro"
+	"goMH/modules/networkdiag"
 	"goMH/modules/regime"
 	moduleregistry "goMH/modules/registry"
 	"goMH/modules/selfupdate"
@@ -240,6 +242,7 @@ func execute() error {
 	// Флаги для режима возобновления
 	moduleFlag := flag.String("module", "", "Прямой запуск модуля (Regime, iiko)")
 	resumeFlag := flag.String("resume", "", "Путь к файлу конфигурации возобновления")
+	internalNetworkCleanup := flag.String("internal-network-temp-cleanup", "", "Внутренняя очистка temporary IPv4 transaction")
 	flag.Parse()
 
 	// Проверка прав администратора
@@ -252,6 +255,15 @@ func execute() error {
 		return nil
 	}
 	tui.Success("Приложение запущено с правами администратора.")
+
+	if *internalNetworkCleanup != "" {
+		realWinUtils := platform.NewRealWinUtils()
+		ctx := core.NewSilentTaskContext(context.Background())
+		if err := networkdiag.CleanupTemporaryAccess(ctx, realWinUtils, *internalNetworkCleanup, "watchdog_expired"); err != nil {
+			return fmt.Errorf("watchdog cleanup temporary IPv4: %w", err)
+		}
+		return nil
+	}
 
 	// Загрузка конфига
 	finalConfigPath, err := getConfigPath(configPathFlag)
@@ -297,6 +309,14 @@ func execute() error {
 
 	// Инициализация утилит
 	RealWinUtils := platform.NewRealWinUtils()
+	if err := networkdiag.RecoverTemporaryTransactions(
+		core.NewSilentTaskContext(context.Background()),
+		RealWinUtils,
+		networkdiag.TemporaryTransactionDir(cfg.RootPath),
+		time.Now(),
+	); err != nil {
+		slog.Warn("Recovery временных сетевых transaction завершился с ошибками", "error", err)
+	}
 
 	// --- САМООБНОВЛЕНИЕ ---\
 	// Пропускаем при режиме возобновления
