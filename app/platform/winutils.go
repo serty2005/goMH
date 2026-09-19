@@ -14,6 +14,14 @@ type RealWinUtils struct {
 	runtime *winutils.Runtime
 }
 
+func (rw *RealWinUtils) FindFrontConfig() (core.ConfigFileSnapshot, error) {
+	return winutils.FindFrontConfig()
+}
+
+func (rw *RealWinUtils) SaveFileWithBackup(path string, original, updated []byte) (string, error) {
+	return winutils.SaveFileWithBackup(path, original, updated)
+}
+
 func NewRealWinUtils() *RealWinUtils {
 	return &RealWinUtils{runtime: winutils.NewRuntime()}
 }

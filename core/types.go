@@ -177,7 +177,16 @@ type ShortcutInfo struct {
 	WorkingDirectory string
 }
 
+type ConfigFileSnapshot struct {
+	Path    string
+	Brand   string
+	ModTime time.Time
+	Data    []byte
+}
+
 type WinUtils interface {
+	FindFrontConfig() (ConfigFileSnapshot, error)
+	SaveFileWithBackup(path string, original, updated []byte) (string, error)
 	RunCommand(name string, args ...string) (string, error)
 	RunCommandWithEnv(env map[string]string, name string, args ...string) (string, error)
 	StartDetachedProcess(name string, args ...string) error

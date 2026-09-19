@@ -6,6 +6,7 @@ import (
 	"goMH/config"
 	"goMH/core"
 	"goMH/dependencies"
+	"goMH/modules/frontconfig"
 	iikoplugins "goMH/modules/iiko-plugins"
 	"goMH/tui"
 	"log/slog"
@@ -24,6 +25,7 @@ const (
 	ActionInstallPortable
 	ActionManualPatch
 	ActionPlugins
+	ActionEditFrontConfig
 )
 
 // DistroInstallConfig хранит все решения пользователя
@@ -34,6 +36,7 @@ type DistroInstallConfig struct {
 	Version               string
 	Patch                 *core.PatchInfo // Может быть nil
 	PluginSelection       *iikoplugins.InstallSelection
+	FrontConfig           *frontconfig.Config
 	RunAutoUpdatePlugins  bool
 	UninstallOldVersion   bool
 	OldVersionString      string // Версия для удаления (если UninstallOldVersion=true)
@@ -109,6 +112,17 @@ func (m *Module) BuildTask(config any) (core.ModuleTaskPlan, error) {
 	if err != nil {
 		return core.ModuleTaskPlan{}, err
 	}
+	if cfg.Action == ActionEditFrontConfig {
+		if cfg.FrontConfig == nil || cfg.FrontConfig.Snapshot.Path == "" {
+			return core.ModuleTaskPlan{}, fmt.Errorf("не задан файл для редактирования")
+		}
+		return core.ModuleTaskPlan{
+			Mode:             core.ModuleRunModeImmediate,
+			Task:             core.ModuleTaskSpec{Title: "Редактор config.xml"},
+			SkipConfirmation: true,
+			Result:           core.ModuleActionResult{Note: "config.xml сохранён. Резервная копия находится рядом с файлом. Запустите Front заново."},
+		}, nil
+	}
 
 	patchName := ""
 	if cfg.Patch != nil {
@@ -173,6 +187,8 @@ func (cfg *DistroInstallConfig) actionLabel() string {
 		return "Ручная установка патча"
 	case ActionPlugins:
 		return "Автообновление плагинов"
+	case ActionEditFrontConfig:
+		return "Редактор config.xml"
 	default:
 		return "Неизвестно"
 	}
@@ -220,6 +236,7 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		choice, err := tui.SelectItem([]tui.ChoiceItem{
 			{Title: "iiko", Description: "Дистрибутивы, плагины и патчи"},
 			{Title: "Syrve", Description: "Дистрибутивы и portable-сборки"},
+			{Title: "Редактор конфига", Description: "config.xml iikoFront / SyrveFront: поиск, переключатели и значения"},
 		}, tui.SelectionConfig{
 			Title:    "Выберите продукт",
 			Subtitle: "Esc для возврата в главное меню",
@@ -238,6 +255,17 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 		case 1:
 			brandName = "syrve"
 			handler = &syrveHandler{}
+		case 2:
+			editorConfig, err := frontconfig.Configure(wu)
+			if err != nil {
+				tui.Error(fmt.Sprintf("Редактор config.xml: %v", err))
+				tui.WaitForAnyKey()
+				continue
+			}
+			if editorConfig == nil {
+				continue
+			}
+			return &DistroInstallConfig{Action: ActionEditFrontConfig, Brand: editorConfig.Snapshot.Brand, FrontConfig: editorConfig}, nil
 		default:
 			return nil, nil
 		}
@@ -264,6 +292,8 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 // Execute выполняет задачу на основе конфига.
 func (m *Module) Execute(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils, cfg *DistroInstallConfig) error {
 	switch cfg.Action {
+	case ActionEditFrontConfig:
+		return frontconfig.Execute(ctx, wu, cfg.FrontConfig)
 	case ActionPlugins:
 		pluginMod := &iikoplugins.Module{}
 		return pluginMod.ExecuteInstall(am, wu, cfg.PluginSelection)
