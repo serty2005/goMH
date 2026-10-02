@@ -12,13 +12,13 @@ func TestGetPatchesPathPrefersBaseVersionDir(t *testing.T) {
 	t.Parallel()
 
 	got := getPatchesPath("https://example.com/patches/", "9.4.8049.0")
-	want := "https://example.com/patches/9.4.8049.0"
+	want := "https://example.com/patches/9.4.8049.0/"
 	if got != want {
 		t.Fatalf("unexpected primary path: got %q want %q", got, want)
 	}
 
 	fallback := getPatchesFallbackPath("https://example.com/patches/", "9.4.8049.0")
-	wantFallback := "https://example.com/patches/9.4.8049.0/Patches"
+	wantFallback := "https://example.com/patches/9.4.8049.0/Patches/"
 	if fallback != wantFallback {
 		t.Fatalf("unexpected fallback path: got %q want %q", fallback, wantFallback)
 	}
@@ -29,11 +29,11 @@ func TestFindPatchesUsesPrimaryDirWhenArchivesExist(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/patches/9.4.8049.0":
+		case "/patches/9.4.8049.0/":
 			_, _ = fmt.Fprint(w, `<a href="front-build%20101).7z">front-build 101).7z</a>`)
 		case "/patches/9.4.8049.0/front-build 101).txt":
 			_, _ = fmt.Fprint(w, "Front.dll\n\n0123456789012345678901234567890123456789 RMS-101 fixed: test")
-		case "/patches/9.4.8049.0/Patches":
+		case "/patches/9.4.8049.0/Patches/":
 			t.Fatalf("fallback path should not be requested when primary has archives")
 		default:
 			http.NotFound(w, r)
@@ -61,9 +61,9 @@ func TestFindPatchesFallsBackToPatchesDirWhenPrimaryContainsOnlyFolder(t *testin
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/patches/9.4.8049.0":
+		case "/patches/9.4.8049.0/":
 			_, _ = fmt.Fprint(w, `<a href="Patches/">Patches/</a>`)
-		case "/patches/9.4.8049.0/Patches":
+		case "/patches/9.4.8049.0/Patches/":
 			_, _ = fmt.Fprint(w, `<a href="front-build%20202).zip">front-build 202).zip</a>`)
 		case "/patches/9.4.8049.0/Patches/front-build 202).txt":
 			_, _ = fmt.Fprint(w, "Front.dll\n\n0123456789012345678901234567890123456789 RMS-202 fixed: fallback")

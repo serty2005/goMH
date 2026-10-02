@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"golang.org/x/net/html"
 	"golang.org/x/text/encoding/charmap"
 )
 
@@ -25,9 +27,12 @@ import (
 func FindPatches(baseURL, version string) ([]core.PatchInfo, error) {
 	fullVersion, err := getFullVersionString(version)
 	if err != nil {
-		if regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`).MatchString(version) {
+		switch {
+		case regexp.MustCompile(`^\d+\.\d+\.\d+\.\d+$`).MatchString(version):
 			fullVersion = version
-		} else {
+		case regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(version):
+			fullVersion = version + ".0"
+		default:
 			return nil, err
 		}
 	}
@@ -299,11 +304,12 @@ func getFullVersionString(short string) (string, error) {
 }
 
 func getPatchesPath(baseURL, version string) string {
-	return fmt.Sprintf("%s/%s", strings.TrimRight(baseURL, "/"), version)
+	// Слеш предотвращает перенаправление rapid.iiko.ru на внутренний HTTP-порт.
+	return fmt.Sprintf("%s/%s/", strings.TrimRight(baseURL, "/"), version)
 }
 
 func getPatchesFallbackPath(baseURL, version string) string {
-	return fmt.Sprintf("%s/Patches", getPatchesPath(baseURL, version))
+	return fmt.Sprintf("%sPatches/", getPatchesPath(baseURL, version))
 }
 
 func fetchPatchesFromURL(targetURL string) ([]core.PatchInfo, bool, error) {
@@ -323,7 +329,7 @@ func fetchPatchesFromURL(targetURL string) ([]core.PatchInfo, bool, error) {
 		return nil, false, err
 	}
 
-	foundPatches, hasPatchesDirOnly := parsePatchesHTML(targetURL, string(body))
+	foundPatches, hasPatchesDirOnly := parsePatchesHTML(resp.Request.URL.String(), string(body))
 	return foundPatches, hasPatchesDirOnly, nil
 }
 
@@ -466,36 +472,72 @@ func normalizePatchFixLine(line string) string {
 }
 
 func parsePatchesHTML(targetURL, body string) ([]core.PatchInfo, bool) {
-	linkRegex := regexp.MustCompile(`<a href=\"([^\"]+)\"`)
-	buildRegex := regexp.MustCompile(`build(?:[\s_]|%20)(\d+)\)`)
+	directoryURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, false
+	}
+	// Без завершающего слеша ResolveReference заменит каталог версии именем файла.
+	directoryURL.Path = strings.TrimRight(directoryURL.Path, "/") + "/"
+	if directoryURL.RawPath != "" {
+		directoryURL.RawPath = strings.TrimRight(directoryURL.RawPath, "/") + "/"
+	}
+	buildRegex := regexp.MustCompile(`(?i)build[\s_]+(\d+)\)`)
 
 	var foundPatches []core.PatchInfo
 	hasPatchesDirLink := false
 
-	for _, match := range linkRegex.FindAllStringSubmatch(body, -1) {
-		encodedFileName := match[1]
-		lowerName := strings.ToLower(encodedFileName)
+	tokenizer := html.NewTokenizer(strings.NewReader(body))
+	for tokenType := tokenizer.Next(); tokenType != html.ErrorToken; tokenType = tokenizer.Next() {
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		if token.Data != "a" {
+			continue
+		}
+		var href string
+		for _, attr := range token.Attr {
+			if attr.Key == "href" {
+				href = strings.TrimSpace(attr.Val)
+				break
+			}
+		}
+		if href == "" {
+			continue
+		}
+		linkURL, err := url.Parse(href)
+		if err != nil {
+			continue
+		}
+		// URL.Path уже декодирован, включая скобки %28/%29; '+' остаётся частью имени.
+		fileName := path.Base(linkURL.Path)
+		lowerName := strings.ToLower(fileName)
 
-		if strings.TrimSuffix(strings.Trim(lowerName, "/"), "/") == "patches" {
+		if strings.EqualFold(path.Base(strings.TrimRight(linkURL.Path, "/")), "patches") {
 			hasPatchesDirLink = true
 		}
 
+		if strings.HasSuffix(linkURL.Path, "/") {
+			continue
+		}
 		if !(strings.HasSuffix(lowerName, ".7z") || strings.HasSuffix(lowerName, ".zip")) {
 			continue
 		}
-		buildMatches := buildRegex.FindStringSubmatch(encodedFileName)
+		buildMatches := buildRegex.FindStringSubmatch(fileName)
 		if len(buildMatches) < 2 {
 			continue
 		}
-		buildNumber, _ := strconv.Atoi(buildMatches[1])
-		firstWord := strings.Split(encodedFileName, "-")[0]
+		buildNumber, err := strconv.Atoi(buildMatches[1])
+		if err != nil {
+			continue
+		}
+		firstWord, _, _ := strings.Cut(fileName, "-")
 		shortName := fmt.Sprintf("%s-%d", firstWord, buildNumber)
-		decodedFileName, _ := url.QueryUnescape(encodedFileName)
-		fullURL, _ := url.JoinPath(targetURL, encodedFileName)
+		fullURL := directoryURL.ResolveReference(linkURL).String()
 
 		foundPatches = append(foundPatches, core.PatchInfo{
 			ShortName:   shortName,
-			Description: decodedFileName,
+			Description: fileName,
 			FullURL:     fullURL,
 			BuildNumber: buildNumber,
 		})
