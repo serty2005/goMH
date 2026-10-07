@@ -16,9 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
-
-	"golang.org/x/net/html"
 )
 
 // Constants
@@ -35,6 +32,12 @@ const (
 
 var (
 	apiVersionRe        = regexp.MustCompile(`(V\d+(?:Preview\d+)?)`)
+	rapidArchiveAPIRe   = regexp.MustCompile(`(?:^|[.-])(V\d+(?:Preview\d+|\.Legacy\.\d+\.\d+)?)(?:[.-]|$)`)
+	rapidAPIDirectoryRe = regexp.MustCompile(`^V\d+(?:Preview\d+|\.Legacy\.\d+\.\d+)?$`)
+	rapidLegacyAPIDirRe = regexp.MustCompile(`(?i)^v(\d+)-api$`)
+	rapidArchiveNameRe  = regexp.MustCompile(`^(.+?)[._-](\d+(?:\.\d+)+(?:[-_].*)?)$`)
+	rapidArchiveBuildRe = regexp.MustCompile(`(?:-g[0-9a-f]+|-\d{4}\.\d{2}\.\d{2})$`)
+	pluginPrereleaseRe  = regexp.MustCompile(`(?i)-(?:alpha|beta|rc)(?:[.+-]|\d|$)`)
 	ftpArchiveVersionRe = regexp.MustCompile(`^(\d+(?:\.\d+){1,})(?:-\d{4}\.\d{2}\.\d{2})?$`)
 	ftpArchiveNameRe    = regexp.MustCompile(`^(.+?)[.-](\d+(?:\.\d+){1,})(?:-\d{4}\.\d{2}\.\d{2})?$`)
 )
@@ -566,134 +569,6 @@ func loadRapidPluginsWithProgress(ctx context.Context, report func(RapidScanProg
 	return plugins, nil
 }
 
-func scanPluginZipFiles(ctx context.Context, startURL string, depthLimit int, report func(RapidScanProgress)) ([]string, error) {
-	type queueItem struct {
-		url   string
-		depth int
-	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	queue := []queueItem{{url: startURL, depth: 0}}
-	visited := map[string]struct{}{}
-	discovered := map[string]struct{}{startURL: {}}
-	zipSet := map[string]struct{}{}
-	totalPages := 1
-	processedPages := 0
-
-	for len(queue) > 0 {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		item := queue[0]
-		queue = queue[1:]
-
-		if item.depth > depthLimit {
-			continue
-		}
-		if _, ok := visited[item.url]; ok {
-			continue
-		}
-		visited[item.url] = struct{}{}
-		processedPages++
-		tui.InfoF("Парсинг плагинов: страница %d/%d -> %s", processedPages, totalPages, item.url)
-
-		dirs, zips, err := readDirectoryListing(client, item.url)
-		if err != nil {
-			slog.Warn("Не удалось прочитать каталог плагинов", "url", item.url, "error", err)
-			continue
-		}
-		for _, zipURL := range zips {
-			zipSet[zipURL] = struct{}{}
-		}
-		for _, dirURL := range dirs {
-			if _, ok := discovered[dirURL]; ok {
-				continue
-			}
-			discovered[dirURL] = struct{}{}
-			totalPages++
-			queue = append(queue, queueItem{url: dirURL, depth: item.depth + 1})
-		}
-	}
-
-	if len(zipSet) == 0 {
-		return nil, fmt.Errorf("не найдено ни одного zip-плагина по адресу %s", startURL)
-	}
-
-	zips := make([]string, 0, len(zipSet))
-	for zipURL := range zipSet {
-		zips = append(zips, zipURL)
-	}
-	sort.Strings(zips)
-	return zips, nil
-}
-
-func scanPluginZipFilesWithProgress(ctx context.Context, startURL string, depthLimit int, report func(RapidScanProgress)) ([]string, error) {
-	type queueItem struct {
-		url   string
-		depth int
-	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	queue := []queueItem{{url: startURL, depth: 0}}
-	visited := map[string]struct{}{}
-	discovered := map[string]struct{}{startURL: {}}
-	zipSet := map[string]struct{}{}
-	totalPages := 1
-	processedPages := 0
-
-	for len(queue) > 0 {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		item := queue[0]
-		queue = queue[1:]
-
-		if item.depth > depthLimit {
-			continue
-		}
-		if _, ok := visited[item.url]; ok {
-			continue
-		}
-
-		visited[item.url] = struct{}{}
-		processedPages++
-
-		dirs, zips, err := readDirectoryListing(client, item.url)
-		if err != nil {
-			reportRapidScanProgress(report, processedPages, totalPages, item.url)
-			slog.Warn("Не удалось прочитать каталог плагинов", "url", item.url, "error", err)
-			continue
-		}
-
-		for _, zipURL := range zips {
-			zipSet[zipURL] = struct{}{}
-		}
-		for _, dirURL := range dirs {
-			if _, ok := discovered[dirURL]; ok {
-				continue
-			}
-			discovered[dirURL] = struct{}{}
-			totalPages++
-			queue = append(queue, queueItem{url: dirURL, depth: item.depth + 1})
-		}
-
-		reportRapidScanProgress(report, processedPages, totalPages, item.url)
-	}
-
-	if len(zipSet) == 0 {
-		return nil, fmt.Errorf("не найдено ни одного zip-плагина по адресу %s", startURL)
-	}
-
-	zips := make([]string, 0, len(zipSet))
-	for zipURL := range zipSet {
-		zips = append(zips, zipURL)
-	}
-	sort.Strings(zips)
-	return zips, nil
-}
-
 func reportRapidScanProgress(report func(RapidScanProgress), processedPages int, totalPages int, pageURL string) {
 	if report == nil {
 		return
@@ -747,97 +622,12 @@ func logTaskWarn(ctx core.TaskContext, format string, args ...any) {
 	tui.Warn(msg)
 }
 
-func readDirectoryListing(client *http.Client, pageURL string) ([]string, []string, error) {
-	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	req.Header.Set("User-Agent", "goMH/1.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	var dirs []string
-	var zips []string
-	root, err := html.Parse(resp.Body)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "a") {
-			href := ""
-			for _, attr := range n.Attr {
-				if strings.EqualFold(attr.Key, "href") {
-					href = strings.TrimSpace(attr.Val)
-					break
-				}
-			}
-
-			label := strings.ToLower(strings.TrimSpace(nodeText(n)))
-			if href != "" && label != "parent directory" {
-				fullURL, err := resolveURL(pageURL, href)
-				if err == nil {
-					if strings.HasSuffix(href, "/") {
-						dirs = append(dirs, fullURL)
-					} else if strings.HasSuffix(strings.ToLower(href), ".zip") {
-						zips = append(zips, fullURL)
-					}
-				}
-			}
-		}
-
-		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-		}
-	}
-	walk(root)
-
-	return dirs, zips, nil
-}
-
-func nodeText(n *html.Node) string {
-	if n == nil {
-		return ""
-	}
-
-	var b strings.Builder
-	var walk func(*html.Node)
-	walk = func(node *html.Node) {
-		if node.Type == html.TextNode {
-			b.WriteString(node.Data)
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-		}
-	}
-	walk(n)
-	return b.String()
-}
-
-func resolveURL(base, href string) (string, error) {
-	baseURL, err := url.Parse(base)
-	if err != nil {
-		return "", err
-	}
-	parsedHref, err := url.Parse(href)
-	if err != nil {
-		return "", err
-	}
-	return baseURL.ResolveReference(parsedHref).String(), nil
-}
-
 func parsePluginFromZipURL(zipURL string) (Plugin, bool) {
 	parsed, err := url.Parse(zipURL)
 	if err != nil {
+		return Plugin{}, false
+	}
+	if strings.HasSuffix(parsed.Path, "/") {
 		return Plugin{}, false
 	}
 
@@ -845,20 +635,33 @@ func parsePluginFromZipURL(zipURL string) (Plugin, bool) {
 	if !strings.HasSuffix(strings.ToLower(filename), ".zip") {
 		return Plugin{}, false
 	}
-	if !strings.HasPrefix(filename, "Resto.Front.Api.") {
-		return Plugin{}, false
+	baseName := strings.TrimSuffix(filename, filepath.Ext(filename))
+	name := normalizePluginName(baseName)
+	apiVersion, pluginVersion := "", ""
+	if match := rapidArchiveAPIRe.FindStringSubmatchIndex(baseName); len(match) == 4 {
+		apiVersion = baseName[match[2]:match[3]]
+		name = normalizePluginName(baseName[:match[2]])
+		pluginVersion = strings.TrimLeft(baseName[match[3]:], ".-")
+	} else if match := rapidArchiveNameRe.FindStringSubmatch(baseName); len(match) == 3 {
+		name = normalizePluginName(match[1])
+		pluginVersion = match[2]
 	}
-
-	core := strings.TrimSuffix(strings.TrimPrefix(filename, "Resto.Front.Api."), ".zip")
-	match := apiVersionRe.FindStringSubmatchIndex(core)
-	if len(match) < 4 {
-		return Plugin{}, false
+	pluginVersion = rapidArchiveBuildRe.ReplaceAllString(pluginVersion, "")
+	if apiVersion == "" {
+		// Старые архивы Rapid указывают версию API только в имени каталога.
+		parents := strings.Split(strings.TrimSuffix(parsed.Path, "/"+filename), "/")
+		for i := len(parents) - 1; i >= 0; i-- {
+			if rapidAPIDirectoryRe.MatchString(parents[i]) {
+				apiVersion = parents[i]
+				break
+			}
+			if match := rapidLegacyAPIDirRe.FindStringSubmatch(parents[i]); len(match) == 2 {
+				apiVersion = "V" + match[1]
+				break
+			}
+		}
 	}
-
-	apiVersion := core[match[2]:match[3]]
-	name := strings.TrimRight(core[:match[0]], ".")
-	pluginVersion := strings.TrimLeft(core[match[1]:], ".")
-	if name == "" {
+	if name == "" || (apiVersion == "" && pluginVersion == "") {
 		return Plugin{}, false
 	}
 
@@ -924,8 +727,10 @@ func normalizeVersion(version string) string {
 }
 
 func compareSemanticVersions(v1, v2 string) int {
-	p1 := strings.Split(v1, ".")
-	p2 := strings.Split(v2, ".")
+	base1, prerelease1, hasPrerelease1 := strings.Cut(v1, "-")
+	base2, prerelease2, hasPrerelease2 := strings.Cut(v2, "-")
+	p1 := strings.Split(base1, ".")
+	p2 := strings.Split(base2, ".")
 	maxLen := len(p1)
 	if len(p2) > maxLen {
 		maxLen = len(p2)
@@ -944,6 +749,47 @@ func compareSemanticVersions(v1, v2 string) int {
 		if n1 < n2 {
 			return -1
 		}
+	}
+	if !hasPrerelease1 && !hasPrerelease2 {
+		return 0
+	}
+	if !hasPrerelease1 {
+		return 1
+	}
+	if !hasPrerelease2 {
+		return -1
+	}
+	return comparePrereleaseVersions(prerelease1, prerelease2)
+}
+
+func comparePrereleaseVersions(v1, v2 string) int {
+	p1, p2 := strings.Split(v1, "."), strings.Split(v2, ".")
+	for i := range min(len(p1), len(p2)) {
+		n1, err1 := strconv.Atoi(p1[i])
+		n2, err2 := strconv.Atoi(p2[i])
+		switch {
+		case err1 == nil && err2 == nil:
+			if n1 > n2 {
+				return 1
+			}
+			if n1 < n2 {
+				return -1
+			}
+		case err1 == nil:
+			return -1
+		case err2 == nil:
+			return 1
+		default:
+			if comparison := strings.Compare(p1[i], p2[i]); comparison != 0 {
+				return comparison
+			}
+		}
+	}
+	if len(p1) > len(p2) {
+		return 1
+	}
+	if len(p1) < len(p2) {
+		return -1
 	}
 	return 0
 }
@@ -1098,7 +944,7 @@ func selectBestPluginVersion(versions []Plugin) *Plugin {
 	// Ищем стабильную
 	var stable *Plugin
 	for i := range versions {
-		if !strings.Contains(strings.ToLower(versions[i].ApiVersion), "preview") {
+		if !strings.Contains(strings.ToLower(versions[i].ApiVersion), "preview") && !pluginPrereleaseRe.MatchString(versions[i].PluginVersion) {
 			if stable == nil || compareSemanticVersions(versions[i].PluginVersion, stable.PluginVersion) > 0 {
 				v := versions[i]
 				stable = &v

@@ -26,6 +26,8 @@ const ftpDirectoryScheme = "ftpdir"
 
 const livePluginsCacheSource = "cache"
 
+const livePluginsCatalogVersion = 1
+
 const defaultIikoFrontDir = `C:\Program Files\iiko\iikoRMS\Front.Net`
 
 const legacyIikoFrontExecutableName = "iikoFront.Net.exe"
@@ -37,9 +39,10 @@ const modernIikoFrontExecutableMinVersion = "9.5.0.0"
 const ftpPluginFileIdleTimeout = 2 * time.Minute
 
 type livePluginsCache struct {
-	FrontVersion string    `json:"front_version"`
-	SavedAt      time.Time `json:"saved_at"`
-	Plugins      []Plugin  `json:"plugins"`
+	CatalogVersion int       `json:"catalog_version"`
+	FrontVersion   string    `json:"front_version"`
+	SavedAt        time.Time `json:"saved_at"`
+	Plugins        []Plugin  `json:"plugins"`
 }
 
 func LoadLivePlugins(frontVersion string) ([]Plugin, error) {
@@ -47,29 +50,63 @@ func LoadLivePlugins(frontVersion string) ([]Plugin, error) {
 }
 
 func LoadCachedLivePluginsWithProgress(ctx context.Context, rootPath, frontVersion string, report func(RapidScanProgress)) ([]Plugin, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	cachePath := livePluginsCachePath(rootPath, frontVersion)
 	if plugins, err := readLivePluginsCache(cachePath, frontVersion); err == nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		slog.Info("Используем локальный кэш live-плагинов", "path", cachePath, "front_version", frontVersion, "count", len(plugins))
 		reportPluginScanProgress(report, livePluginsCacheSource, 1, 1, cachePath)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return plugins, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		slog.Warn("Не удалось прочитать локальный кэш live-плагинов, выполняем сетевой парсинг", "path", cachePath, "error", err)
 	}
 
-	plugins, err := LoadLivePluginsWithProgress(ctx, frontVersion, report)
+	plugins, complete, err := loadLivePluginsWithProgress(ctx, frontVersion, report)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeLivePluginsCache(cachePath, frontVersion, plugins); err != nil {
-		slog.Warn("Не удалось сохранить локальный кэш live-плагинов", "path", cachePath, "error", err)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if complete {
+		if err := writeLivePluginsCache(cachePath, frontVersion, plugins); err != nil {
+			slog.Warn("Не удалось сохранить локальный кэш live-плагинов", "path", cachePath, "error", err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return plugins, nil
 }
 
 func LoadLivePluginsWithProgress(ctx context.Context, frontVersion string, report func(RapidScanProgress)) ([]Plugin, error) {
-	rapidPlugins, rapidErr := loadRapidPluginsWithProgress(ctx, reportRapidSource(report))
-	ftpPlugins, ftpErr := loadFTPPluginsWithProgress(ctx, frontVersion, report)
+	plugins, _, err := loadLivePluginsWithProgress(ctx, frontVersion, report)
+	return plugins, err
+}
 
+func loadLivePluginsWithProgress(ctx context.Context, frontVersion string, report func(RapidScanProgress)) ([]Plugin, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	rapidPlugins, rapidErr := loadRapidPluginsWithProgress(ctx, reportRapidSource(report))
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	ftpPlugins, ftpErr := loadFTPPluginsWithProgress(ctx, frontVersion, report)
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return resolveLivePluginSources(rapidPlugins, rapidErr, ftpPlugins, ftpErr)
+}
+
+func resolveLivePluginSources(rapidPlugins []Plugin, rapidErr error, ftpPlugins []Plugin, ftpErr error) ([]Plugin, bool, error) {
 	switch {
 	case rapidErr == nil && ftpErr == nil:
 	case rapidErr == nil:
@@ -77,14 +114,14 @@ func LoadLivePluginsWithProgress(ctx context.Context, frontVersion string, repor
 	case ftpErr == nil:
 		slog.Warn("Rapid-источник плагинов недоступен, продолжаем с FTP", "error", rapidErr)
 	default:
-		return nil, fmt.Errorf("не удалось получить список плагинов: rapid: %w; ftp: %w", rapidErr, ftpErr)
+		return nil, false, fmt.Errorf("не удалось получить список плагинов: rapid: %w; ftp: %w", rapidErr, ftpErr)
 	}
 
 	plugins := mergePluginsPreferPrimary(rapidPlugins, ftpPlugins)
 	if len(plugins) == 0 {
-		return nil, fmt.Errorf("не удалось получить список плагинов из доступных источников")
+		return nil, false, fmt.Errorf("не удалось получить список плагинов из доступных источников")
 	}
-	return plugins, nil
+	return plugins, rapidErr == nil && ftpErr == nil, nil
 }
 
 func GetIikoFrontVersions(wu core.WinUtils) (string, string, error) {
@@ -243,6 +280,10 @@ func mergePluginsPreferPrimary(primary, fallback []Plugin) []Plugin {
 	merged := append([]Plugin(nil), primary...)
 	seen := make(map[string]struct{}, len(primary))
 	for _, plugin := range primary {
+		// Архив Rapid без API не заменяет FTP-сборку с подтверждённой версией Front.
+		if plugin.Source == PluginSourceRapid && plugin.ApiVersion == "" {
+			continue
+		}
 		seen[pluginIdentityKey(plugin)] = struct{}{}
 	}
 	for _, plugin := range fallback {
@@ -274,6 +315,9 @@ func reportRapidSource(report func(RapidScanProgress)) func(RapidScanProgress) {
 }
 
 func loadFTPPluginsWithProgress(ctx context.Context, frontVersion string, report func(RapidScanProgress)) ([]Plugin, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	frontVersion = strings.TrimSpace(frontVersion)
 	if frontVersion == "" {
 		return nil, fmt.Errorf("full iikoFront version is required for FTP plugin source")
@@ -284,6 +328,9 @@ func loadFTPPluginsWithProgress(ctx context.Context, frontVersion string, report
 		return nil, err
 	}
 	defer conn.Quit()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	frontPath := officialIikoPluginsFrontPath(frontVersion)
 	entries, err := conn.List(frontPath)
@@ -721,6 +768,9 @@ func readLivePluginsCache(cachePath, frontVersion string) ([]Plugin, error) {
 	if err := json.Unmarshal(data, &cache); err != nil {
 		return nil, err
 	}
+	if cache.CatalogVersion != livePluginsCatalogVersion {
+		return nil, fmt.Errorf("cache catalog version mismatch: %d != %d", cache.CatalogVersion, livePluginsCatalogVersion)
+	}
 	if cache.FrontVersion != frontVersion {
 		return nil, fmt.Errorf("cache front version mismatch: %q != %q", cache.FrontVersion, frontVersion)
 	}
@@ -736,9 +786,10 @@ func writeLivePluginsCache(cachePath, frontVersion string, plugins []Plugin) err
 	}
 
 	cache := livePluginsCache{
-		FrontVersion: frontVersion,
-		SavedAt:      time.Now(),
-		Plugins:      plugins,
+		CatalogVersion: livePluginsCatalogVersion,
+		FrontVersion:   frontVersion,
+		SavedAt:        time.Now(),
+		Plugins:        plugins,
 	}
 	data, err := json.Marshal(cache)
 	if err != nil {
