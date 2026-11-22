@@ -192,6 +192,7 @@ type WinUtils interface {
 	StartDetachedProcess(name string, args ...string) error
 	StartDetachedProcessInDir(name string, workingDir string, args ...string) error
 	ServiceExists(serviceName string) (bool, error)
+	RemoveServiceWithProcesses(ctx context.Context, serviceName string, processNames ...string) error
 	AddDefenderExclusion(path string) error
 	SetServiceTriggers(serviceName string, triggers []string) error
 	Is64BitOS() bool

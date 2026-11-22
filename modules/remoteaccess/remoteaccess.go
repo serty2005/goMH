@@ -87,6 +87,7 @@ const (
 	rustDeskLatestReleaseURL = "https://github.com/rustdesk/rustdesk/releases/latest"
 	rustDeskInstallArg       = "--silent-install"
 	rustDeskExePath          = `C:\Program Files\RustDesk\rustdesk.exe`
+	posRelaydServiceName     = "MH_POSRelayd"
 )
 
 // RemoteAccessConfig хранит выбор пользователя
@@ -153,7 +154,7 @@ func (m *Module) Configure(ctx core.TaskContext, am core.AssetManager, wu core.W
 	tvInstalled, _ := wu.ServiceExists("TeamViewer")
 	lmInstalled, _ := wu.ServiceExists("ROMService")
 	rustDeskInstalled := isRustDeskInstalled()
-	posrelaydInstalled, _ := wu.ServiceExists("MH_POSRelayd")
+	posrelaydInstalled, _ := wu.ServiceExists(posRelaydServiceName)
 
 	items := []tui.ChoiceItem{
 		{
@@ -388,28 +389,27 @@ func startRustDeskInstaller(installerPath string, wu core.WinUtils) error {
 func (m *Module) installPOSRelayd(ctx core.TaskContext, am core.AssetManager, wu core.WinUtils) error {
 	slog.Info("Начало установки POSRelayd")
 	const assetName = "POSRelayd_Agent"
-	const serviceName = "MH_POSRelayd"
-	installDir := filepath.Join(am.Cfg().RootPath, "POSRelayd")
+	rootPath := am.Cfg().RootPath
+	installDir := filepath.Join(rootPath, "POSRelayd")
 
-	// cleanup legacy getad artifacts before install
-	m.cleanupLegacyGetad(ctx, am, wu)
+	ctx.Info("Скачивание POSRelayd...")
+	cachePath, err := am.DownloadToCache(assetName)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Context().Err(); err != nil {
+		return err
+	}
 
-	// 1. Очистка старого
-	ctx.Info("Поиск и удаление старых версий...")
-	oldExePath, err := wu.FindFileRecursive(am.Cfg().RootPath, "posrelayd*.exe")
-	if err == nil {
+	ctx.Info("Поиск старой версии POSRelayd...")
+	oldExePath, findErr := wu.FindFileRecursive(rootPath, "posrelayd*.exe")
+	if findErr == nil {
 		slog.Info("Найдена старая версия", "path", oldExePath)
-		if exists, _ := wu.ServiceExists(serviceName); exists {
-			ctx.Info("Остановка службы...")
-			_, _ = wu.RunCommand(oldExePath, "stop")
-			time.Sleep(2 * time.Second)
-			_, _ = wu.RunCommand(oldExePath, "remove")
-		}
 
 		// Очистка автозагрузки
-		userStartup, commonStartup, _ := wu.GetStartupFolders()
-		for _, dir := range []string{userStartup, commonStartup} {
-			if matches, _ := filepath.Glob(filepath.Join(dir, "posrelayd*.lnk")); len(matches) > 0 {
+		if userStartup, commonStartup, err := wu.GetStartupFolders(); err == nil {
+			for _, dir := range []string{userStartup, commonStartup} {
+				matches, _ := filepath.Glob(filepath.Join(dir, "posrelayd*.lnk"))
 				for _, match := range matches {
 					_ = os.Remove(match)
 				}
@@ -421,33 +421,43 @@ func (m *Module) installPOSRelayd(ctx core.TaskContext, am core.AssetManager, wu
 		if taskName != "" {
 			_ = wu.DeleteScheduledTaskByName(taskName)
 		}
+	}
 
-		// Очистка папки
+	ctx.Info("Удаление старой службы и завершение процессов POSRelayd...")
+	if err := wu.RemoveServiceWithProcesses(ctx.Context(), posRelaydServiceName,
+		"prrd.exe", "prcbh.exe", "mhupdater.exe", "posrelaydsc.exe"); err != nil {
+		return err
+	}
+	m.cleanupLegacyGetad(ctx, am, wu)
+
+	if findErr == nil {
 		oldDir := filepath.Dir(oldExePath)
-		if !strings.EqualFold(oldDir, am.Cfg().RootPath) {
-			_ = wu.CleanDirectory(oldDir)
+		if !strings.EqualFold(oldDir, filepath.Clean(rootPath)) && !strings.EqualFold(oldDir, installDir) {
+			if err := wu.CleanDirectory(oldDir); err != nil {
+				return fmt.Errorf("не удалось очистить старый каталог POSRelayd %s: %w", oldDir, err)
+			}
 		}
 	}
 
-	_ = wu.CleanDirectory(installDir)
-	_ = os.MkdirAll(installDir, 0755)
+	if err := wu.CleanDirectory(installDir); err != nil {
+		return fmt.Errorf("не удалось очистить каталог POSRelayd %s: %w", installDir, err)
+	}
+	if err := os.MkdirAll(installDir, 0755); err != nil {
+		return fmt.Errorf("не удалось создать каталог POSRelayd: %w", err)
+	}
 
 	// 2. Установка нового
 	ctx.Info("Добавление исключения в Defender...")
 	_ = wu.AddDefenderExclusion(installDir)
 
-	ctx.Info("Скачивание и распаковка...")
-	cachePath, err := am.DownloadToCache(assetName)
-	if err != nil {
-		return err
-	}
+	ctx.Info("Распаковка POSRelayd...")
 	if err := am.UnpackToFlatDir(assetName, cachePath, installDir); err != nil {
-		return err
+		return fmt.Errorf("не удалось распаковать POSRelayd: %w", err)
 	}
 
 	serviceExe := filepath.Join(installDir, "posrelaydsc.exe")
-	if _, err := os.Stat(serviceExe); os.IsNotExist(err) {
-		return fmt.Errorf("файл %s не найден", serviceExe)
+	if _, err := os.Stat(serviceExe); err != nil {
+		return fmt.Errorf("не удалось открыть файл службы POSRelayd: %w", err)
 	}
 
 	ctx.Info("Регистрация службы...")
@@ -459,10 +469,10 @@ func (m *Module) installPOSRelayd(ctx core.TaskContext, am core.AssetManager, wu
 	}
 
 	ctx.Info("Настройка триггеров...")
-	_ = wu.SetServiceTriggers(serviceName, []string{"start/machinepolicy", "start/userpolicy"})
+	_ = wu.SetServiceTriggers(posRelaydServiceName, []string{"start/machinepolicy", "start/userpolicy"})
 
 	time.Sleep(3 * time.Second)
-	status, _ := wu.GetServiceStatus(serviceName)
+	status, _ := wu.GetServiceStatus(posRelaydServiceName)
 	if status == "RUNNING" {
 		ctx.Success("Служба POSRelayd успешно запущена.")
 	} else {

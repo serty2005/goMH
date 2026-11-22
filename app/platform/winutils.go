@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"context"
 	"goMH/core"
 	"goMH/winutils"
 	"io"
@@ -57,6 +58,10 @@ func (rw *RealWinUtils) StartDetachedProcessInDir(name string, workingDir string
 
 func (rw *RealWinUtils) ServiceExists(serviceName string) (bool, error) {
 	return winutils.ServiceExists(serviceName)
+}
+
+func (rw *RealWinUtils) RemoveServiceWithProcesses(ctx context.Context, serviceName string, processNames ...string) error {
+	return winutils.RemoveServiceWithProcesses(ctx, serviceName, processNames...)
 }
 
 func (rw *RealWinUtils) AddDefenderExclusion(path string) error {
